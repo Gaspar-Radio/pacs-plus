@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.6.0
+// @version      1.6.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -60,7 +60,7 @@
         ['viewerRecolherSerieUnica', 'Visualizador: recolher painel quando o exame tem UMA série', 'Regra do antigo “AM2 - Recolher painel de série única” (qualquer modalidade)'],
         ['viewerRecolherUS', 'Visualizador: recolher painel sempre no ultrassom', 'Mesmo que o US tenha mais de uma série'],
         ['viewerRecolherTodos', 'Visualizador: recolher painel de séries em TODOS os exames', 'Inclui TC, RX etc.'],
-        ['slaUteis', 'Prazo (SLA) do TC eletivo em dias úteis', 'Recalcula o cronômetro da coluna Prazo pelos dias úteis (sem fim de semana e feriados de Santa Rita). O SLA de urgência não é alterado. Regras na aba ⏱ Prazos'],
+        ['slaUteis', 'Prazo (SLA) eletivo (TC e US) em dias úteis', 'Recalcula o cronômetro da coluna Prazo pelos dias úteis (sem fim de semana e feriados de Santa Rita). O SLA de urgência não é alterado. Regras na aba ⏱ Prazos'],
     ];
 
     const DEFAULT_OFF = ['ocultarRelatorios', 'ocultarSelecao', 'viewerRecolherTodos']; // começam desligados
@@ -68,7 +68,7 @@
 
     // Regras do prazo em dias úteis (aba ⏱ Prazos)
     const SLA_PADRAO = {
-        slas: 'TC ELETIVO',                 // descrição do(s) SLA(s) do PACS a recalcular (um por linha); urgência fica de fora
+        slas: 'TC ELETIVO\nUS ELETIVO',     // descrição do(s) SLA(s) do PACS a recalcular (um por linha); urgência fica de fora
         dias: 'CT = 5\nUS = 3',             // dias úteis por modalidade (sigla do PACS)
         hora: '07:00',                      // o laudo tem que estar pronto na abertura do dia útil final
         carnaval: true,                     // segunda e terça de Carnaval sem expediente
@@ -85,6 +85,12 @@
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
+        // v1.6.1: inclui o SLA eletivo do ultrassom em configurações já salvas (uma única vez)
+        if (!c.slaMigUS) {
+            const linhas = String(c.sla.slas || '').split('\n').map(l => l.trim().toUpperCase().replace(/\s+/g, ' ')).filter(Boolean);
+            if (!linhas.includes('US ELETIVO')) c.sla.slas = (String(c.sla.slas || '').trim() + '\nUS ELETIVO').trim();
+            c.slaMigUS = true;
+        }
         return c;
     }
     let cfg = loadCfg();
