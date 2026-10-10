@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.6.1
+// @version      1.7.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -60,6 +60,7 @@
         ['viewerRecolherSerieUnica', 'Visualizador: recolher painel quando o exame tem UMA série', 'Regra do antigo “AM2 - Recolher painel de série única” (qualquer modalidade)'],
         ['viewerRecolherUS', 'Visualizador: recolher painel sempre no ultrassom', 'Mesmo que o US tenha mais de uma série'],
         ['viewerRecolherTodos', 'Visualizador: recolher painel de séries em TODOS os exames', 'Inclui TC, RX etc.'],
+        ['slaUSProprio', 'Prazo próprio do ultrassom (sem SLA no PACS)', 'US marcado como REVISAR e não urgente ganha prazo de 3 dias úteis a partir da data do exame (vence 07:00), sem precisar confirmar. Só aparece nos computadores com o Plus'],
         ['slaUteis', 'Prazo (SLA) eletivo (TC e US) em dias úteis', 'Recalcula o cronômetro da coluna Prazo pelos dias úteis (sem fim de semana e feriados de Santa Rita). O SLA de urgência não é alterado. Regras na aba ⏱ Prazos'],
     ];
 
@@ -72,7 +73,8 @@
         dias: 'CT = 5\nUS = 3',             // dias úteis por modalidade (sigla do PACS)
         hora: '07:00',                      // o laudo tem que estar pronto na abertura do dia útil final
         carnaval: true,                     // segunda e terça de Carnaval sem expediente
-        extras: '24/05 | Aniversário de Santa Rita do Sapucaí'
+        extras: '24/05 | Aniversário de Santa Rita do Sapucaí',
+        usSituacoes: 'REVISAR'              // prazo próprio do US: situações que contam (uma por linha)
     };
 
     function loadCfg() {
@@ -686,6 +688,42 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         slaStat.ajustados = n;
         slaStat.ultimo = new Date();
     }
+    // Prazo próprio do US (v1.7): o PACS não tem SLA de ultrassom. Para US em REVISAR e NÃO urgente,
+    // cria em memória um "SLA" já confirmado com vencimento em dias úteis a partir de exa_data.
+    // A coluna Prazo nativa exige sla_count_prazo > 0 e sla.ultimoacao_tipo = CONFIRMADO.
+    // Nada é enviado ao servidor; a lista recarregada (GET exame) traz objetos novos sem o SLA falso.
+    const SLA_PROPRIO_DESC = 'US — prazo próprio (Plus, dias úteis)';
+    function aplicarSlaUSProprio() {
+        const comp = componenteLista();
+        if (!comp) return;
+        const regras = cfg.sla, ativo = on('slaUSProprio');
+        const nd = diasPorModalidade(regras).US || 3;
+        const situacoes = String(regras.usSituacoes || 'REVISAR').split('\n').map(x => x.trim().toUpperCase()).filter(Boolean);
+        comp.exames.forEach(ex => {
+            if (!ex) return;
+            const mod = String(ex.tipoexame && ex.tipoexame.modalidade && ex.tipoexame.modalidade.mod_sigla || '').toUpperCase();
+            const proprio = ex.sla && ex.sla.__ppProprio;
+            const cabe = ativo && mod === 'US' && !ex.exa_idnurgente && situacoes.includes(String(ex.exa_situacao || '').toUpperCase());
+            if (!cabe) {
+                if (proprio) { comp.$set(ex, 'sla', undefined); comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0); }
+                return;
+            }
+            if (ex.sla && !proprio) return; // já tem SLA do PACS: não mexe
+            if (!proprio) {
+                const venc = prazoDiasUteis(ex.exa_data, nd, regras);
+                if (!venc) return;
+                const total = Math.max(0, Math.round((venc.getTime() - new Date(String(ex.exa_data).slice(0, 10) + 'T00:00:00').getTime()) / 1000));
+                ex.__ppCountOriginal = ex.sla_count_prazo || 0;
+                comp.$set(ex, 'sla_count_prazo', 1);
+                comp.$set(ex, 'sla', { __ppProprio: true, __ppUteis: true, ultimoacao_tipo: 'CONFIRMADO', sla_prazo_final: venc.toISOString(),
+                    sla_prazo: total, slas: [{ sla_codigo: 0, sla_descricao: SLA_PROPRIO_DESC, sla_prazo: nd * 24 }], slaTempoRestante: null });
+            }
+            // o cronômetro nativo só existe se a lista tiver SLA do PACS: atualiza aqui também
+            ex.sla.slaTempoRestante = Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000);
+        });
+    }
+    setInterval(() => { try { aplicarSlaUSProprio(); } catch (e) { console.warn('[PACS Plus] prazo próprio do US falhou', e); } }, 1000);
+
     setInterval(() => { try { aplicarSlaUteis(); } catch (e) { console.warn('[PACS Plus] prazo em dias úteis falhou', e); } }, 1000);
 
     // =====================================================================
