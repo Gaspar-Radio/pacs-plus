@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.7.1
+// @version      1.8.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -60,6 +60,8 @@
         ['viewerRecolherSerieUnica', 'Visualizador: recolher painel quando o exame tem UMA série', 'Regra do antigo “AM2 - Recolher painel de série única” (qualquer modalidade)'],
         ['viewerRecolherUS', 'Visualizador: recolher painel sempre no ultrassom', 'Mesmo que o US tenha mais de uma série'],
         ['viewerRecolherTodos', 'Visualizador: recolher painel de séries em TODOS os exames', 'Inclui TC, RX etc.'],
+        ['tcSoMeus', 'TC: prazo só nos exames seus', 'Relógio/cronômetro do TC só em REVISAR com “Necessita de laudo”, ou urgente com ficha dentro da sua escala (aba 🚨 Urgências). O resto (telelaudo) fica sem prazo'],
+        ['slaTCProprio', 'TC seu ainda sem confirmação: prazo próprio', 'TC eletivo em REVISAR que o PACS mostra “aguardando confirmação” ganha prazo de 5 dias úteis a partir da data do exame'],
         ['slaUSProprio', 'Prazo próprio do ultrassom (sem SLA no PACS)', 'US marcado como REVISAR e não urgente ganha prazo de 3 dias úteis a partir da data do exame (vence 07:00), sem precisar confirmar. Só aparece nos computadores com o Plus'],
         ['slaUteis', 'Prazo (SLA) eletivo (TC e US) em dias úteis', 'Recalcula o cronômetro da coluna Prazo pelos dias úteis (sem fim de semana e feriados de Santa Rita). O SLA de urgência não é alterado. Regras na aba ⏱ Prazos'],
     ];
@@ -74,7 +76,29 @@
         hora: '07:00',                      // o laudo tem que estar pronto na abertura do dia útil final
         carnaval: true,                     // segunda e terça de Carnaval sem expediente
         extras: '24/05 | Aniversário de Santa Rita do Sapucaí',
-        usSituacoes: 'REVISAR'              // prazo próprio do US: situações que contam (uma por linha)
+        usSituacoes: 'REVISAR',             // prazo próprio do US: situações que contam (uma por linha)
+        tcSituacoes: 'REVISAR'              // TC “seu” (prazo aparece): situações que contam
+    };
+
+    // Monitor de TC urgente (aba 🚨 Urgências) — cada computador tem a sua configuração
+    const URG_PADRAO = {
+        tela: false,                 // cartão + som + notificação do sistema neste computador
+        celular: false,              // este computador envia ao celular (ligar em UM só: o do hospital)
+        teste: false,                // modo teste: só pacientes TESTE, ignora escala e data
+        dias: '1,2,3,4,5',           // 0 = dom … 6 = sáb
+        inicio: '07:00', fim: '17:00',
+        modalidades: 'CT',
+        lembretes: '60,30,15',       // minutos antes do prazo
+        repetirVencido: 15, repetirVezes: 4,
+        horas: 2,                    // prazo da urgência (teto, e base do prazo provisório)
+        semConfirmacao: 15,          // avisa se o urgente não for confirmado em X min
+        encerra: 'LIBERADO',         // situações que encerram o acompanhamento
+        som: true, notifWindows: true,
+        ntfyServidor: 'https://ntfy.sh', ntfyTopico: '',
+        tgToken: '', tgChat: '',
+        poUser: '', poToken: '', poEmergencia: true,
+        pausaAte: '',                // AAAA-MM-DD
+        testeAte: 0                  // fim do modo teste (ms)
     };
 
     function loadCfg() {
@@ -87,6 +111,7 @@
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
+        c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
         // v1.6.1: inclui o SLA eletivo do ultrassom em configurações já salvas (uma única vez)
         if (!c.slaMigUS) {
             const linhas = String(c.sla.slas || '').split('\n').map(l => l.trim().toUpperCase().replace(/\s+/g, ' ')).filter(Boolean);
@@ -576,9 +601,9 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const obs = new MutationObserver(muts => {
         if (pend) return;
         // ignora mudanças feitas dentro do próprio painel do PACS Plus
-        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel'); })) return;
+        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel, #pp-urg'); })) return;
         pend = true;
-        setTimeout(() => { pend = false; applyDynamic(); }, 120);
+        setTimeout(() => { pend = false; applyDynamic(); aplicarPrazosLista(); }, 120);
     });
 
 
@@ -688,46 +713,661 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         slaStat.ajustados = n;
         slaStat.ultimo = new Date();
     }
-    // Prazo próprio do US (v1.7): o PACS não tem SLA de ultrassom. Para US em REVISAR e NÃO urgente,
-    // cria em memória um "SLA" já confirmado com vencimento em dias úteis a partir de exa_data.
-    // A coluna Prazo nativa exige sla_count_prazo > 0 e sla.ultimoacao_tipo = CONFIRMADO.
+    // ---- Prazo próprio (sem SLA no PACS / sem confirmação) — helpers comuns a US e TC ----
+    // A coluna Prazo nativa exige sla_count_prazo > 0 e sla.ultimoacao_tipo = CONFIRMADO/PENDENCIADO.
+    // Atenção: o PACS devolve sla = { slaTempoRestante: null } (ou {}) para exame SEM SLA, e
+    // sla_count_prazo em texto ("2"); SLA real é só quando sla.slas tem itens.
     // Nada é enviado ao servidor; a lista recarregada (GET exame) traz objetos novos sem o SLA falso.
     const SLA_PROPRIO_DESC = 'US — prazo próprio (Plus, dias úteis)';
+    const SLA_TC_DESC = 'TC — prazo próprio (Plus, dias úteis)';
+    function modDe(ex) { return String(ex && ex.tipoexame && ex.tipoexame.modalidade && ex.tipoexame.modalidade.mod_sigla || '').toUpperCase(); }
+    const listaSit = txt => String(txt || '').split(/[\n,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+    function slaRealDe(ex) { const s = ex && ex.sla; return !!(s && !s.__ppProprio && Array.isArray(s.slas) && s.slas.length > 0); }
+    function criarSlaProprio(comp, ex, nd, desc) {
+        const venc = prazoDiasUteis(ex.exa_data, nd, cfg.sla);
+        if (!venc) return false;
+        const total = Math.max(0, Math.round((venc.getTime() - new Date(String(ex.exa_data).slice(0, 10) + 'T00:00:00').getTime()) / 1000));
+        ex.__ppCountOriginal = ex.sla_count_prazo || 0;
+        ex.__ppSlaOriginal = ex.sla || null;
+        comp.$set(ex, 'sla_count_prazo', 1);
+        comp.$set(ex, 'sla', { __ppProprio: true, __ppUteis: true, ultimoacao_tipo: 'CONFIRMADO', sla_prazo_final: venc.toISOString(),
+            sla_prazo: total, slas: [{ sla_codigo: 0, sla_descricao: desc, sla_prazo: nd * 24 }], slaTempoRestante: null });
+        return true;
+    }
+    function restaurarSlaProprio(comp, ex) {
+        comp.$set(ex, 'sla', ex.__ppSlaOriginal || { slaTempoRestante: null });
+        comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0);
+    }
+    // o cronômetro nativo só existe se a lista tiver SLA do PACS: atualiza aqui também
+    function tickSlaProprio(ex) { ex.sla.slaTempoRestante = Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000); }
+
+    // Prazo próprio do US (v1.7): US em REVISAR e NÃO urgente → 3 dias úteis a partir de exa_data.
     function aplicarSlaUSProprio() {
         const comp = componenteLista();
         if (!comp) return;
         const regras = cfg.sla, ativo = on('slaUSProprio');
         const nd = diasPorModalidade(regras).US || 3;
-        const situacoes = String(regras.usSituacoes || 'REVISAR').split('\n').map(x => x.trim().toUpperCase()).filter(Boolean);
+        const situacoes = listaSit(regras.usSituacoes || 'REVISAR');
         comp.exames.forEach(ex => {
-            if (!ex) return;
-            const mod = String(ex.tipoexame && ex.tipoexame.modalidade && ex.tipoexame.modalidade.mod_sigla || '').toUpperCase();
+            if (!ex || modDe(ex) !== 'US') return;
             const proprio = ex.sla && ex.sla.__ppProprio;
-            const cabe = ativo && mod === 'US' && !ex.exa_idnurgente && situacoes.includes(String(ex.exa_situacao || '').toUpperCase());
-            if (!cabe) {
-                if (proprio) { comp.$set(ex, 'sla', ex.__ppSlaOriginal || { slaTempoRestante: null }); comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0); }
-                return;
-            }
-            // o PACS devolve sla = { slaTempoRestante: null } para exame SEM SLA; só conta como SLA real se tiver slas[]
-            const slaReal = ex.sla && !proprio && Array.isArray(ex.sla.slas) && ex.sla.slas.length > 0;
-            if (slaReal) return; // já tem SLA do PACS: não mexe
-            if (!proprio) {
-                const venc = prazoDiasUteis(ex.exa_data, nd, regras);
-                if (!venc) return;
-                const total = Math.max(0, Math.round((venc.getTime() - new Date(String(ex.exa_data).slice(0, 10) + 'T00:00:00').getTime()) / 1000));
-                ex.__ppCountOriginal = ex.sla_count_prazo || 0;
-                ex.__ppSlaOriginal = ex.sla || null;
-                comp.$set(ex, 'sla_count_prazo', 1);
-                comp.$set(ex, 'sla', { __ppProprio: true, __ppUteis: true, ultimoacao_tipo: 'CONFIRMADO', sla_prazo_final: venc.toISOString(),
-                    sla_prazo: total, slas: [{ sla_codigo: 0, sla_descricao: SLA_PROPRIO_DESC, sla_prazo: nd * 24 }], slaTempoRestante: null });
-            }
-            // o cronômetro nativo só existe se a lista tiver SLA do PACS: atualiza aqui também
-            ex.sla.slaTempoRestante = Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000);
+            const cabe = ativo && !ex.exa_idnurgente && situacoes.includes(String(ex.exa_situacao || '').toUpperCase());
+            if (!cabe) { if (proprio) restaurarSlaProprio(comp, ex); return; }
+            if (slaRealDe(ex)) return; // já tem SLA do PACS: não mexe
+            if (!proprio && !criarSlaProprio(comp, ex, nd, SLA_PROPRIO_DESC)) return;
+            tickSlaProprio(ex);
         });
     }
-    setInterval(() => { try { aplicarSlaUSProprio(); } catch (e) { console.warn('[PACS Plus] prazo próprio do US falhou', e); } }, 1000);
 
-    setInterval(() => { try { aplicarSlaUteis(); } catch (e) { console.warn('[PACS Plus] prazo em dias úteis falhou', e); } }, 1000);
+    // ---- Escala do radiologista (aba 🚨 Urgências) — usada pelo prazo do TC e pelo monitor ----
+    const minutosDoDia = hhmm => { const [h, m] = String(hhmm || '').split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+    function janelaDias() { return String(cfg.urg.dias || '').split(/[^\d]+/).filter(x => x !== '').map(Number).filter(n => n >= 0 && n <= 6); }
+    function naEscalaData(dt) {
+        if (!(dt instanceof Date) || isNaN(dt)) return false;
+        if (!janelaDias().includes(dt.getDay())) return false;
+        if (feriadosDoAno(dt.getFullYear(), cfg.sla)[chaveDia(dt)]) return false;
+        const t = dt.getHours() * 60 + dt.getMinutes();
+        return t >= minutosDoDia(cfg.urg.inicio) && t <= minutosDoDia(cfg.urg.fim);
+    }
+    function dataHoraExame(ex) {
+        const [y, mo, d] = String(ex && ex.exa_data || '').slice(0, 10).split('-').map(Number);
+        const [h, mi, s] = String(ex && ex.exa_hora || '').split(':').map(Number);
+        return y && mo && d ? new Date(y, mo - 1, d, h || 0, mi || 0, s || 0) : null;
+    }
+    const naEscala = ex => naEscalaData(dataHoraExame(ex));
+
+    // ---- Prazo do TC (v1.8) ----
+    // O TC é "seu" quando está em REVISAR com “Necessita de laudo”, ou quando é URGENTE com ficha
+    // dentro da sua escala. O resto é telelaudo: fica sem relógio/cronômetro (só na tela, nada no servidor).
+    // TC eletivo seu ainda “aguardando confirmação” ganha prazo próprio de 5 dias úteis (igual ao US).
+    function tcEhMeu(ex) {
+        const emRevisar = listaSit(cfg.sla.tcSituacoes || 'REVISAR').includes(String(ex.exa_situacao || '').toUpperCase()) && ex.exa_idnnecessitalaudo !== false;
+        return ex.exa_idnurgente ? (emRevisar || naEscala(ex)) : emRevisar;
+    }
+    function aplicarPrazosTC() {
+        const comp = componenteLista();
+        if (!comp) return;
+        const ocultar = on('tcSoMeus'), proprioOn = on('slaTCProprio');
+        const nd = diasPorModalidade(cfg.sla).CT || 5;
+        comp.exames.forEach(ex => {
+            if (!ex || modDe(ex) !== 'CT') return;
+            const meu = tcEhMeu(ex);
+            const proprio = ex.sla && ex.sla.__ppProprio;
+            if (ocultar && !meu) {
+                if (proprio) restaurarSlaProprio(comp, ex);
+                if (!ex.__ppOcultoTC) { ex.__ppCountOcultoTC = ex.sla_count_prazo; ex.__ppOcultoTC = true; comp.$set(ex, 'sla_count_prazo', 0); }
+                return;
+            }
+            if (ex.__ppOcultoTC) { ex.__ppOcultoTC = false; comp.$set(ex, 'sla_count_prazo', ex.__ppCountOcultoTC); }
+            const quer = proprioOn && meu && !ex.exa_idnurgente && (!slaRealDe(ex) || ex.sla.ultimoacao_tipo === 'PENDENTE');
+            if (!quer) { if (proprio) restaurarSlaProprio(comp, ex); return; }
+            if (!proprio && !criarSlaProprio(comp, ex, nd, SLA_TC_DESC)) return;
+            tickSlaProprio(ex);
+        });
+    }
+
+    function aplicarPrazosLista() {
+        try { aplicarPrazosTC(); } catch (e) { console.warn('[PACS Plus] prazo do TC falhou', e); }
+        try { aplicarSlaUSProprio(); } catch (e) { console.warn('[PACS Plus] prazo próprio do US falhou', e); }
+        try { aplicarSlaUteis(); } catch (e) { console.warn('[PACS Plus] prazo em dias úteis falhou', e); }
+    }
+    setInterval(aplicarPrazosLista, 1000);
+
+    // =====================================================================
+    // 3C. MONITOR DE TC URGENTE — aviso na tela e no celular (v1.8)
+    // ---------------------------------------------------------------------
+    // A cada 60 s lê pela API do PACS (mesma sessão) os TC URGENTES de hoje com
+    // ficha dentro da escala (seg–sex 07–17, sem feriados). Fora da escala é
+    // telelaudo: ignorado. Prazo = SLA de urgência do PACS quando os técnicos
+    // CONFIRMAM; sem confirmação usa prazo PROVISÓRIO (2 h a partir de quando o
+    // urgente apareceu) — o mais seguro — e avisa que falta confirmar.
+    // Avisos: tela (cartão + som + notificação do sistema) e celular (ntfy;
+    // opcional Telegram e Pushover). No ntfy os lembretes (60/30/15 min, vencido,
+    // repetições) ficam AGENDADOS NO SERVIDOR: chegam mesmo se o PC desligar e são
+    // cancelados quando o laudo é liberado. Um vigia avisa se o monitor parar no
+    // meio da escala; outro, se ele não iniciar no próximo dia de escala.
+    // Só uma aba por computador vigia (eleição pelo localStorage). Nunca grava
+    // nada no PACS. Nome de paciente aparece só na tela, nunca no celular.
+    // =====================================================================
+    const URG_ESTADO_KEY = 'pp_urg_estado_v1', URG_LIDER_KEY = 'pp_urg_lider_v1', URG_UI_KEY = 'pp_urg_ui_v1', URG_SOM_KEY = 'pp_urg_som_v1';
+    const URG_POLL_MS = 60000, URG_TICK_MS = 20000, URG_LIDER_TTL = 150000;
+    const URG_VIGIA_CADA = 6 * 60000, URG_VIGIA_ATRASO = 20 * 60000;
+    const URG_TAB = Math.random().toString(36).slice(2, 10);
+    const URG_LINK = location.origin + '/exames';
+    const urgLigado = () => !!(cfg.urg.tela || cfg.urg.celular);
+    const urgPausado = () => !!cfg.urg.pausaAte && chaveDia(new Date()) <= cfg.urg.pausaAte;
+    // modo teste: SOMA os pacientes TESTE (qualquer data, ignorando a escala) ao monitoramento normal; desliga sozinho em 2 h
+    const urgModoTeste = () => !!cfg.urg.teste && Date.now() < (+cfg.urg.testeAte || 0);
+    const hm = ms => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    function faltaTxt(ms) {
+        const m = Math.max(0, Math.round(ms / 60000));
+        if (m < 60) return m + ' min';
+        const h = Math.floor(m / 60), r = m % 60;
+        return h + ' h' + (r ? ' ' + r + ' min' : '');
+    }
+    function lembretesMin() { return [...new Set(String(cfg.urg.lembretes || '').split(/[^\d]+/).map(Number).filter(n => n > 0 && n <= 600))].sort((a, b) => b - a); }
+    function hashCurto(s) { let h = 5381; for (const ch of String(s)) h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0; return h.toString(36); }
+    function exameCurto(desc) {
+        return String(desc || '').toUpperCase()
+            .replace(/^TOMOGRAFIA COMPUTADORIZADA\s+((DE|DO|DA|DOS|DAS)\s+)?/, '').replace(/^TC\s+((DE|DO|DA|DOS|DAS)\s+)?/, '')
+            .replace(/\bSEM CONTRASTE\b/g, 'S/C').replace(/\bCOM CONTRASTE\b/g, 'C/C').replace(/\s+/g, ' ').trim() || 'TC';
+    }
+    function idadeDe(nasc) {
+        const m = String(nasc || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (!m) return null;
+        const h = new Date();
+        let a = h.getFullYear() - +m[1];
+        if (h.getMonth() + 1 < +m[2] || (h.getMonth() + 1 === +m[2] && h.getDate() < +m[3])) a--;
+        return a >= 0 && a < 130 ? a : null;
+    }
+
+    // ---- estado compartilhado entre as abas deste computador ----
+    function urgEstado() { let e = null; try { e = JSON.parse(localStorage.getItem(URG_ESTADO_KEY)); } catch (x) { e = null; } return e && typeof e === 'object' ? e : {}; }
+    function urgSalvar(e) { try { localStorage.setItem(URG_ESTADO_KEY, JSON.stringify(e)); } catch (x) { /* sem espaço */ } }
+    function urgUi() { try { return JSON.parse(localStorage.getItem(URG_UI_KEY)) || {}; } catch (x) { return {}; } }
+    function urgUiSalvar(ui) { try { localStorage.setItem(URG_UI_KEY, JSON.stringify(ui)); } catch (x) { /* ok */ } }
+    // só UMA aba vigia (a líder); as outras só mostram o cartão
+    function urgSouLider() {
+        const agora = Date.now();
+        let l = null;
+        try { l = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); } catch (x) { l = null; }
+        if (l && l.id !== URG_TAB && agora - l.ts < URG_LIDER_TTL) return false;
+        try { localStorage.setItem(URG_LIDER_KEY, JSON.stringify({ id: URG_TAB, ts: agora })); l = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); } catch (x) { return true; }
+        return !!l && l.id === URG_TAB;
+    }
+    window.addEventListener('pagehide', () => {
+        try { const l = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); if (l && l.id === URG_TAB) localStorage.removeItem(URG_LIDER_KEY); } catch (x) { /* ok */ }
+    });
+
+    // ---- canais ----
+    const ntfyBase = () => String(cfg.urg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
+    async function ntfyEnviar(o, forcar) {
+        const u = cfg.urg;
+        if ((!u.celular && !forcar) || !u.ntfyTopico) return null;
+        const p = new URLSearchParams();
+        if (o.titulo) p.set('t', o.titulo);
+        p.set('p', String(o.prio || 3));
+        if (o.tags) p.set('ta', o.tags);
+        p.set('click', URG_LINK);
+        if (o.sid) p.set('sid', o.sid);
+        if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
+        try {
+            const r = await fetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            return r.ok;
+        } catch (e) { console.warn('[PACS Plus] ntfy falhou', e); return false; }
+    }
+    // acao: 'delete' (cancela agendado / apaga do celular) ou 'clear' (marca como lido)
+    async function ntfyAcao(sid, acao, topico) {
+        const t = topico || cfg.urg.ntfyTopico;
+        if (!t || !sid) return false;
+        try { const r = await fetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); return r.ok; } catch (e) { return false; }
+    }
+    const tgTokenOk = t => /^\d{5,}:[\w-]{20,}$/.test(String(t || '').trim());
+    async function tgEnviar(texto, forcar) {
+        const u = cfg.urg;
+        if ((!u.celular && !forcar) || !tgTokenOk(u.tgToken) || !u.tgChat) return null;
+        try {
+            const r = await fetch(`https://api.telegram.org/bot${String(u.tgToken).trim()}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ chat_id: String(u.tgChat).trim(), text: texto, disable_web_page_preview: 'true' }) });
+            return r.ok;
+        } catch (e) { return false; }
+    }
+    async function tgDescobrirChat(token) {
+        if (!tgTokenOk(token)) throw new Error('token inválido');
+        const r = await fetch(`https://api.telegram.org/bot${String(token).trim()}/getUpdates`);
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.description || 'Telegram recusou');
+        const ups = (j.result || []).slice().reverse();
+        for (const up of ups) { const c = (up.message || up.channel_post || up.my_chat_member || {}).chat; if (c && c.id) return String(c.id); }
+        return null;
+    }
+    async function poEnviar(o, forcar) {
+        const u = cfg.urg;
+        if ((!u.celular && !forcar) || !u.poUser || !u.poToken) return null;
+        let prio = o.prio == null ? 0 : o.prio;
+        if (prio === 2 && !u.poEmergencia) prio = 1;
+        const f = { token: String(u.poToken).trim(), user: String(u.poUser).trim(), title: o.titulo, message: o.msg || o.titulo, priority: String(prio), url: URG_LINK, url_title: 'Abrir PACS' };
+        if (prio === 2) Object.assign(f, { retry: '60', expire: '1800', tags: o.tag || 'pacsplus' });
+        try {
+            const r = await fetch('https://api.pushover.net/1/messages.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(f) });
+            return r.ok;
+        } catch (e) { return false; }
+    }
+    async function poCancelar(tag) {
+        const u = cfg.urg;
+        if (!u.poToken || !tag) return false;
+        try {
+            const r = await fetch(`https://api.pushover.net/1/receipts/cancel_by_tag/${encodeURIComponent(tag)}.json`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: String(u.poToken).trim() }) });
+            return r.ok;
+        } catch (e) { return false; }
+    }
+
+    // ---- tela: som + notificação do sistema ----
+    let urgAudio = null;
+    function urgAudioCtx() {
+        try {
+            if (!urgAudio) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; urgAudio = new AC(); }
+            if (urgAudio.state === 'suspended') urgAudio.resume();
+        } catch (e) { urgAudio = null; }
+        return urgAudio;
+    }
+    // o navegador só libera som depois de um clique na página
+    document.addEventListener('pointerdown', () => { if (cfg.urg.tela) urgAudioCtx(); }, true);
+    function urgBip(nivel) {
+        if (!cfg.urg.som) return;
+        const ctx = urgAudioCtx();
+        if (!ctx || ctx.state !== 'running') return;
+        const seq = nivel === 'urgente' ? [988, 0, 988, 0, 988, 0, 1319, 1319] : nivel === 'aviso' ? [784, 0, 784] : [660];
+        let t = ctx.currentTime + 0.05;
+        seq.forEach(f => {
+            if (f) {
+                const o = ctx.createOscillator(), g = ctx.createGain();
+                o.type = 'square'; o.frequency.value = f;
+                g.gain.setValueAtTime(0.0001, t);
+                g.gain.exponentialRampToValueAtTime(0.2, t + 0.015);
+                g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+                o.connect(g); g.connect(ctx.destination); o.start(t); o.stop(t + 0.22);
+            }
+            t += 0.24;
+        });
+    }
+    function urgTela(titulo, msg, nivel, tag) {
+        if (!cfg.urg.tela) return;
+        try {
+            if (cfg.urg.notifWindows && 'Notification' in window && Notification.permission === 'granted') {
+                const n = new Notification(titulo, { body: msg, tag: tag || undefined, renotify: !!tag, requireInteraction: nivel === 'urgente' });
+                n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
+            }
+        } catch (e) { /* sem notificação do sistema */ }
+        try { localStorage.setItem(URG_SOM_KEY, JSON.stringify({ t: Date.now(), nivel })); } catch (e) { /* ok */ }
+        urgBip(nivel);
+    }
+
+    // ---- mensagens (sem nome de paciente; o nome só vai para a tela deste computador) ----
+    const urgChave = x => `${x.pac_codigo}|${x.exa_his_atendimento || String(x.exa_data || '').slice(0, 10)}`;
+    const gsid = g => 'u' + hashCurto(`${g.key}|${g.dia}|${g.ciclo || 0}`);
+    function urgMsg(g, tipo, quando) {
+        const agora = quando || Date.now();
+        const exs = Object.values(g.exames || {}).map(y => y.d);
+        const exTxt = exs.slice(0, 3).join(' + ') + (exs.length > 3 ? ` +${exs.length - 3}` : '');
+        const info = [exTxt, g.idade != null ? g.idade + ' a' : '', g.conv, g.ficha ? 'ficha ' + g.ficha : ''].filter(Boolean).join(' · ');
+        const v = g.vence ? hm(g.vence) : '—', falta = (g.vence || agora) - agora;
+        const prov = g.provisorio ? ' · prazo provisório (sem confirmação)' : '';
+        const ign = '\n(se já liberou, ignore)';
+        let r;
+        if (tipo === 'novo') r = ['🚨 TC URGENTE — vence ' + v, `${info}\nConfirmado ${g.confirmadoEm ? hm(g.confirmadoEm) : ''} · faltam ${faltaTxt(falta)}`, 5, 'rotating_light', 'urgente', 1];
+        else if (tipo === 'novoSemConf') r = ['🚨 TC URGENTE — aguardando confirmação', `${info}\nPrazo provisório ${v} (${+cfg.urg.horas || 2} h a partir de agora). O prazo oficial começa quando os técnicos confirmarem.`, 5, 'rotating_light', 'urgente', 1];
+        else if (tipo === 'semConf') r = ['⚠ TC urgente ainda sem confirmação', `${info}\nHá ${faltaTxt(agora - g.detectadoEm)} sem confirmar. Prazo provisório ${v}.`, 4, 'warning', 'aviso', 1];
+        else if (tipo === 'conf') r = ['⏱ TC urgente confirmado — vence ' + v, `${info}\nConfirmado ${g.confirmadoEm ? hm(g.confirmadoEm) : ''} · faltam ${faltaTxt(falta)}`, 4, 'stopwatch', 'aviso', 1];
+        else if (tipo === 'r0') r = ['❌ PRAZO VENCIDO — TC urgente (' + v + ')', info + prov + ign, 5, 'x', 'urgente', 2];
+        else if (/^r\d+$/.test(tipo)) {
+            const m = +tipo.slice(1), forte = m <= 15;
+            const t = m >= 60 && m % 60 === 0 ? `⏰ Falta${m > 60 ? 'm' : ''} ${m / 60} h` : `${forte ? '🚨' : '⏰'} Faltam ${m} min`;
+            r = [t + ' — TC urgente (vence ' + v + ')', info + prov + ign, forte ? 5 : 4, forte ? 'rotating_light' : 'alarm_clock', forte ? 'urgente' : 'aviso', forte ? 2 : 1];
+        } else if (/^v\d+$/.test(tipo)) r = [`❌ Vencido há ${faltaTxt(agora - g.vence)} — TC urgente`, `Venceu às ${v} · ${info}${ign}`, 5, 'x', 'urgente', 2];
+        else if (tipo === 'fimLiberado') {
+            const d = g.vence - (g.encerradoEm || agora);
+            r = [d >= 0 ? `✅ TC urgente liberado — ${faltaTxt(d)} antes do prazo` : `✅ TC urgente liberado — ${faltaTxt(-d)} após o prazo`, `${info}\nPrazo ${v} · liberado ${hm(g.encerradoEm || agora)}`, 2, 'white_check_mark', 'info', 0];
+        } else r = ['ℹ Urgência retirada ou exame cancelado', `${info}\nLembretes cancelados.`, 2, 'information_source', 'info', -1];
+        return { titulo: r[0], msg: r[1], prio: r[2], tags: r[3], nivel: r[4], poPrio: r[5], tela: (g.nome ? g.nome + ' · ' : '') + r[1] };
+    }
+
+    // ---- eventos ----
+    async function urgEvento(g, tipo, e) {
+        g.enviados[tipo] = Date.now();
+        urgSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
+        const m = urgMsg(g, tipo);
+        urgTela(m.titulo, m.tela, m.nivel, gsid(g));
+        if (!cfg.urg.celular) return;
+        const sid = gsid(g) + '-' + tipo;
+        if (!(g.agenda && g.agenda[sid])) { // se já está agendado no ntfy, o servidor entrega sozinho
+            if (await ntfyEnviar({ sid, titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags })) (g.entregues = g.entregues || []).push(sid);
+        }
+        await tgEnviar(m.titulo + '\n' + m.msg);
+        await poEnviar({ titulo: m.titulo, msg: m.msg, prio: m.poPrio, tag: gsid(g) });
+    }
+    // agenda no servidor do ntfy os lembretes do prazo atual (substitui/cancela os antigos)
+    async function urgAgendar(g) {
+        g.agendaVence = g.vence;
+        if (!cfg.urg.celular || !cfg.urg.ntfyTopico) return;
+        const base = gsid(g), agora = Date.now(), plano = [];
+        lembretesMin().forEach(m => plano.push(['r' + m, g.vence - m * 60000]));
+        plano.push(['r0', g.vence]);
+        const rep = +cfg.urg.repetirVencido || 0, vezes = Math.min(12, +cfg.urg.repetirVezes || 0);
+        if (rep > 0) for (let i = 1; i <= vezes; i++) plano.push(['v' + i, g.vence + i * rep * 60000]);
+        const nova = {};
+        for (const [tipo, em] of plano) {
+            if (em <= agora + 20000 || g.enviados[tipo]) continue;
+            const m = urgMsg(g, tipo, em), sid = base + '-' + tipo;
+            if (await ntfyEnviar({ sid, em, titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags })) nova[sid] = em;
+        }
+        for (const [sid, em] of Object.entries(g.agenda || {})) if (!nova[sid] && em > agora) await ntfyAcao(sid, 'delete');
+        g.agenda = nova;
+    }
+    async function urgCancelarAgenda(g) {
+        const agora = Date.now();
+        for (const [sid, em] of Object.entries(g.agenda || {})) await ntfyAcao(sid, em > agora ? 'delete' : 'clear');
+        g.agenda = {};
+        g.agendaVence = null;
+    }
+    async function urgEncerrar(g, motivo, e) {
+        g.aberto = false; g.encerradoEm = Date.now(); g.motivo = motivo;
+        urgSalvar(e);
+        const m = urgMsg(g, motivo === 'liberado' ? 'fimLiberado' : 'fimRemovido');
+        urgTela(m.titulo, m.tela, 'info', gsid(g));
+        if (!cfg.urg.celular) return;
+        await urgCancelarAgenda(g);
+        for (const sid of (g.entregues || [])) await ntfyAcao(sid, 'clear');
+        g.entregues = [];
+        await ntfyEnviar({ sid: gsid(g) + '-fim', titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags });
+        await poCancelar(gsid(g));
+        await tgEnviar(m.titulo + '\n' + m.msg);
+        if (motivo === 'liberado') await poEnviar({ titulo: m.titulo, msg: m.msg, prio: m.poPrio, tag: gsid(g) });
+        urgSalvar(e);
+    }
+    // novo prazo: zera lembretes e marca como "pulados" os que já passaram
+    function urgResetLembretes(g, agora) {
+        Object.keys(g.enviados).forEach(k => { if (/^(r\d+|v\d+)$/.test(k)) delete g.enviados[k]; });
+        lembretesMin().forEach(m => { if (g.vence - m * 60000 <= agora) g.enviados['r' + m] = 'pulado'; });
+        const rep = +cfg.urg.repetirVencido || 0, vezes = Math.min(12, +cfg.urg.repetirVezes || 0);
+        if (rep > 0) for (let i = 1; i <= vezes; i++) if (g.vence + i * rep * 60000 <= agora) g.enviados['v' + i] = 'pulado';
+    }
+
+    // ---- leitura do PACS (somente leitura) ----
+    let urgModCodes = null;
+    async function urgCodigosModalidade(tok) {
+        if (urgModCodes) return urgModCodes;
+        try {
+            const r = await fetch('/backend/api/modalidade', { headers: { 'x-access-token': tok } });
+            if (r.ok) {
+                const j = await r.json(), arr = Array.isArray(j) ? j : (j.rows || []), m = {};
+                arr.forEach(x => { if (x && x.mod_sigla) m[String(x.mod_sigla).toUpperCase()] = x.mod_codigo; });
+                if (Object.keys(m).length) urgModCodes = m;
+            }
+        } catch (e) { /* segue sem filtro de modalidade (filtra aqui) */ }
+        return urgModCodes || {};
+    }
+    async function urgConsulta(tok, codes, mods, teste) {
+        const p = ['offset=0', 'limit=300', 'tela=EXAMES', 'pac_pacs_codigo=', 'data_inicial=', 'data_final=', 'exa_idnsomenteassinador=false', 'exa_dataparam=$exame.exa_data$',
+            'pac_nome=' + (teste ? 'TESTE' : ''), 'data_codigo=' + (teste ? 1 : 2), 'exa_idnurgente[]=true'];
+        mods.forEach(m => { if (codes[m] != null) p.push('mod_codigo[]=' + encodeURIComponent(codes[m])); });
+        const r = await fetch('/backend/api/exame?' + p.join('&'), { headers: { 'x-access-token': tok } });
+        if (r.status === 401 || r.status === 403) { const er = new Error('sessão do PACS expirada'); er.code = 'login'; throw er; }
+        if (!r.ok) throw new Error('PACS respondeu HTTP ' + r.status);
+        const j = await r.json(), hoje = chaveDia(new Date());
+        const rows = (j.rows || []).filter(x => x && x.exa_idnurgente && x.paciente && mods.includes(modDe(x)) && x.exa_idnnecessitalaudo !== false);
+        return teste ? rows.filter(x => /TESTE/i.test(x.paciente.pac_nome || ''))
+            : rows.filter(x => String(x.exa_data || '').slice(0, 10) === hoje && naEscala(x));
+    }
+    async function urgLer() {
+        const tok = localStorage.getItem('lwtoken');
+        if (!tok) { const er = new Error('PACS sem login'); er.code = 'login'; throw er; }
+        const mods = listaSit(cfg.urg.modalidades || 'CT');
+        const codes = await urgCodigosModalidade(tok);
+        const rows = await urgConsulta(tok, codes, mods, false);
+        if (urgModoTeste()) {
+            const vistos = new Set(rows.map(x => x.exa_codigo));
+            (await urgConsulta(tok, codes, mods, true)).forEach(x => { if (!vistos.has(x.exa_codigo)) rows.push(x); });
+        }
+        if (rows.length) {
+            try {
+                const rs = await fetch('/backend/api/exame/sla', { method: 'POST', headers: { 'x-access-token': tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ exames: rows }) });
+                if (rs.ok) { const mp = new Map(((await rs.json()) || []).map(x => [x.exa_codigo, x.sla])); rows.forEach(x => { if (mp.has(x.exa_codigo)) x.sla = mp.get(x.exa_codigo); }); }
+            } catch (e) { /* sem SLA: usa prazo provisório */ }
+        }
+        return rows;
+    }
+
+    // ---- processamento da leitura ----
+    async function urgProcessar(rows, e) {
+        const agora = Date.now(), encerra = listaSit(cfg.urg.encerra || 'LIBERADO');
+        const porGrupo = {};
+        rows.forEach(x => { const k = urgChave(x); (porGrupo[k] = porGrupo[k] || []).push(x); });
+        for (const [k, xs] of Object.entries(porGrupo)) {
+            let g = e.grupos[k];
+            const todosEncerrados = xs.every(x => encerra.includes(String(x.exa_situacao || '').toUpperCase()));
+            if (g && !g.aberto) {
+                // só reabre se aparecer exame novo ainda não liberado
+                const novos = xs.filter(x => !(g.cods || {})[x.exa_codigo] && !encerra.includes(String(x.exa_situacao || '').toUpperCase()));
+                if (!novos.length) continue;
+                g = e.grupos[k] = { key: k, dia: e.dia, ciclo: (g.ciclo || 0) + 1, detectadoEm: agora, enviados: {}, aberto: true, cods: g.cods || {} };
+            }
+            if (!g) {
+                if (todosEncerrados) { e.grupos[k] = { key: k, dia: e.dia, ciclo: 0, aberto: false, motivo: 'jaLiberado', cods: Object.fromEntries(xs.map(x => [x.exa_codigo, 1])) }; continue; }
+                g = e.grupos[k] = { key: k, dia: e.dia, ciclo: 0, detectadoEm: agora, enviados: {}, aberto: true, cods: {} };
+            }
+            const novo = !g.vence;
+            g.miss = 0;
+            const x0 = xs[0];
+            g.nome = String((x0.paciente && x0.paciente.pac_nome) || '');
+            g.idade = idadeDe(x0.paciente && x0.paciente.pac_dtnasc);
+            const conv = String((x0.convenio && x0.convenio.conv_descricao) || '');
+            g.conv = conv ? transformInsuranceText(conv) : '';
+            g.ficha = String(x0.exa_hora || '').slice(0, 5);
+            g.exames = {};
+            xs.forEach(x => { g.cods[x.exa_codigo] = 1; g.exames[x.exa_codigo] = { d: exameCurto(x.tipoexame && x.tipoexame.tpe_descricao), s: String(x.exa_situacao || '').toUpperCase() }; });
+            if (todosEncerrados) { if (!novo) await urgEncerrar(g, 'liberado', e); else { g.aberto = false; g.motivo = 'jaLiberado'; } continue; }
+            const slas = xs.map(x => x.sla).filter(s => s && Array.isArray(s.slas) && s.slas.length);
+            const conf = slas.filter(s => s.ultimoacao_tipo === 'CONFIRMADO' && s.sla_prazo_final && !isNaN(new Date(s.sla_prazo_final)));
+            const horasCfg = +cfg.urg.horas || 2;
+            const horas = Math.min(horasCfg, slas.length ? Math.min(...slas.map(s => Math.min(...s.slas.map(y => +y.sla_prazo || horasCfg)))) : horasCfg);
+            g.pausado = slas.length > 0 && slas.every(s => s.ultimoacao_tipo === 'PENDENCIADO');
+            const eraProv = g.provisorio;
+            let vence;
+            if (conf.length) {
+                vence = Math.min(...conf.map(s => new Date(s.sla_prazo_final).getTime()));
+                const cs = conf.map(s => new Date(s.ultimoacao_created).getTime()).filter(n => !isNaN(n));
+                g.confirmadoEm = cs.length ? Math.min(...cs) : (g.confirmadoEm || agora);
+                vence = Math.min(vence, g.confirmadoEm + horasCfg * 3600000); // SLA eletivo num exame urgente não estica o prazo
+                g.provisorio = false;
+            } else { vence = g.detectadoEm + horas * 3600000; g.provisorio = true; g.confirmadoEm = null; }
+            if (g.vence !== vence) { g.vence = vence; urgResetLembretes(g, agora); }
+            if (novo) await urgEvento(g, g.provisorio ? 'novoSemConf' : 'novo', e);
+            else if (eraProv && !g.provisorio && !g.enviados.conf) await urgEvento(g, 'conf', e);
+            if (g.pausado) { if (Object.keys(g.agenda || {}).length) await urgCancelarAgenda(g); }
+            else if (g.agendaVence !== g.vence) await urgAgendar(g);
+        }
+        // grupos que sumiram (urgência retirada ou exame cancelado): 2 leituras seguidas
+        for (const g of Object.values(e.grupos)) {
+            if (!g.aberto || porGrupo[g.key]) continue;
+            g.miss = (g.miss || 0) + 1;
+            if (g.miss >= 2) await urgEncerrar(g, 'removido', e);
+        }
+    }
+
+    // ---- lembretes por horário (tela, Telegram, Pushover; ntfy só se não estiver agendado) ----
+    async function urgTick(e) {
+        const agora = Date.now(), L = lembretesMin();
+        const rep = +cfg.urg.repetirVencido || 0, vezes = Math.min(12, +cfg.urg.repetirVezes || 0);
+        for (const g of Object.values(e.grupos || {})) {
+            if (!g.aberto || g.pausado || !g.vence) continue;
+            if (g.provisorio && !g.enviados.semConf && agora - g.detectadoEm >= (+cfg.urg.semConfirmacao || 15) * 60000) await urgEvento(g, 'semConf', e);
+            const dev = L.filter(m => !g.enviados['r' + m] && agora >= g.vence - m * 60000 && agora < g.vence);
+            if (dev.length) { const m = Math.min(...dev); dev.forEach(x => { if (x !== m) g.enviados['r' + x] = 'pulado'; }); await urgEvento(g, 'r' + m, e); }
+            if (!g.enviados.r0 && agora >= g.vence) { L.forEach(m => { if (!g.enviados['r' + m]) g.enviados['r' + m] = 'pulado'; }); await urgEvento(g, 'r0', e); }
+            if (rep > 0) {
+                const dv = [];
+                for (let i = 1; i <= vezes; i++) if (!g.enviados['v' + i] && agora >= g.vence + i * rep * 60000) dv.push(i);
+                if (dv.length) { const i = Math.max(...dv); dv.forEach(x => { if (x !== i) g.enviados['v' + x] = 'pulado'; }); await urgEvento(g, 'v' + i, e); }
+            }
+        }
+    }
+
+    // ---- vigias (só ntfy): "monitor parou" na escala e "monitor não iniciou" no próximo dia ----
+    function proximoInicioEscala(apos) {
+        const d = new Date(apos); d.setHours(0, 0, 0, 0);
+        const [h, mi] = String(cfg.urg.inicio || '07:00').split(':').map(Number);
+        for (let i = 1; i <= 8; i++) {
+            d.setDate(d.getDate() + 1);
+            if (!janelaDias().includes(d.getDay()) || feriadosDoAno(d.getFullYear(), cfg.sla)[chaveDia(d)]) continue;
+            if (cfg.urg.pausaAte && chaveDia(d) <= cfg.urg.pausaAte) continue;
+            const alvo = new Date(d); alvo.setHours(h || 0, (mi || 0) + 30, 0, 0);
+            return alvo;
+        }
+        return null;
+    }
+    function fimEscalaHoje() { const d = new Date(), f = minutosDoDia(cfg.urg.fim); d.setHours(Math.floor(f / 60), f % 60, 59, 0); return d.getTime(); }
+    async function urgVigia(e) {
+        const u = cfg.urg;
+        if (!u.celular || !u.ntfyTopico) return;
+        const agora = Date.now(), hoje = chaveDia(new Date());
+        const dentro = !urgPausado() && naEscalaData(new Date());
+        const lendoOk = e.ultLeitura && agora - e.ultLeitura < 3 * 60000; // se a leitura falha, o vigia não é renovado e dispara
+        if (dentro && lendoOk) {
+            if (e.diaAtivo !== hoje) {
+                e.diaAtivo = hoje;
+                await ntfyAcao('pp-inicio', 'delete');
+                await ntfyEnviar({ titulo: '✅ Monitor de urgências ativo', msg: `Este computador está vigiando os TC urgentes da escala (${u.inicio}–${u.fim}). Se ele parar, você recebe um aviso.`, prio: 2, tags: 'white_check_mark' });
+            } else if (e.vigiaEm && agora - e.vigiaEm > URG_VIGIA_ATRASO) {
+                await ntfyEnviar({ titulo: '✅ Monitor de urgências voltou', msg: 'O computador voltou a vigiar os TC urgentes.', prio: 2, tags: 'white_check_mark' });
+            }
+            if (!e.vigiaEm || agora - e.vigiaEm >= URG_VIGIA_CADA) {
+                const em = Math.min(agora + URG_VIGIA_ATRASO, fimEscalaHoje() + 3 * 60000);
+                const ok = await ntfyEnviar({ sid: 'pp-vigia', em, titulo: '⚠ Monitor de urgências PAROU',
+                    msg: 'Sem sinal do computador que vigia os TC urgentes (desligado/hibernando, Chrome ou PACS fechado, sem internet ou sessão expirada). Urgências NÃO estão sendo vigiadas — abra o PACS.', prio: 4, tags: 'warning' });
+                if (ok) e.vigiaEm = agora;
+            }
+        } else if (!dentro && e.vigiaEm) {
+            await ntfyAcao('pp-vigia', 'delete');
+            e.vigiaEm = 0;
+            const prox = proximoInicioEscala(agora);
+            if (prox && prox.getTime() - agora < 3 * 86400000 - 120000) {
+                const ok = await ntfyEnviar({ sid: 'pp-inicio', em: prox.getTime(), titulo: '⚠ Monitor de urgências não iniciou',
+                    msg: `Até ${hm(prox.getTime())} o PACS não foi aberto no computador que vigia os TC urgentes. Abra o PACS no PC do hospital.`, prio: 4, tags: 'warning' });
+                e.inicioAgendado = ok ? chaveDia(prox) : '';
+            }
+        }
+    }
+
+    // ---- ciclo (a cada 20 s; leitura do PACS a cada 60 s) ----
+    let urgRodando = false;
+    async function urgCiclo() {
+        if (urgRodando || !urgLigado() || !urgSouLider()) return;
+        urgRodando = true;
+        const e = urgEstado();
+        try {
+            if (cfg.urg.teste && !urgModoTeste()) { cfg.urg.teste = false; cfg.urg.testeAte = 0; saveCfg(); }
+            const hoje = chaveDia(new Date());
+            if (e.dia !== hoje) { e.dia = hoje; e.grupos = {}; e.sessaoAvisada = false; }
+            e.grupos = e.grupos || {};
+            const abertos = Object.values(e.grupos).some(g => g.aberto);
+            const ativo = !urgPausado() && (urgModoTeste() || naEscalaData(new Date()) || abertos);
+            if (ativo && Date.now() - (e.ultLeitura || 0) >= URG_POLL_MS - 5000 && Date.now() - (e.ultTentativa || 0) >= URG_POLL_MS - 5000) {
+                e.ultTentativa = Date.now();
+                try {
+                    const rows = await urgLer();
+                    e.ultLeitura = Date.now(); e.erro = ''; e.sessaoAvisada = false;
+                    await urgProcessar(rows, e);
+                } catch (err) {
+                    e.erro = (err && err.message) || String(err);
+                    if (err && err.code === 'login' && !e.sessaoAvisada) {
+                        e.sessaoAvisada = true;
+                        urgTela('⚠ Monitor de urgências parado', 'Sessão do PACS expirada — faça login para voltar a vigiar os TC urgentes.', 'aviso', 'pp-sessao');
+                        await ntfyEnviar({ titulo: '⚠ Sessão do PACS expirou', msg: 'O monitor de TC urgentes parou no computador do hospital. Faça login no PACS.', prio: 4, tags: 'warning' });
+                    }
+                }
+            }
+            if (!urgPausado()) await urgTick(e);
+            await urgVigia(e);
+        } catch (err) {
+            console.warn('[PACS Plus] monitor de urgências', err);
+            e.erro = String((err && err.message) || err);
+        } finally {
+            urgSalvar(e);
+            urgRodando = false;
+            urgBanner();
+        }
+    }
+
+    // ---- cartão na tela (todas as abas com "alerta na tela" ligado) ----
+    const URG_CSS = `
+#pp-urg { position: fixed; right: 14px; bottom: 14px; z-index: 10000001; display: flex; flex-direction: column; gap: 8px; width: 370px; max-width: 92vw; font: 12.5px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+#pp-urg .pp-uc { color: #fff; border: 2px solid; border-radius: 10px; padding: 8px 10px; box-shadow: 0 10px 28px rgba(0,0,0,.55); }
+#pp-urg .pp-uc.azul { background: #1e3a8a; border-color: #93c5fd; }
+#pp-urg .pp-uc.laranja { background: #9a3412; border-color: #fdba74; }
+#pp-urg .pp-uc.vermelho { background: #991b1b; border-color: #fecaca; }
+#pp-urg .pp-uc.vencido { background: #7f1d1d; border-color: #fff; animation: ppUrgPisca 1s steps(2) infinite; }
+#pp-urg .pp-uc.erro { background: #78350f; border-color: #fbbf24; }
+@keyframes ppUrgPisca { 50% { border-color: #fde047; box-shadow: 0 0 0 4px rgba(253,224,71,.55); } }
+#pp-urg .pp-ut { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-weight: 800; font-size: 13px; }
+#pp-urg .pp-uf { font-size: 20px; font-weight: 900; white-space: nowrap; }
+#pp-urg .pp-us { opacity: .92; margin-top: 2px; }
+#pp-urg .pp-ub { display: flex; gap: 6px; margin-top: 6px; }
+#pp-urg button { background: rgba(255,255,255,.18); color: #fff; border: 1px solid rgba(255,255,255,.4); border-radius: 6px; padding: 3px 8px; font-weight: 700; font-size: 11.5px; cursor: pointer; }
+#pp-urg .pp-umin { align-self: flex-end; background: #991b1b; color: #fff; border-radius: 16px; padding: 5px 12px; font-weight: 800; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
+    function urgVerNaLista(nome) {
+        const comp = componenteLista();
+        if (comp && comp.filtro && typeof comp.getExames === 'function') { comp.$set(comp.filtro, 'pac_nome', nome); comp.getExames(); }
+        else location.href = URG_LINK;
+    }
+    function urgBanner() {
+        let box = document.getElementById('pp-urg');
+        if (!document.body || !cfg.urg.tela || !urgLigado()) { if (box) box.remove(); return; }
+        const e = urgEstado(), agora = Date.now();
+        const grupos = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+        const ocultos = urgUi().ocultar || {};
+        let html = '';
+        if (e.erro && naEscalaData(new Date()) && !urgPausado() && agora - (e.ultLeitura || 0) > 3 * 60000) {
+            html += `<div class="pp-uc erro"><div class="pp-ut"><span>⚠ Monitor de TC urgente sem leitura</span></div><div class="pp-us">${esc(e.erro)} · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}</div></div>`;
+        }
+        const visiveis = grupos.filter(g => !(ocultos[g.key] > agora && g.vence - agora > 15 * 60000));
+        html += visiveis.map(g => {
+            const falta = g.vence - agora;
+            const cls = falta <= 0 ? 'vencido' : falta <= 30 * 60000 ? 'vermelho' : falta <= 60 * 60000 ? 'laranja' : 'azul';
+            const exs = Object.values(g.exames || {}).map(y => y.d).join(' + ');
+            const st = g.pausado ? 'pendenciado (cronômetro pausado)' : g.provisorio ? 'aguardando confirmação · prazo provisório' : 'confirmado ' + (g.confirmadoEm ? hm(g.confirmadoEm) : '');
+            return `<div class="pp-uc ${cls}"><div class="pp-ut"><span>🚨 TC URGENTE · vence ${hm(g.vence)}</span><span class="pp-uf">${falta <= 0 ? 'vencido há ' + faltaTxt(-falta) : faltaTxt(falta)}</span></div>`
+                + `<div class="pp-us"><b>${esc(g.nome)}</b>${g.idade != null ? ' · ' + g.idade + ' a' : ''}${g.conv ? ' · ' + esc(g.conv) : ''}${g.ficha ? ' · ficha ' + esc(g.ficha) : ''}</div>`
+                + `<div class="pp-us">${esc(exs)}</div><div class="pp-us">${esc(st)}</div>`
+                + `<div class="pp-ub"><button data-urg-ver="${esc(g.nome)}">🔎 Ver na lista</button><button data-urg-ocultar="${esc(g.key)}">Ocultar 15 min</button></div></div>`;
+        }).join('');
+        const esc2 = grupos.length - visiveis.length;
+        if (esc2) html += `<div class="pp-umin" data-urg-mostrar="1">🚨 ${esc2} TC urgente${esc2 > 1 ? 's' : ''} — mostrar</div>`;
+        if (!html) { if (box) box.remove(); return; }
+        if (!box) {
+            setCss('pp-urg-css', URG_CSS);
+            box = document.createElement('div');
+            box.id = 'pp-urg';
+            document.body.appendChild(box);
+            box.addEventListener('click', ev => {
+                const b = ev.target.closest('[data-urg-ocultar],[data-urg-mostrar],[data-urg-ver]');
+                if (!b) return;
+                const ui = urgUi(); ui.ocultar = ui.ocultar || {};
+                if (b.dataset.urgOcultar) ui.ocultar[b.dataset.urgOcultar] = Date.now() + 15 * 60000;
+                if (b.dataset.urgMostrar) ui.ocultar = {};
+                urgUiSalvar(ui);
+                if (b.dataset.urgVer) urgVerNaLista(b.dataset.urgVer);
+                urgBanner();
+            });
+        }
+        if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
+    }
+    window.addEventListener('storage', ev => {
+        if (ev.key === URG_ESTADO_KEY || ev.key === URG_UI_KEY) urgBanner();
+        else if (ev.key === URG_SOM_KEY && cfg.urg.tela && document.visibilityState === 'visible') { try { urgBip(JSON.parse(ev.newValue).nivel); } catch (x) { /* ok */ } }
+        else if (ev.key === CFG_KEY) { cfg = loadCfg(); urgBanner(); }
+    });
+
+    function urgGerarTopico() {
+        const b = new Uint8Array(15);
+        (window.crypto || window.msCrypto).getRandomValues(b);
+        return 'pacs-urg-' + Array.from(b, x => (x % 36).toString(36)).join('');
+    }
+    async function urgTeste() {
+        const out = [];
+        urgAudioCtx();
+        if (cfg.urg.tela) {
+            const perm = 'Notification' in window ? Notification.permission : 'indisponível';
+            urgTela('🧪 Teste do PACS Plus', 'Alerta na tela funcionando.', 'aviso', 'pp-teste');
+            out.push(`Tela: cartão/som disparados · notificação do sistema: ${perm === 'granted' ? 'permitida' : perm === 'denied' ? 'BLOQUEADA no navegador' : 'clique em “Permitir notificações”'}`);
+        } else out.push('Tela: desligado neste computador');
+        if (cfg.urg.ntfyTopico) out.push('ntfy (celular): ' + ((await ntfyEnviar({ sid: 'pp-teste', titulo: '🧪 Teste PACS Plus', msg: 'Se você recebeu isto, os avisos de TC urgente vão chegar neste celular.', prio: 4, tags: 'test_tube' }, true)) ? '✅ enviado' : '❌ falhou'));
+        else out.push('ntfy: sem tópico');
+        if (tgTokenOk(cfg.urg.tgToken) && cfg.urg.tgChat) out.push('Telegram: ' + ((await tgEnviar('🧪 Teste PACS Plus — avisos de TC urgente funcionando.', true)) ? '✅ enviado' : '❌ falhou'));
+        if (cfg.urg.poUser && cfg.urg.poToken) out.push('Pushover: ' + ((await poEnviar({ titulo: '🧪 Teste PACS Plus', msg: 'Avisos de TC urgente funcionando.', prio: 0 }, true)) ? '✅ enviado' : '❌ falhou'));
+        return out;
+    }
 
     // =====================================================================
     // 4. CALCULADORAS
@@ -880,7 +1520,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
 #pp-btn { position: fixed; top: 10px; left: 236px; z-index: 150; background: #0f766e; color: #fff; border: 1.5px solid #5eead4; border-radius: 7px; padding: 5px 11px; font: 700 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,.45); }
 #pp-btn:hover { background: #115e59; }
 html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8px; font-size: 11px; opacity: .8; }
-#pp-panel { position: fixed; top: 46px; left: 140px; width: 470px; max-width: 96vw; max-height: 82vh; overflow: auto; z-index: 10000002; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: none; }
+#pp-panel { position: fixed; top: 46px; left: 140px; width: 520px; max-width: 96vw; max-height: 82vh; overflow: auto; z-index: 10000002; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: none; }
 #pp-panel.open { display: block; }
 #pp-panel * { box-sizing: border-box; }
 #pp-panel .pp-tabs { display: flex; gap: 4px; padding: 8px 8px 0; border-bottom: 1px solid #334155; position: sticky; top: 0; background: #0f172a; }
@@ -949,7 +1589,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
     function renderPanel() {
         const p = document.getElementById('pp-panel');
         if (!p) return;
-        const tabs = [['busca', '🔎 Pesquisa'], ['calc', '🧮 Calculadoras'], ['filtros', '🧩 Filtros'], ['prazos', '⏱ Prazos'], ['ajustes', '⚙️ Ajustes']];
+        const tabs = [['busca', '🔎 Pesquisa'], ['calc', '🧮 Calc.'], ['filtros', '🧩 Filtros'], ['prazos', '⏱ Prazos'], ['urg', '🚨 Urgências'], ['ajustes', '⚙️ Ajustes']];
         p.innerHTML = `<div class="pp-tabs">${tabs.map(([k, n]) => `<button class="pp-tab ${activeTab === k ? 'on' : ''}" data-tab="${k}">${n}</button>`).join('')}<button class="pp-close" title="Fechar (Esc)">✕</button></div><div class="pp-body"></div>`;
         p.querySelectorAll('.pp-tab').forEach(b => { b.onclick = () => { activeTab = b.dataset.tab; renderPanel(); }; });
         p.querySelector('.pp-close').onclick = () => togglePanel(false);
@@ -958,6 +1598,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
         else if (activeTab === 'calc') renderCalc(body);
         else if (activeTab === 'filtros') renderFiltros(body);
         else if (activeTab === 'prazos') renderPrazos(body);
+        else if (activeTab === 'urg') renderUrgencias(body);
         else renderAjustes(body);
     }
 
@@ -1054,7 +1695,7 @@ ${links.length ? `<div class="pp-h">Links rápidos</div><div class="pp-chips">${
         const r = cfg.sla;
         const hoje = chaveDia(new Date());
         body.innerHTML = `
-${on('slaUteis') ? '' : '<div class="pp-warn">O ajuste “Prazo (SLA) do TC eletivo em dias úteis” está desligado em ⚙️ Ajustes.</div>'}
+${on('slaUteis') ? '' : '<div class="pp-warn">O ajuste “Prazo (SLA) eletivo (TC e US) em dias úteis” está desligado em ⚙️ Ajustes.</div>'}
 <div class="pp-muted">O dia do exame não conta. Vence na abertura do N-ésimo dia útil seguinte. Fim de semana e feriados não contam.
 ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}</b>.` : ''}</div>
 <div class="pp-h">SLAs do PACS a recalcular (descrição, um por linha)</div>
@@ -1063,6 +1704,8 @@ ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}<
 <div class="pp-grid2">
 <label>Dias úteis por modalidade<textarea id="pp-sla-dias" rows="2">${esc(r.dias)}</textarea></label>
 <label>Pronto até (hora do dia final)<input id="pp-sla-hora" value="${esc(r.hora)}" placeholder="07:00"></label></div>
+<div class="pp-grid2"><label>TC: situações em que o exame é seu (prazo aparece)<input id="pp-sla-tcsit" value="${esc(r.tcSituacoes)}"></label>
+<label>US: situações com prazo próprio<input id="pp-sla-ussit" value="${esc(r.usSituacoes)}"></label></div>
 <label class="pp-tog"><input type="checkbox" id="pp-sla-carnaval" ${r.carnaval ? 'checked' : ''}><span>Carnaval (segunda e terça) sem expediente</span></label>
 <div class="pp-h">Feriados municipais / extras — “DD/MM | nome” (todo ano) ou “DD/MM/AAAA | nome”</div>
 <textarea id="pp-sla-extras" rows="3">${esc(r.extras)}</textarea>
@@ -1087,13 +1730,15 @@ ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}<
         body.querySelector('#pp-sim-mod').onchange = sim;
         body.querySelector('#pp-sla-save').onclick = () => {
             const hora = body.querySelector('#pp-sla-hora').value.trim();
-            cfg.sla = {
+            cfg.sla = Object.assign({}, cfg.sla, {
+                tcSituacoes: body.querySelector('#pp-sla-tcsit').value.trim() || 'REVISAR',
+                usSituacoes: body.querySelector('#pp-sla-ussit').value.trim() || 'REVISAR',
                 slas: body.querySelector('#pp-sla-slas').value,
                 dias: body.querySelector('#pp-sla-dias').value,
                 hora: /^\d{1,2}:\d{2}$/.test(hora) ? hora : SLA_PADRAO.hora,
                 carnaval: body.querySelector('#pp-sla-carnaval').checked,
                 extras: body.querySelector('#pp-sla-extras').value
-            };
+            });
             saveCfg();
             recalcularLista();
             renderPrazos(body);
@@ -1107,6 +1752,98 @@ ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}<
         if (comp) comp.exames.forEach(ex => { const s = ex && ex.sla; if (s && s.__ppUteis) { s.sla_prazo_final = s.__ppOriginal; delete s.__ppUteis; } });
         aplicarSlaUteis();
     }
+
+    // Aba 🚨 Urgências: monitor de TC urgente (escala, celular, testes)
+    function renderUrgencias(body) {
+        const u = cfg.urg, e = urgEstado(), agora = Date.now(), dias = janelaDias();
+        let lider = null; try { lider = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); } catch (x) { lider = null; }
+        const vigiaAqui = lider && lider.id === URG_TAB && agora - lider.ts < URG_LIDER_TTL;
+        const grupos = e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : [];
+        const abertos = grupos.filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+        const fechados = grupos.filter(g => !g.aberto && g.motivo && g.motivo !== 'jaLiberado').length;
+        const estado = !urgLigado() ? '⚪ Monitor desligado neste computador' : urgPausado() ? '⏸ Pausado até ' + esc(u.pausaAte) : '🟢 Monitor ligado neste computador';
+        body.innerHTML = `
+<div class="pp-res" style="margin-top:0;"><b>${estado}</b>${urgModoTeste() ? ' · <span class="pp-warn">MODO TESTE até ' + hm(cfg.urg.testeAte) + ' (inclui pacientes TESTE)</span>' : ''}
+<div class="pp-muted">Agora: ${naEscalaData(new Date()) ? 'dentro' : 'fora'} da escala · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}${urgLigado() ? ' · ' + (vigiaAqui ? 'esta aba é a que vigia' : 'outra aba deste computador vigia') : ''}${e.erro ? ' · <span class="pp-warn">' + esc(e.erro) + '</span>' : ''}</div>
+${abertos.length ? abertos.map(g => `<div>🚨 <b>${esc(g.nome)}</b> — ${esc(Object.values(g.exames || {}).map(y => y.d).join(' + '))} · vence <b>${hm(g.vence)}</b>${g.provisorio ? ' (provisório)' : ''}</div>`).join('') : '<div class="pp-muted">Nenhum TC urgente aberto agora.</div>'}
+${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</div>
+<label class="pp-tog"><input type="checkbox" id="pp-u-tela" ${u.tela ? 'checked' : ''}><span>Alerta na tela deste computador<small>Cartão no canto da tela, som e notificação do sistema.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-u-cel" ${u.celular ? 'checked' : ''}><span>Enviar avisos ao celular a partir deste computador<small>Ligue em UM computador só: o do hospital, que fica com o PACS aberto na escala.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-u-teste" ${urgModoTeste() ? 'checked' : ''}><span>Modo teste (desliga sozinho em 2 h)<small>Além dos urgentes reais, vigia os pacientes TESTE de qualquer data, mesmo fora da escala. Marque um TC do paciente TESTE como urgente para testar.</small></span></label>
+<div class="pp-h">Sua escala — TC urgente fora dela é telelaudo (sem aviso, sem prazo)</div>
+<div class="pp-checks">${DIAS_SEM.map((n, i) => `<label><input type="checkbox" data-udia="${i}" ${dias.includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
+<div class="pp-grid3"><label>Início<input id="pp-u-ini" value="${esc(u.inicio)}" placeholder="07:00"></label><label>Fim<input id="pp-u-fim" value="${esc(u.fim)}" placeholder="17:00"></label><label>Modalidades<input id="pp-u-mods" value="${esc(u.modalidades)}"></label></div>
+<div class="pp-grid3"><label>Lembretes (min antes)<input id="pp-u-lemb" value="${esc(u.lembretes)}"></label><label>Repetir vencido a cada (min)<input id="pp-u-rep" value="${esc(u.repetirVencido)}"></label><label>… quantas vezes<input id="pp-u-vezes" value="${esc(u.repetirVezes)}"></label></div>
+<div class="pp-grid3"><label>Prazo da urgência (h)<input id="pp-u-horas" value="${esc(u.horas)}"></label><label>Avisar sem confirmação após (min)<input id="pp-u-semc" value="${esc(u.semConfirmacao)}"></label><label>Encerra quando<input id="pp-u-enc" value="${esc(u.encerra)}"></label></div>
+<div class="pp-grid2"><label>Pausar avisos até (férias/folga)<input type="date" id="pp-u-pausa" value="${esc(u.pausaAte)}"></label>
+<div class="pp-checks" style="margin-top:16px;"><label><input type="checkbox" id="pp-u-som" ${u.som ? 'checked' : ''}>Som</label><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
+<div class="pp-h">Celular — app ntfy (grátis, Android e iPhone)</div>
+<div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-u-topico" value="${esc(u.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-u-serv" value="${esc(u.ntfyServidor)}"></label></div>
+<div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-gerar">Gerar</button> <button class="pp-btn sec" id="pp-u-copiar">Copiar</button></span></div>
+<div class="pp-h">Telegram (opcional)</div>
+<div class="pp-grid2"><label>Token do bot (@BotFather)<input id="pp-u-tgtok" value="${esc(u.tgToken)}"></label><label>Chat ID<input id="pp-u-tgchat" value="${esc(u.tgChat)}"></label></div>
+<div class="pp-row"><span class="pp-muted">Crie o bot no @BotFather, mande /start para ele e clique em Descobrir.</span><button class="pp-btn sec" id="pp-u-tgdesc">Descobrir</button></div>
+<div class="pp-h">Pushover (opcional — toca mesmo com o iPhone no silencioso)</div>
+<div class="pp-grid2"><label>User key<input id="pp-u-pouser" value="${esc(u.poUser)}"></label><label>API token do app<input id="pp-u-potok" value="${esc(u.poToken)}"></label></div>
+<label class="pp-tog"><input type="checkbox" id="pp-u-poemerg" ${u.poEmergencia ? 'checked' : ''}><span>Emergência a partir de 15 min do prazo<small>Repete a cada 1 min até você confirmar no celular; para sozinho quando o laudo é liberado.</small></span></label>
+<div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-u-testar">Enviar teste</button></span><button class="pp-btn" id="pp-u-salvar">Salvar</button></div>
+<div class="pp-res" id="pp-u-res" style="display:none;"></div>
+<div class="pp-muted" style="margin-top:8px;">No PC do hospital: Chrome → Configurações → Desempenho → <b>Economia de memória</b> → “Sempre manter estes sites ativos” → adicione <b>pacs.ladi.org.br</b>; e não deixe o Windows hibernar no horário da escala. Nome de paciente nunca vai para o celular. Tópico e tokens ficam só neste computador.</div>`;
+        const $ = id => body.querySelector(id);
+        const res = txt => { const r = $('#pp-u-res'); r.style.display = 'block'; r.innerHTML = txt; };
+        const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
+        const inteiro = (v, padrao, min, max) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= min && n <= max ? n : padrao; };
+        $('#pp-u-gerar').onclick = () => { if ($('#pp-u-topico').value && !confirm('Gerar um tópico NOVO? Você terá que inscrever o celular de novo.')) return; $('#pp-u-topico').value = urgGerarTopico(); res('Tópico novo gerado — clique em <b>Salvar</b> e inscreva o celular nele.'); };
+        $('#pp-u-copiar').onclick = async () => { try { await navigator.clipboard.writeText($('#pp-u-topico').value); res('Tópico copiado.'); } catch (x) { $('#pp-u-topico').select(); res('Selecione e copie (Ctrl+C).'); } };
+        $('#pp-u-tgdesc').onclick = async () => {
+            try { const id = await tgDescobrirChat($('#pp-u-tgtok').value); if (id) { $('#pp-u-tgchat').value = id; res('Chat ID encontrado: <b>' + esc(id) + '</b> — clique em Salvar.'); } else res('Nenhuma mensagem encontrada. Mande /start para o seu bot no Telegram e tente de novo.'); }
+            catch (x) { res('Telegram: ' + esc(x.message || x)); }
+        };
+        $('#pp-u-perm').onclick = async () => {
+            urgAudioCtx();
+            if (!('Notification' in window)) return res('Este navegador não tem notificações do sistema.');
+            const p = await Notification.requestPermission();
+            res(p === 'granted' ? '✅ Notificações permitidas neste navegador. Som liberado.' : p === 'denied' ? '❌ Notificações bloqueadas — libere no cadeado ao lado do endereço do site.' : 'Permissão não concedida.');
+        };
+        $('#pp-u-salvar').onclick = async () => {
+            const antes = Object.assign({}, cfg.urg);
+            const n = {
+                tela: $('#pp-u-tela').checked, celular: $('#pp-u-cel').checked, teste: $('#pp-u-teste').checked,
+                testeAte: $('#pp-u-teste').checked ? (urgModoTeste() ? cfg.urg.testeAte : Date.now() + 2 * 3600000) : 0,
+                dias: [...body.querySelectorAll('[data-udia]')].filter(c => c.checked).map(c => c.dataset.udia).join(','),
+                inicio: hora($('#pp-u-ini').value, URG_PADRAO.inicio), fim: hora($('#pp-u-fim').value, URG_PADRAO.fim),
+                modalidades: $('#pp-u-mods').value.trim() || 'CT',
+                lembretes: lembretesMinDe($('#pp-u-lemb').value).join(',') || URG_PADRAO.lembretes,
+                repetirVencido: inteiro($('#pp-u-rep').value, URG_PADRAO.repetirVencido, 0, 120),
+                repetirVezes: inteiro($('#pp-u-vezes').value, URG_PADRAO.repetirVezes, 0, 12),
+                horas: inteiro($('#pp-u-horas').value, URG_PADRAO.horas, 1, 48),
+                semConfirmacao: inteiro($('#pp-u-semc').value, URG_PADRAO.semConfirmacao, 1, 240),
+                encerra: $('#pp-u-enc').value.trim() || 'LIBERADO',
+                pausaAte: $('#pp-u-pausa').value || '',
+                som: $('#pp-u-som').checked, notifWindows: $('#pp-u-notif').checked,
+                ntfyTopico: $('#pp-u-topico').value.trim(), ntfyServidor: $('#pp-u-serv').value.trim() || URG_PADRAO.ntfyServidor,
+                tgToken: $('#pp-u-tgtok').value.trim(), tgChat: $('#pp-u-tgchat').value.trim(),
+                poUser: $('#pp-u-pouser').value.trim(), poToken: $('#pp-u-potok').value.trim(), poEmergencia: $('#pp-u-poemerg').checked
+            };
+            if (n.celular && !n.ntfyTopico) n.ntfyTopico = urgGerarTopico();
+            // desligou o envio ou trocou de tópico: cancela os vigias do tópico antigo (senão chegaria "monitor parou")
+            if (antes.celular && antes.ntfyTopico && (!n.celular || n.ntfyTopico !== antes.ntfyTopico)) {
+                await ntfyAcao('pp-vigia', 'delete', antes.ntfyTopico);
+                await ntfyAcao('pp-inicio', 'delete', antes.ntfyTopico);
+                const e2 = urgEstado(); e2.vigiaEm = 0; e2.diaAtivo = ''; urgSalvar(e2);
+            }
+            cfg.urg = Object.assign({}, URG_PADRAO, n);
+            saveCfg();
+            if (!urgLigado()) { try { const l = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); if (l && l.id === URG_TAB) localStorage.removeItem(URG_LIDER_KEY); } catch (x) { /* ok */ } }
+            urgBanner();
+            renderUrgencias(body);
+            const r2 = body.querySelector('#pp-u-res'); r2.style.display = 'block';
+            r2.innerHTML = '✓ Salvo neste computador.' + (cfg.urg.celular ? ` Tópico do celular: <b>${esc(cfg.urg.ntfyTopico)}</b>` : '');
+            setTimeout(urgCiclo, 500);
+        };
+        $('#pp-u-testar').onclick = async () => { res('Enviando…'); res((await urgTeste()).map(esc).join('<br>')); };
+    }
+    function lembretesMinDe(txt) { return [...new Set(String(txt || '').split(/[^\d]+/).map(Number).filter(n => n > 0 && n <= 600))].sort((a, b) => b - a); }
 
     function renderAjustes(body) {
         body.innerHTML = `
@@ -1207,6 +1944,14 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         buildPanel();
         obs.observe(document.body, { childList: true, subtree: true, characterData: true });
         setInterval(() => { if (!document.getElementById('pp-btn')) { const p = document.getElementById('pp-panel'); if (p) p.remove(); buildPanel(); } }, 2000);
+        if (!(window.__PP_TEST__ && window.__PP_TEST__.semTimers)) {
+            setInterval(urgCiclo, URG_TICK_MS);
+            setInterval(urgBanner, 5000);
+            setTimeout(urgCiclo, 3000);
+        }
+        urgBanner();
     }
     start();
+    // gancho só para testes automatizados (não faz nada no uso normal)
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => { cfg = loadCfg(); return cfg; } };
 })();
