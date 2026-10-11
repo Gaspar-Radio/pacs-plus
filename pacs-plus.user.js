@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.7.0
+// @version      1.7.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -705,15 +705,18 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const proprio = ex.sla && ex.sla.__ppProprio;
             const cabe = ativo && mod === 'US' && !ex.exa_idnurgente && situacoes.includes(String(ex.exa_situacao || '').toUpperCase());
             if (!cabe) {
-                if (proprio) { comp.$set(ex, 'sla', undefined); comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0); }
+                if (proprio) { comp.$set(ex, 'sla', ex.__ppSlaOriginal || { slaTempoRestante: null }); comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0); }
                 return;
             }
-            if (ex.sla && !proprio) return; // já tem SLA do PACS: não mexe
+            // o PACS devolve sla = { slaTempoRestante: null } para exame SEM SLA; só conta como SLA real se tiver slas[]
+            const slaReal = ex.sla && !proprio && Array.isArray(ex.sla.slas) && ex.sla.slas.length > 0;
+            if (slaReal) return; // já tem SLA do PACS: não mexe
             if (!proprio) {
                 const venc = prazoDiasUteis(ex.exa_data, nd, regras);
                 if (!venc) return;
                 const total = Math.max(0, Math.round((venc.getTime() - new Date(String(ex.exa_data).slice(0, 10) + 'T00:00:00').getTime()) / 1000));
                 ex.__ppCountOriginal = ex.sla_count_prazo || 0;
+                ex.__ppSlaOriginal = ex.sla || null;
                 comp.$set(ex, 'sla_count_prazo', 1);
                 comp.$set(ex, 'sla', { __ppProprio: true, __ppUteis: true, ultimoacao_tipo: 'CONFIRMADO', sla_prazo_final: venc.toISOString(),
                     sla_prazo: total, slas: [{ sla_codigo: 0, sla_descricao: SLA_PROPRIO_DESC, sla_prazo: nd * 24 }], slaTempoRestante: null });
