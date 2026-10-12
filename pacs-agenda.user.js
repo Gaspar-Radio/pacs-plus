@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.5.3
+// @version      8.6.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom e OCR Gemini.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -10,6 +10,9 @@
 // @connect      generativelanguage.googleapis.com
 // @connect      supabase.co
 // @connect      *.supabase.co
+// @connect      drive.google.com
+// @connect      googleusercontent.com
+// @connect      *.googleusercontent.com
 // @run-at       document-end
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-agenda.user.js
 // @downloadURL  https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-agenda.user.js
@@ -99,6 +102,35 @@
 
         #modalDashboard { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 780px; max-width: 95vw; max-height: 90vh; background: #fff; border-radius: 12px; box-shadow: 0 20px 45px rgba(0,0,0,0.7); z-index: 10000005; display: none; flex-direction: column; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #1e293b; }
         #modalDashboard.open { display: flex !important; }
+        #modalDocs { position: fixed; inset: 3vh 2vw; background: #f8fafc; border-radius: 12px; box-shadow: 0 20px 45px rgba(0,0,0,0.75); z-index: 10000006; display: none; flex-direction: column; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #1e293b; font-size: 11.5px; }
+        #modalDocs.open { display: flex !important; }
+        #modalDocs .docs-topo { background: #0f172a; color: #fff; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-shrink: 0; }
+        #modalDocs .docs-topo button { background: #334155; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 3px 9px; font-weight: 700; font-size: 10.5px; cursor: pointer; }
+        #modalDocs .docs-topo select { font-size: 10.5px; border-radius: 4px; padding: 2px 4px; }
+        #docsAviso { display: none; background: #fef3c7; color: #78350f; padding: 5px 12px; font-size: 10.5px; border-bottom: 1px solid #f59e0b; }
+        #modalDocs .docs-corpo { flex: 1; display: flex; min-height: 0; }
+        #modalDocs .docs-lado { width: 300px; flex-shrink: 0; border-right: 1px solid #e2e8f0; overflow-y: auto; padding: 8px; background: #fff; }
+        #modalDocs .docs-cat { font-weight: 800; font-size: 11px; margin: 10px 0 4px; color: #0f172a; }
+        #modalDocs .docs-cat span { font-weight: 500; color: #64748b; }
+        #modalDocs .docs-vazio { color: #94a3b8; font-size: 10.5px; padding: 2px 6px; }
+        #modalDocs .docs-item { display: flex; justify-content: space-between; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+        #modalDocs .docs-item:hover { background: #f1f5f9; }
+        #modalDocs .docs-item.sel { background: #dbeafe; border-color: #93c5fd; font-weight: 700; }
+        #modalDocs .docs-acoes button { background: none; border: none; cursor: pointer; font-size: 11px; padding: 0 2px; }
+        #docsForm { display: none; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 7px; padding: 7px; margin-bottom: 6px; }
+        #docsForm .docs-f-tit { font-weight: 800; font-size: 10.5px; margin-bottom: 4px; }
+        #docsForm input, #docsForm select { width: 100%; box-sizing: border-box; margin-bottom: 4px; font-size: 10.5px; padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 4px; }
+        #docsForm button { flex: 1; background: #0284c7; color: #fff; border: none; border-radius: 4px; padding: 4px; font-weight: 700; font-size: 10.5px; cursor: pointer; }
+        #docsForm button#btnDocsLimpar { background: #64748b; flex: 0 0 70px; }
+        #modalDocs .docs-principal { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        #modalDocs .docs-cab { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #e2e8f0; background: #fff; font-weight: 700; }
+        #docsAcoes { display: flex; gap: 6px; flex-wrap: wrap; }
+        #docsAcoes a, #docsAcoes button { background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; border-radius: 5px; padding: 3px 8px; font-weight: 700; font-size: 10.5px; text-decoration: none; cursor: pointer; }
+        #docsVisor { flex: 1; overflow: auto; background: #e2e8f0; padding: 10px; text-align: center; }
+        #docsVisor img { max-width: 100%; height: auto; cursor: zoom-in; box-shadow: 0 2px 10px rgba(0,0,0,.25); background: #fff; }
+        #docsVisor.real img { max-width: none; cursor: zoom-out; }
+        #docsVisor .docs-msg { color: #475569; padding: 40px 20px; line-height: 1.6; }
+        html[data-ag-viewer] #modalDocs { display: none !important; }
         #modalDashboard.dark-mode { background: #0f172a !important; color: #f1f5f9 !important; border: 1px solid #334155 !important; }
         #modalDashboard.dark-mode .dash-box { background: #1e293b !important; border-color: #334155 !important; color: #f1f5f9 !important; }
         .bar-track { background: #e2e8f0; border-radius: 3px; height: 7px; overflow: hidden; }
@@ -1009,11 +1041,264 @@
     }
 
     // =====================================================================
+    // 11B. CONSULTA — escalas, POPs e manuais (arquivos do Google Drive)
+    // ---------------------------------------------------------------------
+    // Cadastro único na tabela Supabase `agenda_documentos` (vale para os 3 PCs).
+    // A imagem é buscada no Drive com a sessão Google do navegador (GM_xmlhttpRequest
+    // envia os cookies), então só abre num PC logado na conta dona dos arquivos.
+    // Nenhum arquivo é copiado: o Drive continua sendo a fonte única.
+    // =====================================================================
+    const DOCS_CACHE_KEY = 'agenda_docs_cache_v1';
+    const DOCS_CATS = [
+        { k: 'escala_us', t: '🩺 Escalas Ultrassom', mensal: true },
+        { k: 'escala_tc', t: '🧠 Escala TC Urgência', mensal: true },
+        { k: 'pop', t: '📋 POPs', mensal: false },
+        { k: 'manual', t: '📘 Manuais e guias', mensal: false }
+    ];
+    let docsLista = [];
+    let docsMes = null;          // 'AAAA-MM' exibido nas escalas
+    let docsSel = null;          // id do documento aberto
+    let docsGerenciar = false;   // modo de edição do cadastro
+    const docsBlobCache = {};    // drive_id -> objectURL
+
+    function driveIdDe(txt) {
+        const s = String(txt || '').trim();
+        if (!s) return '';
+        let m = s.match(/\/d\/([A-Za-z0-9_-]{20,})/) || s.match(/[?&]id=([A-Za-z0-9_-]{20,})/);
+        if (m) return m[1];
+        return /^[A-Za-z0-9_-]{20,}$/.test(s) ? s : '';
+    }
+    const driveVer = id => `https://drive.google.com/file/d/${id}/view`;
+    const driveBaixar = id => `https://drive.google.com/uc?export=download&id=${id}`;
+    const mesHoje = () => getTodayIso().slice(0, 7);
+    function mesNome(m) {
+        if (!m) return '';
+        const [y, mm] = m.split('-').map(Number);
+        const n = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][mm - 1];
+        return `${n} ${y}`;
+    }
+
+    async function docsCarregar() {
+        try { docsLista = JSON.parse(localStorage.getItem(DOCS_CACHE_KEY) || '[]'); } catch (e) { docsLista = []; }
+        docsRender();
+        if (!getSupabaseConfig()) { docsAviso('Configure a nuvem em ⚙️ API para carregar os documentos.'); return; }
+        try {
+            const rows = await requestSupabase('agenda_documentos?select=*&ativo=eq.true&order=categoria.asc,mes.desc.nullslast,ordem.asc,id.asc', 'GET');
+            docsLista = Array.isArray(rows) ? rows : [];
+            try { localStorage.setItem(DOCS_CACHE_KEY, JSON.stringify(docsLista)); } catch (e) { /* cheio */ }
+            docsAviso('');
+        } catch (e) {
+            docsAviso('⚠️ Não consegui atualizar da nuvem (mostrando a última cópia deste PC). ' + e.message);
+        }
+        docsRender();
+    }
+
+    function docsMesesDisponiveis() {
+        const s = new Set(docsLista.filter(d => d.mes && (d.categoria === 'escala_us' || d.categoria === 'escala_tc')).map(d => d.mes));
+        return [...s].sort().reverse();
+    }
+
+    function docsAviso(txt) {
+        const el = document.getElementById('docsAviso');
+        if (el) { el.textContent = txt; el.style.display = txt ? 'block' : 'none'; }
+    }
+
+    function docsRender() {
+        const lista = document.getElementById('docsLista');
+        if (!lista) return;
+        const meses = docsMesesDisponiveis();
+        if (!docsMes) docsMes = meses.includes(mesHoje()) ? mesHoje() : (meses[0] || mesHoje());
+        const selMes = document.getElementById('docsMes');
+        if (selMes) {
+            const opts = new Set([...meses, docsMes]);
+            selMes.innerHTML = [...opts].sort().reverse().map(m => `<option value="${m}" ${m === docsMes ? 'selected' : ''}>${mesNome(m)}${m === mesHoje() ? ' (atual)' : ''}</option>`).join('');
+        }
+        let html = '';
+        DOCS_CATS.forEach(c => {
+            const itens = docsLista.filter(d => d.categoria === c.k && (!c.mensal || d.mes === docsMes));
+            html += `<div class="docs-cat">${c.t}${c.mensal ? ` <span>· ${mesNome(docsMes)}</span>` : ''}</div>`;
+            if (!itens.length) html += `<div class="docs-vazio">${c.mensal ? 'Nada cadastrado para este mês.' : 'Nada cadastrado.'}</div>`;
+            itens.forEach(d => {
+                html += `<div class="docs-item ${String(d.id) === String(docsSel) ? 'sel' : ''}" data-doc="${d.id}">
+                    <span class="docs-tit">${escapeHtml(d.titulo)}</span>
+                    ${docsGerenciar ? `<span class="docs-acoes"><button data-docedit="${d.id}" title="Editar">✏️</button><button data-docdel="${d.id}" title="Remover da lista">🗑️</button></span>` : ''}
+                </div>`;
+            });
+        });
+        lista.innerHTML = html;
+        const form = document.getElementById('docsForm');
+        if (form) form.style.display = docsGerenciar ? 'block' : 'none';
+        const bg = document.getElementById('btnDocsGerenciar');
+        if (bg) bg.textContent = docsGerenciar ? '✔ Concluir' : '✏️ Gerenciar';
+        if (!docsSel) {
+            const prim = docsLista.find(d => d.categoria === 'escala_us' && d.mes === docsMes) || docsLista.find(d => d.mes === docsMes);
+            if (prim) docsAbrir(prim.id);
+        }
+    }
+
+    function docsAbrir(id) {
+        const d = docsLista.find(x => String(x.id) === String(id));
+        if (!d) return;
+        docsSel = d.id;
+        document.querySelectorAll('#docsLista .docs-item').forEach(el => el.classList.toggle('sel', el.dataset.doc === String(d.id)));
+        const tit = document.getElementById('docsTitulo');
+        const acoes = document.getElementById('docsAcoes');
+        const area = document.getElementById('docsVisor');
+        tit.textContent = d.titulo + (d.mes ? ` — ${mesNome(d.mes)}` : '');
+        const pdf = d.pdf_drive_id || '';
+        acoes.innerHTML = `<a href="${driveVer(d.drive_id)}" target="_blank" rel="noopener">↗ Abrir no Drive</a>
+            <a href="${driveBaixar(d.drive_id)}" target="_blank" rel="noopener">⬇ Baixar</a>
+            ${pdf ? `<a href="${driveVer(pdf)}" target="_blank" rel="noopener">📄 PDF</a>` : ''}
+            <button id="btnDocsZoom" title="Alternar: ajustar à largura / tamanho real">🔍 Zoom</button>`;
+        document.getElementById('btnDocsZoom').onclick = () => area.classList.toggle('real');
+        area.classList.remove('real');
+        area.innerHTML = '<div class="docs-msg">Carregando do Drive…</div>';
+        docsImagem(d.drive_id).then(url => {
+            if (docsSel !== d.id) return;
+            area.innerHTML = `<img src="${url}" alt="">`;
+            area.querySelector('img').onclick = () => area.classList.toggle('real');
+        }).catch(err => {
+            if (docsSel !== d.id) return;
+            area.innerHTML = `<div class="docs-msg">Não foi possível mostrar a prévia aqui (${escapeHtml(err.message)}).<br>
+                Confira se este navegador está logado no Google da conta dona dos arquivos, ou use <b>↗ Abrir no Drive</b>.</div>`;
+        });
+    }
+
+    function docsImagem(driveId) {
+        if (docsBlobCache[driveId]) return Promise.resolve(docsBlobCache[driveId]);
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://drive.google.com/thumbnail?id=${encodeURIComponent(driveId)}&sz=w2400`,
+                responseType: 'blob',
+                timeout: 30000,
+                onload(res) {
+                    const tipo = (res.response && res.response.type) || '';
+                    if (res.status >= 200 && res.status < 300 && /^image\//.test(tipo)) {
+                        const u = URL.createObjectURL(res.response);
+                        docsBlobCache[driveId] = u;
+                        resolve(u);
+                    } else reject(new Error(res.status === 200 ? 'sem acesso ao arquivo' : 'HTTP ' + res.status));
+                },
+                onerror() { reject(new Error('sem conexão com o Drive')); },
+                ontimeout() { reject(new Error('o Drive demorou demais')); }
+            });
+        });
+    }
+
+    function docsPreencherForm(d) {
+        const $ = id => document.getElementById(id);
+        $('docsFId').value = d ? d.id : '';
+        $('docsFCat').value = d ? d.categoria : 'escala_us';
+        $('docsFTitulo').value = d ? d.titulo : '';
+        $('docsFMes').value = d ? (d.mes || '') : docsMes;
+        $('docsFLink').value = d ? driveVer(d.drive_id) : '';
+        $('docsFPdf').value = d && d.pdf_drive_id ? driveVer(d.pdf_drive_id) : '';
+        $('docsFOrdem').value = d ? d.ordem : 0;
+        $('btnDocsSalvar').textContent = d ? '💾 Salvar alteração' : '➕ Adicionar';
+    }
+
+    async function docsSalvar() {
+        const $ = id => document.getElementById(id);
+        const cat = $('docsFCat').value;
+        const mensal = DOCS_CATS.find(c => c.k === cat).mensal;
+        const reg = {
+            categoria: cat,
+            titulo: $('docsFTitulo').value.trim(),
+            mes: mensal ? ($('docsFMes').value || null) : null,
+            drive_id: driveIdDe($('docsFLink').value),
+            pdf_drive_id: driveIdDe($('docsFPdf').value) || null,
+            ordem: parseInt($('docsFOrdem').value, 10) || 0
+        };
+        if (!reg.titulo) return alert('Informe o título.');
+        if (!reg.drive_id) return alert('Cole o link do arquivo no Drive (Compartilhar → Copiar link, ou o endereço da página do arquivo).');
+        if (mensal && !reg.mes) return alert('Escolha o mês da escala.');
+        const id = $('docsFId').value;
+        try {
+            if (id) await requestSupabase(`agenda_documentos?id=eq.${encodeURIComponent(id)}`, 'PATCH', reg, { Prefer: 'return=minimal' });
+            else await requestSupabase('agenda_documentos', 'POST', reg, { Prefer: 'return=minimal' });
+            if (reg.mes) docsMes = reg.mes;
+            docsPreencherForm(null);
+            await docsCarregar();
+        } catch (e) { alert('Não foi possível salvar na nuvem: ' + e.message); }
+    }
+
+    async function docsRemover(id) {
+        const d = docsLista.find(x => String(x.id) === String(id));
+        if (!d || !confirm(`Remover "${d.titulo}" da lista?\n(O arquivo no Drive não é apagado.)`)) return;
+        try {
+            await requestSupabase(`agenda_documentos?id=eq.${encodeURIComponent(id)}`, 'PATCH', { ativo: false }, { Prefer: 'return=minimal' });
+            if (String(docsSel) === String(id)) docsSel = null;
+            await docsCarregar();
+        } catch (e) { alert('Não foi possível remover: ' + e.message); }
+    }
+
+    function docsMontar() {
+        if (document.getElementById('modalDocs')) return;
+        const m = document.createElement('div');
+        m.id = 'modalDocs';
+        m.innerHTML = `
+            <div class="docs-topo">
+                <span style="font-weight:bold; font-size:12.5px;">📚 Consulta — escalas, POPs e manuais</span>
+                <span style="display:flex; gap:6px; align-items:center;">
+                    <label style="font-size:10.5px;">Mês das escalas <select id="docsMes"></select></label>
+                    <button id="btnDocsAtualizar" title="Recarregar da nuvem">🔄</button>
+                    <button id="btnDocsGerenciar">✏️ Gerenciar</button>
+                    <button id="btnDocsFechar" style="background:#e11d48;">✕</button>
+                </span>
+            </div>
+            <div id="docsAviso"></div>
+            <div class="docs-corpo">
+                <div class="docs-lado">
+                    <div id="docsForm">
+                        <input type="hidden" id="docsFId">
+                        <div class="docs-f-tit">Cadastrar / editar (vale para os 3 PCs)</div>
+                        <select id="docsFCat">${DOCS_CATS.map(c => `<option value="${c.k}">${c.t}</option>`).join('')}</select>
+                        <input id="docsFTitulo" placeholder="Título (ex.: Escala Prefeitura)">
+                        <input id="docsFMes" type="month" title="Mês (só para escalas)">
+                        <input id="docsFLink" placeholder="Link do arquivo no Drive (PNG ou PDF)">
+                        <input id="docsFPdf" placeholder="Link do PDF (opcional)">
+                        <input id="docsFOrdem" type="number" placeholder="Ordem" title="Ordem na lista">
+                        <div style="display:flex; gap:4px;"><button id="btnDocsSalvar">➕ Adicionar</button><button id="btnDocsLimpar">Limpar</button></div>
+                    </div>
+                    <div id="docsLista"></div>
+                </div>
+                <div class="docs-principal">
+                    <div class="docs-cab"><span id="docsTitulo">Selecione um item</span><span id="docsAcoes"></span></div>
+                    <div id="docsVisor"><div class="docs-msg">Selecione um item à esquerda.</div></div>
+                </div>
+            </div>`;
+        document.body.appendChild(m);
+        const $ = id => document.getElementById(id);
+        $('btnDocsFechar').onclick = () => m.classList.remove('open');
+        $('btnDocsAtualizar').onclick = docsCarregar;
+        $('btnDocsGerenciar').onclick = () => { docsGerenciar = !docsGerenciar; docsPreencherForm(null); docsRender(); };
+        $('btnDocsSalvar').onclick = docsSalvar;
+        $('btnDocsLimpar').onclick = () => docsPreencherForm(null);
+        $('docsMes').onchange = e => { docsMes = e.target.value; docsSel = null; docsRender(); };
+        $('docsLista').addEventListener('click', e => {
+            const ed = e.target.closest('[data-docedit]');
+            if (ed) { e.stopPropagation(); docsPreencherForm(docsLista.find(x => String(x.id) === ed.dataset.docedit)); return; }
+            const del = e.target.closest('[data-docdel]');
+            if (del) { e.stopPropagation(); docsRemover(del.dataset.docdel); return; }
+            const it = e.target.closest('[data-doc]');
+            if (it) docsAbrir(it.dataset.doc);
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && m.classList.contains('open')) m.classList.remove('open'); });
+    }
+
+    function openDocs() {
+        docsMontar();
+        document.getElementById('modalDocs').classList.add('open');
+        docsCarregar();
+    }
+
+    // =====================================================================
     // 12. INTERFACE
     // =====================================================================
     // Visualizador de imagens (/viewer): a Agenda fica oculta (só aparece na lista de exames).
-    const agEhViewer = () => location.pathname.startsWith('/viewer');
-    function agMarcarViewer() { const v = agEhViewer(); if (v !== document.documentElement.hasAttribute('data-ag-viewer')) document.documentElement.toggleAttribute('data-ag-viewer', v); }
+    const agEhViewer = () => String((location && location.pathname) || '').startsWith('/viewer');
+    function agMarcarViewer() { try { const h = document.documentElement, v = agEhViewer(); if (v !== h.hasAttribute('data-ag-viewer')) h.toggleAttribute('data-ag-viewer', v); } catch (e) { /* página ainda sem <html> */ } }
     agMarcarViewer(); setInterval(agMarcarViewer, 500);
 
     function initUI() {
@@ -1063,6 +1348,7 @@
                     </div>
                     <button id="btnToggleTheme" class="btn-top-action" style="background:#334155; color:#f8fafc; border:1px solid #475569;">🌙 Escuro</button>
                     <button id="btnOpenDashboard" class="btn-top-action" style="background:#6366f1; color:#fff;">📊 Dashboard & Faltas</button>
+                    <button id="btnOpenDocs" class="btn-top-action" style="background:#0d9488; color:#fff;" title="Escalas do mês, POPs e manuais">📚 Consulta</button>
                     <button id="btnPrintPDF" class="btn-top-action" style="background:#0284c7; color:#fff;">🖨️ Imprimir</button>
                     <button id="btnUploadPrints" class="btn-top-action" style="background:#3b82f6; color:#fff;">📷 Subir Prints</button>
                     <input type="file" id="nativeFileInput" multiple accept="image/*" style="display:none;">
@@ -1232,6 +1518,7 @@
         $('btnSalvarEncaixe').onclick = handleAddEncaixe;
         ['encHora', 'encPaciente', 'encExame'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') handleAddEncaixe(); }));
         $('btnOpenDashboard').onclick = openDashboard;
+        $('btnOpenDocs').onclick = openDocs;
         $('btnPrintPDF').onclick = printPDF;
 
         const bodyScroll = $('agenda-body-scroll');
