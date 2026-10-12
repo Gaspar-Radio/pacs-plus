@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Cartografia Venosa MMII
 // @namespace    hamc-rt
-// @version      1.0.1
+// @version      1.0.2
 // @description  Cartografia (desenho) do Doppler venoso de MMII dentro do Laudo Web: botão só nos exames de Doppler venoso de membro inferior com imagem, nome e data puxados do exame, desfazer/refazer, uni ou bilateral, pré-desenho a partir do laudo (API do Claude, opcional) e PDF anexado ao exame.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -17,7 +17,7 @@
   if (window.__cvMMIILoaded) return;
   window.__cvMMIILoaded = true;
 
-  const VERSAO = '1.0.1';
+  const VERSAO = '1.0.2';
   const API = '/backend/api';
   const P = 'cvmmii';                       // prefixo de ids/classes
   const PREFIXO_ANEXO = 'Cartografia Venosa MMII';
@@ -293,14 +293,19 @@ Sistema profundo não é desenhado: resuma achados relevantes dele (TVP, refluxo
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': c.chave, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: c.modelo || MODELO_PADRAO, max_tokens: 4096, system: SISTEMA, tools: [TOOL], tool_choice: { type: 'tool', name: 'cartografia' },
-        messages: [{ role: 'user', content: 'Laudo:\n\n' + texto }] })
+      // tool_choice "auto": os modelos atuais recusam "tool"/"any" (erro 400) — a instrução manda chamar a ferramenta
+      body: JSON.stringify({ model: c.modelo || MODELO_PADRAO, max_tokens: 8000, system: SISTEMA + '\nResponda SEMPRE chamando a ferramenta "cartografia" uma única vez, sem texto adicional.', tools: [TOOL], tool_choice: { type: 'auto' },
+        messages: [{ role: 'user', content: 'Laudo:\n\n' + texto + '\n\nChame a ferramenta cartografia com os dados deste laudo.' }] })
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error('API ' + r.status + ' ' + ((j.error && j.error.message) || '').slice(0, 140));
-    const blk = (j.content || []).find(b => b.type === 'tool_use');
-    if (!blk) throw new Error('a API não devolveu os dados estruturados');
-    return blk.input;
+    const blk = (j.content || []).find(b => b.type === 'tool_use' && b.name === 'cartografia');
+    if (blk && blk.input) return blk.input;
+    // reserva: modelo respondeu em texto com JSON
+    const txt = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (m) { try { const o = JSON.parse(m[0]); if (o && o.membros) return o; } catch (e) { /* segue */ } }
+    throw new Error('a API não devolveu os dados estruturados' + (j.stop_reason ? ' (' + j.stop_reason + ')' : ''));
   }
 
   // ---------------- janela ----------------
@@ -441,6 +446,6 @@ Sistema profundo não é desenhado: resuma achados relevantes dele (TVP, refluxo
     });
   }
   // gancho de testes automatizados (sem efeito no uso normal)
-  if (window.__CV_TEST__) { window.__CV_TEST__.api = { gerarPDF, estadoDoPDF, textoLaudo, elegivel, ehDopplerVenosoMMII, nomeArquivo, abrir, listaAnexos }; if (window.__CV_TEST__.semTimers) return; }
+  if (window.__CV_TEST__) { window.__CV_TEST__.api = { gerarPDF, estadoDoPDF, textoLaudo, elegivel, ehDopplerVenosoMMII, nomeArquivo, abrir, listaAnexos, chamarClaude }; if (window.__CV_TEST__.semTimers) return; }
   setInterval(() => { if (document.body) botoesLinhas(); }, 1200);
 })();
