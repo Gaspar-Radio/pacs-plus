@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Cartografia Venosa MMII
 // @namespace    hamc-rt
-// @version      1.0.0
+// @version      1.0.1
 // @description  Cartografia (desenho) do Doppler venoso de MMII dentro do Laudo Web: botão só nos exames de Doppler venoso de membro inferior com imagem, nome e data puxados do exame, desfazer/refazer, uni ou bilateral, pré-desenho a partir do laudo (API do Claude, opcional) e PDF anexado ao exame.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -17,7 +17,7 @@
   if (window.__cvMMIILoaded) return;
   window.__cvMMIILoaded = true;
 
-  const VERSAO = '1.0.0';
+  const VERSAO = '1.0.1';
   const API = '/backend/api';
   const P = 'cvmmii';                       // prefixo de ids/classes
   const PREFIXO_ANEXO = 'Cartografia Venosa MMII';
@@ -31,10 +31,13 @@
 
   // ---------------- estilos ----------------
   const css = `
-  .${P}-btn{display:inline-flex;align-items:center;justify-content:center;margin-right:6px;vertical-align:middle;border:1px solid #7c3aed;background:rgba(15,23,42,.85);color:#c4b5fd;
-    border-radius:12px;padding:0 6px;min-width:30px;height:22px;font:700 11px -apple-system,"Segoe UI",Roboto,sans-serif;cursor:pointer;white-space:nowrap;line-height:18px}
+  /* selo sem nó de texto (o rótulo vem do CSS): o PACS Plus reescreve o texto da célula Exame e não pode enxergar o selo */
+  .${P}-btn{display:inline-flex;align-items:center;justify-content:center;margin:0 5px 0 0;vertical-align:middle;border:1px solid #7c3aed;background:#4c1d95;color:#ede9fe;
+    border-radius:4px;padding:0 4px;height:16px;font:800 10px/14px -apple-system,"Segoe UI",Roboto,sans-serif;cursor:pointer;white-space:nowrap;letter-spacing:.03em}
+  .${P}-btn::before{content:"CV"}
+  .${P}-btn.ok::before{content:"CV ✓"}
   .${P}-btn:hover{background:#7c3aed;color:#fff}
-  .${P}-btn.ok{border-color:#059669;color:#6ee7b7}
+  .${P}-btn.ok{background:#065f46;border-color:#059669;color:#d1fae5}
   #${P}-ov{position:fixed;inset:0;z-index:10000010;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center}
   #${P}-ov.open{display:flex}
   #${P}-panel{width:min(1280px,98vw);height:96vh;background:#11181d;border-radius:10px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.7);position:relative}
@@ -415,11 +418,11 @@ Sistema profundo não é desenhado: resuma achados relevantes dele (TVP, refluxo
     const t = g.$el && g.$el.querySelector('.v-data-table') || document.querySelector('.v-main .v-data-table');
     if (!t) return;
     const ths = [...t.querySelectorAll('thead tr:first-child > th')].map(th => norm(th.innerText));
-    const iSit = ths.indexOf('situacao'); if (iSit < 0) return;
+    const iEx = ths.indexOf('exame'); if (iEx < 0) return;
     const iData = ths.indexOf('data'), iHora = ths.indexOf('hora');
     const rows = [...t.querySelectorAll('tbody tr')].filter(r => r.children.length === ths.length);
     rows.forEach((r, i) => {
-      const item = g.exames[i], cell = r.children[iSit];
+      const item = g.exames[i], cell = r.children[iEx];
       let btn = cell.querySelector('.' + P + '-btn');
       // confere a linha com o item (quando as colunas Data/Hora existem neste computador)
       const okRow = item && rows.length === g.exames.length
@@ -434,7 +437,6 @@ Sistema profundo não é desenhado: resuma achados relevantes dele (TVP, refluxo
       btn.dataset.exa = item.exa_codigo;
       const ok = salvos.has(item.exa_codigo);
       btn.classList.toggle('ok', ok);
-      btn.textContent = ok ? '🦵 CV ✓' : '🦵 CV';
       btn.title = ok ? 'Cartografia venosa anexada nesta sessão (reabrir para revisar)' : 'Abrir a cartografia venosa (desenho) deste exame';
     });
   }
