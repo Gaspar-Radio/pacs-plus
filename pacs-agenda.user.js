@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.5.2
+// @version      8.5.3
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom e OCR Gemini.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -23,6 +23,7 @@
     // =====================================================================
     GM_addStyle(`
         #btn-agenda-flutuante { position: fixed !important; top: 10px !important; left: 140px !important; z-index: 9999999 !important; background: #2563eb !important; color: #fff !important; border: 1.5px solid #60a5fa !important; border-radius: 7px !important; padding: 5px 12px !important; font-size: 12px !important; font-weight: 700 !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important; cursor: pointer !important; box-shadow: 0 3px 10px rgba(0,0,0,0.45) !important; display: flex !important; align-items: center !important; gap: 5px !important; transition: all 0.15s ease !important; }
+        html[data-ag-viewer] #btn-agenda-flutuante, html[data-ag-viewer] #agenda-drawer-wrapper, html[data-ag-viewer] #agenda-bg-backdrop { display: none !important; }
         #btn-agenda-flutuante:hover { background: #1d4ed8 !important; transform: translateY(-1px) !important; }
         #agenda-drawer-wrapper { position: fixed !important; top: 0 !important; right: -1100px !important; width: 920px; max-width: 98vw !important; height: 100vh !important; background: #f8fafc; box-shadow: -12px 0 35px rgba(0,0,0,0.75) !important; z-index: 10000000 !important; transition: right 0.26s cubic-bezier(0.4,0,0.2,1), width 0.2s ease !important; display: flex !important; flex-direction: column !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important; color: #1e293b; }
         #agenda-drawer-wrapper.open { right: 0 !important; }
@@ -1010,6 +1011,11 @@
     // =====================================================================
     // 12. INTERFACE
     // =====================================================================
+    // Visualizador de imagens (/viewer): a Agenda fica oculta (só aparece na lista de exames).
+    const agEhViewer = () => location.pathname.startsWith('/viewer');
+    function agMarcarViewer() { const v = agEhViewer(); if (v !== document.documentElement.hasAttribute('data-ag-viewer')) document.documentElement.toggleAttribute('data-ag-viewer', v); }
+    agMarcarViewer(); setInterval(agMarcarViewer, 500);
+
     function initUI() {
         if (!document.body) return;
         if (!document.getElementById('btn-agenda-flutuante')) {

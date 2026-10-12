@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.8.0
+// @version      1.8.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1902,7 +1902,7 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     const ehViewer = () => location.pathname.startsWith('/viewer');
     let viewerFeito = null; // UID do estudo já tratado
     let viewerVisto = { uid: null, t: 0, n: -1 }; // quando a imagem ficou pronta / nº de séries estável
-    const VIEWER_ESPERA_MS = 1500; // dá tempo a outros scripts/preferências agirem primeiro (evita clique duplo)
+    const VIEWER_ESPERA_MS = 400; // só para a regra "série única": nº de séries estável por 0,4 s (miniaturas carregam aos poucos)
     function modalidadeViewer() {
         try {
             const cs = window.cornerstone;
@@ -1923,15 +1923,19 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         if (!painel || !botao) return;
         const mod = modalidadeViewer();
         if (!mod) return; // imagem ainda carregando: tenta de novo no próximo ciclo
+        // Todos / US: recolhe assim que a imagem carrega (não depende do nº de séries).
+        const imediato = on('viewerRecolherTodos') || (on('viewerRecolherUS') && mod === 'US');
         const nSeries = Math.max(document.querySelectorAll('.series-details').length, document.querySelectorAll('.study-browser .thumbnail-container').length);
-        // espera o nº de séries ficar estável por 1,5 s (as miniaturas carregam aos poucos)
-        if (viewerVisto.uid !== uid || viewerVisto.n !== nSeries) { viewerVisto = { uid, t: Date.now(), n: nSeries }; return; }
-        if (Date.now() - viewerVisto.t < VIEWER_ESPERA_MS) return;
+        if (!imediato) {
+            // série única: espera o nº de séries ficar estável por 0,4 s
+            if (viewerVisto.uid !== uid || viewerVisto.n !== nSeries) { viewerVisto = { uid, t: Date.now(), n: nSeries }; return; }
+            if (Date.now() - viewerVisto.t < VIEWER_ESPERA_MS) return;
+        }
         viewerFeito = uid;
-        const recolher = on('viewerRecolherTodos') || (on('viewerRecolherUS') && mod === 'US') || (on('viewerRecolherSerieUnica') && nSeries === 1);
+        const recolher = imediato || (on('viewerRecolherSerieUnica') && nSeries === 1);
         if (recolher && painel.classList.contains('is-open')) (botao.querySelector('.roundedButton') || botao).click();
     }
-    setInterval(checarViewer, 700);
+    setInterval(checarViewer, 200);
 
     // =====================================================================
     // 7. INÍCIO
