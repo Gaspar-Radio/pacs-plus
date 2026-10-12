@@ -1,10 +1,11 @@
-# PACS Plus (userscript Tampermonkey)
+# PACS LADI — userscripts (Tampermonkey)
 
-Ajustes visuais liga/desliga, pesquisa rápida e calculadoras radiológicas para o PACS Laudo Web.
-Contém **apenas código de interface** — nenhum dado de paciente, chave ou credencial.
+Scripts de interface para o PACS Laudo Web. Contêm **apenas código** — nenhum dado de paciente, chave ou credencial
+(as credenciais ficam só no navegador de cada computador).
 
-## Instalar / atualizar
-Abrir no navegador com Tampermonkey:
-https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js
+| Script | O que faz | Instalar / atualizar |
+|---|---|---|
+| PACS Plus | Ajustes visuais, pesquisa rápida, calculadoras, prazos, avisos de urgência | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js |
+| Agenda Operacional | Agenda integrada ao PACS, sincronização em nuvem, no-show | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-agenda.user.js |
 
 O Tampermonkey verifica novas versões automaticamente (`@updateURL`).
