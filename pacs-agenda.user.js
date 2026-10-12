@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.6.1
-// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom e OCR Gemini.
+// @version      8.7.0
+// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      generativelanguage.googleapis.com
+// @connect      api.anthropic.com
+// @connect      docs.google.com
 // @connect      supabase.co
 // @connect      *.supabase.co
 // @connect      drive.google.com
@@ -30,6 +32,9 @@
         #btn-agenda-flutuante:hover { background: #1d4ed8 !important; transform: translateY(-1px) !important; }
         #agenda-drawer-wrapper { position: fixed !important; top: 0 !important; right: -1100px !important; width: 920px; max-width: 98vw !important; height: 100vh !important; background: #f8fafc; box-shadow: -12px 0 35px rgba(0,0,0,0.75) !important; z-index: 10000000 !important; transition: right 0.26s cubic-bezier(0.4,0,0.2,1), width 0.2s ease !important; display: flex !important; flex-direction: column !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important; color: #1e293b; }
         #agenda-drawer-wrapper.open { right: 0 !important; }
+        #agenda-drawer-wrapper.drop-on { outline: 4px dashed #3b82f6 !important; outline-offset: -8px; }
+        .obs-cell { font-size: 9.5px; color: #b45309; margin-top: 1px; }
+        .badge-saiu { background: #fef3c7 !important; color: #92400e !important; border: 1px solid #f59e0b !important; }
         #agenda-top-bar { background: #0f172a !important; color: #fff !important; padding: 7px 12px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; border-bottom: 1px solid #334155 !important; flex-shrink: 0 !important; gap: 6px; }
         .btn-top-action { border: none !important; border-radius: 5px !important; padding: 4px 8px !important; font-size: 10.5px !important; font-weight: 700 !important; cursor: pointer !important; transition: opacity 0.15s !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; }
         .btn-top-action:hover { opacity: 0.88; }
@@ -410,7 +415,11 @@
             pacs_qtd_exames: item.pacsQtdExames || null,
             chegada_fonte: item.chegadaFonte || null,
             imagem_em: item.imagemEm || null,
-            atendido_fonte: item.atendidoFonte || null
+            atendido_fonte: item.atendidoFonte || null,
+            // v8.7 — vários exames no mesmo horário, observação e saída da origem
+            qtd_exames: Math.max(1, parseInt(item.qtdExames != null ? item.qtdExames : item.qtd_exames, 10) || 1),
+            obs: item.obs || null,
+            removido_origem_em: item.removidoOrigemEm || item.removido_origem_em || null
         };
     }
 
@@ -502,7 +511,10 @@
             pacsQtdExames: r.pacs_qtd_exames || null,
             chegadaFonte: r.chegada_fonte || null,
             imagemEm: r.imagem_em || null,
-            atendidoFonte: r.atendido_fonte || null
+            atendidoFonte: r.atendido_fonte || null,
+            qtdExames: r.qtd_exames || 1,
+            obs: r.obs || null,
+            removidoOrigemEm: r.removido_origem_em || null
         };
     }
 
@@ -981,6 +993,269 @@
     }
 
     // =====================================================================
+    // 9B. IA — Claude (padrão) com Gemini de reserva
+    // ---------------------------------------------------------------------
+    // Ordem: a IA escolhida em ⚙️ API primeiro; se falhar (ou não tiver chave),
+    // tenta a outra. Aceita imagens (JPEG comprimido) e PDF.
+    // =====================================================================
+    const ANTHROPIC_KEY_STORAGE = 'anthropic_api_key';
+    const IA_PREF_STORAGE = 'ia_preferida'; // 'claude' | 'gemini'
+    const CLAUDE_MODEL = 'claude-sonnet-5-5';
+
+    function requestClaude(apiKey, content, maxTokens = 16000) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: 'https://api.anthropic.com/v1/messages',
+                headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+                data: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content }] }),
+                timeout: 240000,
+                onload(res) {
+                    let data = null;
+                    try { data = JSON.parse(res.responseText); } catch (e) { /* abaixo */ }
+                    if (res.status !== 200 || !data) {
+                        const msg = data && data.error ? data.error.message : String(res.responseText || '').slice(0, 200);
+                        return reject(new Error(`HTTP ${res.status}${res.status === 401 ? ' (chave inválida)' : res.status === 402 || /credit/i.test(msg) ? ' (sem crédito)' : ''}: ${msg}`));
+                    }
+                    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+                    if (!texto) return reject(new Error('resposta vazia'));
+                    resolve(texto);
+                },
+                onerror() { reject(new Error('sem conexão com api.anthropic.com')); },
+                ontimeout() { reject(new Error('tempo esgotado (4 min)')); }
+            });
+        });
+    }
+
+    async function chamarIA({ prompt, imagens = [], pdfs = [] }) {
+        const kC = (localStorage.getItem(ANTHROPIC_KEY_STORAGE) || '').trim();
+        const kG = (localStorage.getItem(API_KEY_STORAGE) || '').trim();
+        if (!kC && !kG) throw new Error('Configure a chave do Claude (ou a do Gemini, reserva) em ⚙️ API.');
+        const ordem = (localStorage.getItem(IA_PREF_STORAGE) || 'claude') === 'gemini' ? ['gemini', 'claude'] : ['claude', 'gemini'];
+        const erros = [];
+        for (const ia of ordem) {
+            if (ia === 'claude' && kC) {
+                try {
+                    const content = [
+                        ...imagens.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mimeType, data: i.base64 } })),
+                        ...pdfs.map(p => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.base64 } })),
+                        { type: 'text', text: prompt }
+                    ];
+                    return { texto: await requestClaude(kC, content), ia: 'Claude' };
+                } catch (e) { erros.push('Claude: ' + e.message); }
+            }
+            if (ia === 'gemini' && kG) {
+                try {
+                    const payload = { contents: [{ parts: [{ text: prompt },
+                        ...imagens.map(i => ({ inline_data: { mime_type: i.mimeType, data: i.base64 } })),
+                        ...pdfs.map(p => ({ inline_data: { mime_type: 'application/pdf', data: p.base64 } }))] }] };
+                    const d = await callGeminiVision(kG, payload);
+                    return { texto: d.candidates[0].content.parts.map(p => p.text || '').join(''), ia: 'Gemini' };
+                } catch (e) { erros.push('Gemini: ' + e.message); }
+            }
+        }
+        throw new Error(erros.join('\n'));
+    }
+
+    function lerArquivoBase64(file) {
+        return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = e => resolve({ base64: String(e.target.result).split(',')[1], mimeType: file.type || 'application/pdf' });
+            r.onerror = () => reject(new Error('Falha ao ler o arquivo ' + file.name));
+            r.readAsDataURL(file);
+        });
+    }
+
+    // =====================================================================
+    // 9C. SINCRONIZAÇÃO POR ORIGEM (planilha da Prefeitura, PDF do SPDATA, prints)
+    // ---------------------------------------------------------------------
+    // - 1 horário = 1 linha; vários exames no mesmo horário ficam juntos ("A + B")
+    //   e contam como N procedimentos (coluna qtd_exames).
+    // - Nunca sobrescreve o que já existe (status, chegada, atendimento): insere só o novo
+    //   (ignore-duplicates) e faz PATCH pontual (obs, qtd, "voltou", "saiu").
+    // - Linha da mesma origem que não veio mais → removido_origem_em; se cancelarAusentes
+    //   e ainda pendente → status 'cancelado' (Prefeitura). PDF só sinaliza (IA pode errar).
+    // =====================================================================
+    const ORIGEM_PREF = 'prefeitura_planilha', ORIGEM_PDF = 'spdata_pdf';
+    const chaveLinha = r => `${r.data_agenda}|${normalizeTime(r.hora)}|${normText(r.paciente)}|${normText(r.exame)}`;
+    const chaveSlot = r => `${r.data_agenda}|${normalizeTime(r.hora)}|${normText(r.paciente)}`;
+
+    // junta várias linhas do mesmo horário/paciente num bloco só
+    function agruparPorHorario(linhas) {
+        const m = new Map();
+        linhas.forEach(l => {
+            const k = chaveSlot(l);
+            const partes = normText(l.exame).split(/\s*\+\s*/).filter(Boolean);
+            if (!m.has(k)) m.set(k, { ...l, _partes: [] });
+            const g = m.get(k);
+            partes.forEach(p => { if (!g._partes.includes(p)) g._partes.push(p); });
+            if (l.obs && !g.obs) g.obs = l.obs;
+        });
+        return [...m.values()].map(g => { const { _partes, ...r } = g; return { ...r, exame: _partes.join(' + ') || 'NÃO INFORMADO', qtd_exames: Math.max(1, _partes.length) }; });
+    }
+
+    async function sincronizarOrigem(origem, ini, fim, novosBrutos, { cancelarAusentes = false, sinalizarAusentes = true, datas = null } = {}) {
+        const novos = agruparPorHorario(novosBrutos);
+        const exist = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&select=id,data_agenda,hora,paciente,exame,status,origem,removido_origem_em,obs,qtd_exames&limit=10000`, 'GET');
+        const lista = Array.isArray(exist) ? exist : [];
+        const mapa = new Map(lista.map(r => [chaveLinha(r), r]));
+        const slotsOutra = new Set(lista.filter(r => r.origem !== origem).map(chaveSlot));
+        const novosK = new Set(novos.map(chaveLinha));
+        const agora = new Date().toISOString();
+        const inserir = [], patches = [];
+        const rel = { novos: [], saiu: [], voltou: [], outraOrigem: 0, total: novos.length };
+        novos.forEach(n => {
+            const e = mapa.get(chaveLinha(n));
+            if (!e) {
+                if (slotsOutra.has(chaveSlot(n))) { rel.outraOrigem++; return; }
+                inserir.push(n); rel.novos.push(n); return;
+            }
+            if (e.origem !== origem) return;
+            const p = {};
+            if (e.removido_origem_em) { p.removido_origem_em = null; if (e.status === 'cancelado') p.status = 'pendente'; rel.voltou.push(n); }
+            if ((e.obs || null) !== (n.obs || null)) p.obs = n.obs || null;
+            if ((e.qtd_exames || 1) !== (n.qtd_exames || 1)) p.qtd_exames = n.qtd_exames || 1;
+            if (Object.keys(p).length) patches.push([e.id, p]);
+        });
+        if (sinalizarAusentes) {
+            lista.filter(e => e.origem === origem && !novosK.has(chaveLinha(e)) && !e.removido_origem_em && (!datas || datas.has(e.data_agenda)))
+                .forEach(e => {
+                    const p = { removido_origem_em: agora };
+                    if (cancelarAusentes && (e.status === 'pendente' || !e.status)) p.status = 'cancelado';
+                    patches.push([e.id, p]); rel.saiu.push(e);
+                });
+        }
+        for (let i = 0; i < inserir.length; i += 200) {
+            await requestSupabase(`${TABLE}?on_conflict=${CONFLICT_COLS}`, 'POST', inserir.slice(i, i + 200), { 'Prefer': 'resolution=ignore-duplicates,return=minimal' });
+        }
+        for (const [id, p] of patches) await requestSupabase(`${TABLE}?id=eq.${id}`, 'PATCH', p, { 'Prefer': 'return=minimal' });
+        return rel;
+    }
+
+    function relatorioSync(titulo, rel, extra = '') {
+        const fmt = r => `${fmtBR(r.data_agenda)} ${normalizeTime(r.hora)} · ${normText(r.paciente)} · ${r.exame}`;
+        const lim = (arr, n = 12) => arr.slice(0, n).map(fmt).join('\n') + (arr.length > n ? `\n… e mais ${arr.length - n}` : '');
+        let t = `${titulo}\n\n✅ Novos: ${rel.novos.length}   ↩️ Voltaram: ${rel.voltou.length}   ⚠️ Saíram da origem: ${rel.saiu.length}` +
+            `\n(já existiam: ${rel.total - rel.novos.length - rel.voltou.length}${rel.outraOrigem ? `, ${rel.outraOrigem} no mesmo horário vindos de print/encaixe` : ''})`;
+        if (rel.saiu.length) t += `\n\n⚠️ SAÍRAM:\n${lim(rel.saiu)}`;
+        if (rel.voltou.length) t += `\n\n↩️ VOLTARAM:\n${lim(rel.voltou)}`;
+        if (rel.novos.length && rel.novos.length <= 20) t += `\n\nNOVOS:\n${lim(rel.novos, 20)}`;
+        return t + extra;
+    }
+
+    async function recarregarAposImportar(datas) {
+        // descarta o cache local dos dias afetados que não têm envio pendente (serão relidos da nuvem)
+        datas.forEach(d => { if (d !== selectedDate && !outbox.some(op => op.date === d)) delete agendaDatabase[d]; });
+        persistDb();
+        await loadDayFromCloud(selectedDate);
+    }
+
+    // =====================================================================
+    // 9D. PREFEITURA — planilha "CONTROLE USG E TC HAMC", aba USG HAMC
+    // ---------------------------------------------------------------------
+    // O ID da planilha fica na tabela agenda_config (nunca no código público).
+    // Colunas: A data · B hora · C dia · D paciente · E nasc/CNS (não usado) · F ESF ·
+    // G telefone (não usado) · H procedimento · I observação.
+    // =====================================================================
+    async function configNuvem(chave) {
+        const r = await requestSupabase(`agenda_config?chave=eq.${encodeURIComponent(chave)}&select=valor`, 'GET');
+        return Array.isArray(r) && r[0] ? r[0].valor : null;
+    }
+
+    function baixarTexto(url) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET', url, timeout: 60000,
+                onload(res) {
+                    const t = res.responseText || '';
+                    if (res.status === 200 && !/^\s*<(!DOCTYPE|html)/i.test(t)) resolve(t);
+                    else reject(new Error(res.status === 200 ? 'sem acesso à planilha (faça login no Google com a conta que tem acesso)' : 'HTTP ' + res.status));
+                },
+                onerror() { reject(new Error('sem conexão com o Google')); },
+                ontimeout() { reject(new Error('o Google demorou demais')); }
+            });
+        });
+    }
+
+    function parseCSV(txt) {
+        const rows = []; let row = [], cell = '', q = false;
+        for (let i = 0; i < txt.length; i++) {
+            const c = txt[i];
+            if (q) {
+                if (c === '"') { if (txt[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+                else cell += c;
+            } else if (c === '"') q = true;
+            else if (c === ',') { row.push(cell); cell = ''; }
+            else if (c === '\n' || c === '\r') { if (c === '\r' && txt[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+            else cell += c;
+        }
+        if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+        return rows;
+    }
+
+    function exameDaPlanilha(proc, dataIso, hora) {
+        let p = normText(proc).replace(/\s*([,/+;])\s*/g, '$1');
+        const dow = new Date(dataIso + 'T12:00:00').getDay();
+        const tarde = timeToMinutes(hora) >= 720;
+        // "DOPPLER VASCULAR" genérico: sexta manhã = membros inferiores; quinta tarde = carótidas (bloco pescoço)
+        if (/^DOPPLER VASCULAR$/.test(p)) {
+            if (dow === 5 && !tarde) p = 'DOPPLER VASCULAR MMII (ARTERIAL E VENOSO)';
+            else if (dow === 4 && tarde) p = 'DOPPLER DE CAROTIDAS E VERTEBRAIS';
+        }
+        const partes = p.split(/[,/+;]/).map(s => s.trim()).filter(Boolean)
+            .map(s => /^(USG|US|USTV|DOPPLER|ECO|ULTRA|ELASTO)/.test(s) ? s : 'USG ' + s);
+        return partes.join(' + ');
+    }
+
+    function obsDaPlanilha(o) {
+        const t = normText(o);
+        if (!t || t.length < 3) return null;
+        if (/VER E-?SUS|REGULA|IMPRIM|TELEFON|LIGAR|WHATS|CONFIRMAD|^OK$|^SIM$|^NAO$|^NÃO$/.test(t)) return null;
+        return t;
+    }
+
+    async function importarPrefeitura() {
+        if (!getSupabaseConfig()) return alert('Configure a nuvem (⚙️ API) primeiro.');
+        const btn = document.getElementById('btnImportPref');
+        const txtBtn = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Prefeitura…'; }
+        try {
+            const id = await configNuvem('prefeitura_planilha_id');
+            const gid = await configNuvem('prefeitura_planilha_gid');
+            if (!id || !gid) throw new Error('Planilha da Prefeitura não configurada na nuvem (agenda_config).');
+            const csv = await baixarTexto(`https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/export?format=csv&gid=${encodeURIComponent(gid)}`);
+            const hoje = getTodayIso();
+            let fim = hoje;
+            const linhas = [];
+            parseCSV(csv).forEach(c => {
+                const m = String(c[0] || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                if (!m) return;
+                const data = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+                if (data < hoje) return;
+                if (data > fim) fim = data;
+                const paciente = normText(c[3]), proc = normText(c[7]);
+                if (!paciente || !proc || /VER E-?SUS/.test(paciente)) return; // horário vago/bloqueado
+                const hora = normalizeTime(c[1]);
+                linhas.push(toCloudRow({
+                    hora, tipo: 'Prefeitura', convenio: 'PREFEITURA', paciente, exame: exameDaPlanilha(proc, data, hora),
+                    status: 'pendente', origem: ORIGEM_PREF, obs: obsDaPlanilha(c[8])
+                }, data));
+            });
+            if (!linhas.length) throw new Error('Nenhum agendamento a partir de hoje foi encontrado na aba USG HAMC.');
+            const rel = await sincronizarOrigem(ORIGEM_PREF, hoje, fim, linhas, { cancelarAusentes: true });
+            localStorage.setItem('agenda_pref_ultima_sync', new Date().toISOString());
+            const datas = [...new Set(linhas.map(l => l.data_agenda))];
+            await recarregarAposImportar(datas);
+            alert(relatorioSync(`📥 Prefeitura sincronizada — ${fmtBR(hoje)} a ${fmtBR(fim)}`, rel,
+                `\n\nCancelados aqui = pacientes que saíram da planilha (use "Chegou" se aparecerem).`));
+        } catch (e) {
+            alert('Não foi possível sincronizar a Prefeitura: ' + e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.innerHTML = txtBtn; }
+        }
+    }
+
+    // =====================================================================
     // 10. TEMA E ZOOM
     // =====================================================================
     function toggleTheme() {
@@ -1350,8 +1625,9 @@
                     <button id="btnOpenDashboard" class="btn-top-action" style="background:#6366f1; color:#fff;">📊 Dashboard & Faltas</button>
                     <button id="btnOpenDocs" class="btn-top-action" style="background:#0d9488; color:#fff;" title="Escalas do mês, POPs e manuais">📚 Consulta</button>
                     <button id="btnPrintPDF" class="btn-top-action" style="background:#0284c7; color:#fff;">🖨️ Imprimir</button>
-                    <button id="btnUploadPrints" class="btn-top-action" style="background:#3b82f6; color:#fff;">📷 Subir Prints</button>
-                    <input type="file" id="nativeFileInput" multiple accept="image/*" style="display:none;">
+                    <button id="btnImportPref" class="btn-top-action" style="background:#16a34a; color:#fff;" title="Sincroniza a agenda da Prefeitura a partir da planilha (de hoje em diante)">📥 Prefeitura</button>
+                    <button id="btnUploadPrints" class="btn-top-action" style="background:#3b82f6; color:#fff;" title="Prints ou PDF da agenda (ex.: PDF da semana do SPDATA). Também pode arrastar o arquivo para a Agenda.">📷 Prints / PDF</button>
+                    <input type="file" id="nativeFileInput" multiple accept="image/*,application/pdf,.pdf" style="display:none;">
                     <button id="btnConfigKey" class="btn-top-action" style="background:#f59e0b; color:#000;">⚙️ API</button>
                     <button id="btnClearDay" class="btn-top-action" style="background:#fee2e2; color:#991b1b;" title="Limpar o dia">🗑️</button>
                     <button id="agenda-close-btn" class="btn-top-action" style="background:#e11d48; color:#fff; margin-left:3px;">✕ Voltar</button>
@@ -1365,8 +1641,18 @@
                 <div id="boxApiKey" style="display:none; background:#fef3c7; border:1.5px solid #f59e0b; border-radius:7px; padding:8px 12px; margin-bottom:8px; color:#78350f;">
                     <div style="font-weight:bold; font-size:11px; margin-bottom:6px;">⚙️ Configurações de Conexão e Nuvem</div>
                     <div style="display:grid; grid-template-columns:1fr; gap:6px;">
+                        <div style="display:grid; grid-template-columns:2fr 1fr; gap:6px;">
+                            <div>
+                                <label style="font-size:10px; font-weight:700;">🤖 Chave Anthropic (Claude Sonnet 5.5) — IA principal:</label>
+                                <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..." style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
+                            </div>
+                            <div>
+                                <label style="font-size:10px; font-weight:700;">IA preferida:</label>
+                                <select id="selIaPref" style="width:100%; padding:3px 5px; border-radius:4px; border:1px solid #d97706; font-size:10.5px;"><option value="claude">Claude (Gemini reserva)</option><option value="gemini">Gemini (Claude reserva)</option></select>
+                            </div>
+                        </div>
                         <div>
-                            <label style="font-size:10px; font-weight:700;">🔑 Chave Google Gemini API:</label>
+                            <label style="font-size:10px; font-weight:700;">🔑 Chave Google Gemini API (reserva):</label>
                             <input type="password" id="inputApiKey" placeholder="AIzaSy..." style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
                         </div>
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
@@ -1487,6 +1773,8 @@
             b.style.display = b.style.display === 'none' ? 'block' : 'none';
             $('inputApiKey').value = localStorage.getItem(API_KEY_STORAGE) || '';
             $('inputSupabaseUrl').value = localStorage.getItem(SUPABASE_URL_STORAGE) || '';
+            $('inputAnthropicKey').value = localStorage.getItem(ANTHROPIC_KEY_STORAGE) || '';
+            $('selIaPref').value = localStorage.getItem(IA_PREF_STORAGE) || 'claude';
             $('inputSupabaseKey').value = localStorage.getItem(SUPABASE_KEY_STORAGE) || '';
         };
 
@@ -1495,6 +1783,9 @@
             const subUrl = sanitizeSupabaseUrl($('inputSupabaseUrl').value);
             const subKey = sanitizeKey($('inputSupabaseKey').value);
             if (gemKey) localStorage.setItem(API_KEY_STORAGE, gemKey);
+            const antKey = $('inputAnthropicKey').value.replace(/\s+/g, '');
+            if (antKey) localStorage.setItem(ANTHROPIC_KEY_STORAGE, antKey);
+            localStorage.setItem(IA_PREF_STORAGE, $('selIaPref').value);
             if (subUrl) { localStorage.setItem(SUPABASE_URL_STORAGE, subUrl); $('inputSupabaseUrl').value = subUrl; }
             if (subKey) localStorage.setItem(SUPABASE_KEY_STORAGE, subKey);
             pushLegacyLocalOnce();
@@ -1514,6 +1805,12 @@
         $('headerManha').onclick = () => toggleSection('manha');
         $('headerTarde').onclick = () => toggleSection('tarde');
         $('btnUploadPrints').onclick = () => $('nativeFileInput').click();
+        $('btnImportPref').onclick = importarPrefeitura;
+        // arrastar prints/PDF para a Agenda
+        const drw = $('agenda-drawer-wrapper');
+        drw.addEventListener('dragover', ev => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); drw.classList.add('drop-on'); } });
+        drw.addEventListener('dragleave', ev => { if (ev.target === drw) drw.classList.remove('drop-on'); });
+        drw.addEventListener('drop', ev => { if (!ev.dataTransfer || !ev.dataTransfer.files.length) return; ev.preventDefault(); drw.classList.remove('drop-on'); handleMultipleUpload({ files: ev.dataTransfer.files }); });
         $('nativeFileInput').onchange = handleMultipleUpload;
         $('btnSalvarEncaixe').onclick = handleAddEncaixe;
         ['encHora', 'encPaciente', 'encExame'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') handleAddEncaixe(); }));
@@ -1605,6 +1902,7 @@
         if (String(old[field]) === String(v)) return; // nada mudou
         const updated = { ...old, [field]: v };
         if (field === 'hora') updated.periodo = periodoFromHora(v);
+        if (field === 'exame') updated.qtdExames = Math.max(1, v.split(/\s*\+\s*/).filter(Boolean).length);
         // hora/paciente/exame fazem parte da chave única: apaga o registro antigo na nuvem antes de gravar o novo
         if (['hora', 'paciente', 'exame'].includes(field)) enqueueDelete(old, selectedDate);
         enqueueUpsert(updated, selectedDate);
@@ -1675,7 +1973,7 @@
     // =====================================================================
     // 15. RENDERIZAÇÃO
     // =====================================================================
-    function procCount(item) { return item.pacsQtdExames > 1 ? item.pacsQtdExames : 1; }
+    function procCount(item) { return Math.max(item.qtdExames || 1, item.pacsQtdExames || 1); }
 
     // Pacientes únicos + procedimentos de uma lista de linhas
     function dayStats(list) {
@@ -1732,7 +2030,7 @@
         if (item.status === 'atendido') bg = isDarkMode ? '#064e3b' : '#ecfdf5';
         else if (item.status === 'faltou') bg = isDarkMode ? '#4c0519' : '#fff1f2';
         else if (item.status === 'esperando') bg = isDarkMode ? '#3b2904' : '#fefce8';
-        else if (item.status === 'cancelado') { bg = isDarkMode ? '#273142' : '#f1f5f9'; tr.style.opacity = '0.6'; tr.title = 'Exame cancelado/removido no PACS (ex.: convênio não autorizou). Use "Chegou" se o paciente voltar.'; }
+        else if (item.status === 'cancelado') { bg = isDarkMode ? '#273142' : '#f1f5f9'; tr.style.opacity = '0.6'; tr.title = item.removidoOrigemEm ? 'Paciente saiu da planilha da Prefeitura (desmarcado/remanejado). Use "Chegou" se ele vier.' : 'Exame cancelado/removido no PACS (ex.: convênio não autorizou). Use "Chegou" se o paciente voltar.'; }
         tr.style.background = bg;
 
         let bClass = 'badge-conv';
@@ -1769,6 +2067,7 @@
         let badges = '';
         if (nProc > 1) badges += `<span class="badge-base badge-multi" title="${nProc} procedimentos deste paciente no dia${qtdLinha > 1 ? ` (${qtdLinha} nesta linha)` : ''}">×${nProc}</span>`;
         if (item.origem === 'encaixe_pacs') badges += `<span class="badge-base badge-enc" title="Encaixe criado automaticamente a partir do PACS">ENCAIXE</span>`;
+        if (item.removidoOrigemEm && item.status !== 'cancelado') badges += `<span class="badge-base badge-saiu" title="Não veio mais na ${item.origem === 'prefeitura_planilha' ? 'planilha da Prefeitura' : 'importação mais recente'} (${fmtBR(String(item.removidoOrigemEm).slice(0, 10))}). Confirme se o paciente foi desmarcado.">⚠ SAIU</span>`;
         if (item.pacsPacienteId > 0) badges += `<span class="badge-base badge-pacs" data-action="unlink" data-id="${escapeHtml(item.id)}" title="Vinculado ao PACS — ficha ${fmtHM(item.chegouEm)}${item.imagemEm ? ', imagens ' + fmtHM(item.imagemEm) : ''}. Clique para desfazer o vínculo.">🔗 ${fmtHM(item.chegouEm)}</span>`;
 
         const id = escapeHtml(item.id);
@@ -1776,7 +2075,7 @@
             <td style="text-align:center; font-weight:bold;"><div class="editable-cell" contenteditable="true" data-field="hora" data-id="${id}">${escapeHtml(normalizeTime(item.hora))}</div></td>
             <td><span class="badge-base ${bClass}">${escapeHtml(item.convenio)}</span></td>
             <td style="font-weight:600;"><div class="pac-cell"><div class="editable-cell" contenteditable="true" data-field="paciente" data-id="${id}">${escapeHtml(item.paciente)}</div>${badges}</div></td>
-            <td style="color:${isDarkMode ? '#94a3b8' : '#475569'};"><div class="editable-cell" contenteditable="true" data-field="exame" data-id="${id}">${escapeHtml(item.exame)}</div></td>
+            <td style="color:${isDarkMode ? '#94a3b8' : '#475569'};"><div class="editable-cell" contenteditable="true" data-field="exame" data-id="${id}">${escapeHtml(item.exame)}</div>${item.obs ? `<div class="obs-cell" title="Observação da origem">📝 ${escapeHtml(item.obs)}</div>` : ''}</td>
             <td style="text-align:center;"><span class="badge-base ${sla}" style="font-size:9.5px;" title="${tlTitle}">${label}${item.atendidoFonte === 'imagem' ? ' 🩻' : ''}</span></td>
             <td style="text-align:center;">
                 <div style="display:flex; gap:2.5px; justify-content:center; align-items:center;">
@@ -1990,70 +2289,83 @@
         });
     }
 
-    async function handleMultipleUpload(e) {
-        const files = Array.from(e.target.files || []);
-        e.target.value = ''; // permite reenviar o mesmo arquivo
-        if (!files.length) return;
-        const apiKey = localStorage.getItem(API_KEY_STORAGE);
-        if (!apiKey) { alert('Clique em ⚙️ API e insira a chave do Gemini primeiro.'); return; }
+    function promptAgendaIA() {
+        return `Você é um assistente especializado em transcrever agendas de exames de imagem (ultrassonografia) para dados estruturados.
+Você receberá prints e/ou PDFs. Podem conter vários dias.
 
+FORMATOS:
+1. Relatório/print do SPDATA ("Sistema de Gerenciamento Hospitalar", agenda de convênios/particular): "tipo" = "Hospital/Convênio"; "convenio" = o convênio da linha (ex.: PARTICULAR, SOCIAL, UNIMED, IPSEMG, CASSI, SERPRAM, MEDIC GLOBAL SAUDE, SPA SAUDE). Se a linha for SUS/Prefeitura dentro do SPDATA, use "tipo": "Prefeitura" e "convenio": "PREFEITURA".
+2. Planilha/grade da Prefeitura (PSF, dias da semana SEG/TER/QUA/QUI/SEX): "tipo" = "Prefeitura", "convenio" = "PREFEITURA".
+
+REGRAS:
+- "data" de CADA linha no formato YYYY-MM-DD (use o cabeçalho do dia/página). Se não houver data em lugar nenhum, use "${selectedDate}".
+- "hora" sempre HH:MM com 2 dígitos (07:45, 09:00, 13:40).
+- Transcreva o nome do paciente exatamente como está, em MAIÚSCULAS.
+- Uma linha por procedimento: se o mesmo paciente tiver 2 procedimentos no mesmo horário, devolva 2 linhas com a mesma hora (o sistema junta no mesmo bloco).
+- Ignore horários vagos, bloqueados, cabeçalhos, rodapés, totais e anotações como "VER E-SUS REGULAÇÃO".
+- Ignore linhas marcadas como canceladas/desmarcadas.
+- "obs": somente se houver indicação clínica ou observação sobre o exame; senão "".
+- Não invente nada. Se um campo estiver ilegível, use o que for legível.
+
+Responda APENAS com JSON, sem texto fora dele:
+{"exames":[{"data":"YYYY-MM-DD","hora":"HH:MM","tipo":"Prefeitura|Hospital/Convênio","convenio":"...","paciente":"...","exame":"...","obs":""}]}`;
+    }
+
+    function extrairJSON(raw) {
+        const m = String(raw || '').match(/\{[\s\S]*\}/);
+        if (!m) throw new Error('A IA não retornou um JSON válido.');
+        return JSON.parse(m[0]);
+    }
+
+    async function handleMultipleUpload(e) {
+        const files = Array.from((e && e.target && e.target.files) || (e && e.files) || []);
+        if (e && e.target) e.target.value = ''; // permite reenviar o mesmo arquivo
+        if (!files.length) return;
+        const imgs = files.filter(f => /^image\//.test(f.type));
+        const pdfFiles = files.filter(f => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+        if (!imgs.length && !pdfFiles.length) { alert('Envie imagens (prints) ou PDF.'); return; }
         const status = document.getElementById('statusLoadingIA');
         status.style.display = 'block';
-
-        const prompt = `Você é um assistente especializado em processar agendas médicas.
-REGRA DE INTERPRETAÇÃO:
-1. Se o print tem cabeçalho "Sistema de Gerenciamento Hospitalar" / "SPDATA", "tipo": "Hospital/Convênio", e "convenio" é a coluna de convênio (ex: SOCIAL, PARTICULAR, IPSEMG, CASSI, UNIMED SUL MINEIRA, SERPRAM, MEDIC GLOBAL SAUDE, SPA SAUDE).
-2. QUALQUER OUTRA TABELA (Planilha Excel, PSF, dias da semana QUA/QUI/SEX/SAB) é "tipo": "Prefeitura" e "convenio": "PREFEITURA".
-3. Identifique a data YYYY-MM-DD do print. Se não houver, use "${selectedDate}".
-4. OBRIGATÓRIO: Formate o horário SEMPRE com 2 dígitos na hora (formato HH:MM, ex: "07:45", "08:50", "09:00", "09:30", "13:40").
-5. EXTRAIA TODAS AS LINHAS. Se o mesmo paciente tiver mais de uma linha (ex.: Abdome Total + Transvaginal), EXTRAIA CADA LINHA SEPARADAMENTE.
-6. IGNORE anotações como "VER E-SUS REGULAÇÃO" e foque no nome do paciente e no nome do exame.
-7. "periodo": "manha" se hora < 12:00, e "tarde" se hora >= 12:00.
-
-Retorne APENAS um objeto JSON no formato exato:
-{
-  "data": "YYYY-MM-DD",
-  "exames": [
-    { "hora": "HH:MM", "tipo": "Prefeitura" ou "Hospital/Convênio", "convenio": "PREFEITURA" ou nome do convênio, "paciente": "NOME DO PACIENTE", "exame": "PROCEDIMENTO", "status": "pendente", "periodo": "manha" ou "tarde" }
-  ]
-}`;
-
         try {
-            const images = await Promise.all(files.map(compressImageForOCR));
-            const payload = { contents: [{ parts: [{ text: prompt }, ...images.map(img => ({ inline_data: { mime_type: img.mimeType, data: img.base64 } }))] }] };
-            const data = await callGeminiVision(apiKey, payload);
-            const raw = data.candidates[0].content.parts[0].text;
-            const jsonMatch = raw.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error('A IA não retornou um JSON válido.');
-            const parsed = JSON.parse(jsonMatch[0]);
+            const imagens = await Promise.all(imgs.map(compressImageForOCR));
+            const pdfs = await Promise.all(pdfFiles.map(lerArquivoBase64));
+            const { texto, ia } = await chamarIA({ prompt: promptAgendaIA(), imagens, pdfs });
+            const parsed = extrairJSON(texto);
+            const origem = pdfs.length ? ORIGEM_PDF : 'agenda';
+            const linhas = (parsed.exames || []).filter(x => x && x.paciente).map(x => {
+                const data = /^\d{4}-\d{2}-\d{2}$/.test(x.data || '') ? x.data : selectedDate;
+                const prefeitura = x.tipo === 'Prefeitura' || /PREFEITURA/i.test(x.convenio || '');
+                return toCloudRow({
+                    hora: normalizeTime(x.hora),
+                    tipo: prefeitura ? 'Prefeitura' : 'Hospital/Convênio',
+                    convenio: prefeitura ? 'PREFEITURA' : (normText(x.convenio) || 'NÃO INFORMADO'),
+                    paciente: normText(x.paciente), exame: normText(x.exame) || 'NÃO INFORMADO',
+                    status: 'pendente', origem, obs: normText(x.obs) || null
+                }, data);
+            });
+            if (!linhas.length) throw new Error(`A IA (${ia}) não encontrou agendamentos nos arquivos.`);
+            const datas = [...new Set(linhas.map(l => l.data_agenda))].sort();
 
-            const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(parsed.data || '') ? parsed.data : selectedDate;
-            const stamp = Date.now();
-            const novos = (parsed.exames || []).filter(x => x && x.paciente).map((x, idx) => ({
-                id: 'l' + stamp + '_' + idx,
-                hora: normalizeTime(x.hora),
-                tipo: x.tipo === 'Prefeitura' ? 'Prefeitura' : 'Hospital/Convênio',
-                convenio: normText(x.convenio) || (x.tipo === 'Prefeitura' ? 'PREFEITURA' : 'NÃO INFORMADO'),
-                paciente: normText(x.paciente),
-                exame: normText(x.exame) || 'NÃO INFORMADO',
-                status: 'pendente',
-                periodo: periodoFromHora(x.hora),
-                chegouEm: null, atendidoEm: null, tempoEsperaMin: null
-            }));
-
-            // Dedup por Hora + Paciente + Exame (nunca só por paciente). Existentes preservam status.
-            const existing = agendaDatabase[targetDate] || [];
-            const seen = new Set(existing.map(naturalKey));
-            const added = [];
-            novos.forEach(n => { const k = naturalKey(n); if (!seen.has(k)) { seen.add(k); added.push(n); } });
-            agendaDatabase[targetDate] = sortPatientsList([...existing, ...added]);
-            persistDb();
-            added.forEach(n => enqueueUpsert(n, targetDate));
-
-            setDate(targetDate);
-            const ok = getSupabaseConfig() ? await flushOutbox(true) : true;
-            alert(`✅ ${added.length} novo(s) registro(s) para ${fmtBR(targetDate)} (${novos.length - added.length} já existiam).` +
-                (getSupabaseConfig() ? (ok ? '\n☁️ Gravados na nuvem.' : '\n⚠️ Ficaram na fila local — veja o aviso vermelho.') : '\n💾 Somente local (nuvem não configurada).'));
+            if (getSupabaseConfig()) {
+                const rel = await sincronizarOrigem(origem, datas[0], datas[datas.length - 1], linhas,
+                    { sinalizarAusentes: origem === ORIGEM_PDF, cancelarAusentes: false, datas: new Set(datas) });
+                await recarregarAposImportar(datas);
+                if (!datas.includes(selectedDate)) setDate(datas[0]);
+                alert(relatorioSync(`🤖 ${ia} leu ${files.length} arquivo(s) — ${datas.map(fmtBR).join(', ')}`, rel,
+                    origem === ORIGEM_PDF ? '\n\n"Saíram" = estavam no PDF anterior e não vieram neste (ficam com aviso, não são cancelados).' : ''));
+            } else {
+                // sem nuvem: grava só neste computador
+                let n = 0;
+                agruparPorHorario(linhas).forEach((r, idx) => {
+                    const item = { ...mapCloudRow(r), id: 'l' + Date.now() + '_' + idx };
+                    const lst = agendaDatabase[r.data_agenda] || [];
+                    if (lst.some(i => naturalKey(i) === naturalKey(item))) return;
+                    agendaDatabase[r.data_agenda] = sortPatientsList([...lst, item]); n++;
+                });
+                persistDb();
+                setDate(datas[0]);
+                alert(`✅ ${n} novo(s) registro(s) (${ia}). 💾 Somente local (nuvem não configurada).`);
+            }
         } catch (err) {
             alert('Erro ao processar: ' + err.message);
         } finally {
