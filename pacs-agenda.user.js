@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.7.2
+// @version      8.7.3
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -992,6 +992,10 @@
         let n = 0;
         const encs = (agendaDatabase[dateStr] || []).filter(r => r.origem === 'encaixe_pacs' && r.pacsPacienteId > 0);
         encs.forEach(enc => {
+            // encaixe redundante: uma linha da agenda já está vinculada ao MESMO paciente do PACS
+            const jaVinculadas = (agendaDatabase[dateStr] || []).filter(r => !ehEncaixe(r) && r.pacsPacienteId === enc.pacsPacienteId)
+                .sort((a, b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
+            if (jaVinculadas.length) { aplicarFusao(dateStr, enc, jaVinculadas); n++; return; }
             if (pacsDecisions[fusaoKey(dateStr, enc)]) return; // você disse "não é a mesma pessoa"
             const m = melhorFusao(enc, agendaDatabase[dateStr] || []);
             if (!m || m.ambiguo || m.best.score < PACS_LINK_AUTO) return;
