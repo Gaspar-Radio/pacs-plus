@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.8.1
-// @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos e calculadoras radiológicas.
+// @version      1.9.0
+// @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        none
@@ -101,6 +101,19 @@
         testeAte: 0                  // fim do modo teste (ms)
     };
 
+    // Monitor de chegada do 1º paciente de US (aba 🩺 Chegada) — cada computador tem a sua configuração
+    const CHEG_PADRAO = {
+        ligado: false,               // este computador vigia (ligar em UM só: o de casa)
+        tela: true,                  // notificação do sistema neste computador (nome completo)
+        avisarNenhum: true,          // avisa se a janela terminar sem ficha
+        dias: '1,2,3,4,5',
+        janelas: '07:45-08:15\n12:45-13:15',
+        corteTarde: '12:00',         // ficha antes = manhã; a partir = tarde
+        modalidades: 'US',
+        ntfyServidor: 'https://ntfy.sh', ntfyTopico: '',
+        pausaAte: ''
+    };
+
     function loadCfg() {
         let c = {};
         try { c = JSON.parse(localStorage.getItem(CFG_KEY)) || {}; } catch (e) { c = {}; }
@@ -112,6 +125,7 @@
         if (!c.links) c.links = DEFAULT_LINKS;
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
         c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
+        c.cheg = Object.assign({}, CHEG_PADRAO, c.cheg || {});
         // v1.6.1: inclui o SLA eletivo do ultrassom em configurações já salvas (uma única vez)
         if (!c.slaMigUS) {
             const linhas = String(c.sla.slas || '').split('\n').map(l => l.trim().toUpperCase().replace(/\s+/g, ' ')).filter(Boolean);
@@ -1370,6 +1384,332 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     }
 
     // =====================================================================
+    // 3D. MONITOR DE CHEGADA — 1º paciente de US do período (v1.9)
+    // ---------------------------------------------------------------------
+    // Nas janelas configuradas (padrão seg–sex 07:45–08:15 e 12:45–13:15, sem
+    // feriados) lê a cada 60 s pela API do PACS (mesma sessão, só leitura) os
+    // exames de US de HOJE. A 1ª ficha do período (manhã: ficha antes do corte;
+    // tarde: a partir do corte, padrão 12:00) vira aviso no celular (ntfy) e,
+    // opcionalmente, notificação do sistema neste computador. Se a janela
+    // terminar sem ficha, avisa "nenhuma ficha". Celular recebe só INICIAIS.
+    // Um vigia agendado no servidor do ntfy avisa se o monitor não iniciar na
+    // próxima janela (Mac dormindo, Chrome/PACS fechado, sem internet).
+    // Só uma aba por computador vigia. O id do aviso no ntfy é fixo por
+    // dia+período: se dois computadores avisarem, o celular mostra um só.
+    // Tópico próprio, separado do de TC urgente. Nunca grava nada no PACS.
+    // =====================================================================
+    const CHEG_ESTADO_KEY = 'pp_cheg_estado_v1', CHEG_LIDER_KEY = 'pp_cheg_lider_v1', CHEG_HIST_KEY = 'pp_cheg_hist_v1';
+    const CHEG_POLL_MS = 60000, CHEG_TICK_MS = 20000, CHEG_LIDER_TTL = 150000, CHEG_TOLERANCIA_MS = 5 * 60000;
+    const CHEG_TAB = Math.random().toString(36).slice(2, 10);
+    const AGENDA_DB_KEY = 'agenda_multidatas_master_db'; // agenda (outro script): só leitura, para "agendado HH:MM"
+    const chegNtfyBase = () => String(cfg.cheg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
+    const chegPausado = () => !!cfg.cheg.pausaAte && chaveDia(new Date()) <= cfg.cheg.pausaAte;
+    const chegDias = () => String(cfg.cheg.dias || '').split(/[^\d]+/).filter(x => x !== '').map(Number).filter(n => n >= 0 && n <= 6);
+    const STOP_NOME = new Set(['DA', 'DE', 'DO', 'DAS', 'DOS', 'E', "D'", 'DI', 'DU']);
+    function iniciais(nome) {
+        const p = String(nome || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z ]/g, ' ').split(/\s+/).filter(t => t && !STOP_NOME.has(t));
+        return p.length ? p.map(t => t[0]).join('.') + '.' : '?';
+    }
+    function usCurto(desc) {
+        return String(desc || '').toUpperCase()
+            .replace(/^(ULTRASSONOGRAFIA|ULTRA-SONOGRAFIA|ULTRASONOGRAFIA|ULTRASSOM|USG|US)\s+((DE|DO|DA|DOS|DAS)\s+)?/, '')
+            .replace(/\s+/g, ' ').trim() || 'US';
+    }
+    const nomeNorm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const ehTeste = nome => /\bTESTE\b/i.test(String(nome || ''));
+
+    // janelas: "07:45-08:15" por linha → [{ ini, fim (min do dia), periodo }]
+    function chegJanelas() {
+        const corte = minutosDoDia(cfg.cheg.corteTarde || '12:00');
+        return String(cfg.cheg.janelas || '').split(/[\n,;]+/).map(l => {
+            const m = l.match(/(\d{1,2}:\d{2})\s*[-–a]+\s*(\d{1,2}:\d{2})/);
+            if (!m) return null;
+            const ini = minutosDoDia(m[1]), fim = minutosDoDia(m[2]);
+            return fim > ini ? { ini, fim, txt: `${pad2(Math.floor(ini / 60))}:${pad2(ini % 60)}–${pad2(Math.floor(fim / 60))}:${pad2(fim % 60)}`, periodo: ini < corte ? 'manha' : 'tarde' } : null;
+        }).filter(Boolean).sort((a, b) => a.ini - b.ini);
+    }
+    const NOME_PER = { manha: 'manhã', tarde: 'tarde' };
+    function chegDiaValido(d) {
+        if (!chegDias().includes(d.getDay())) return false;
+        if (feriadosDoAno(d.getFullYear(), cfg.sla)[chaveDia(d)]) return false;
+        return !(cfg.cheg.pausaAte && chaveDia(d) <= cfg.cheg.pausaAte);
+    }
+    // janela em andamento agora (com tolerância depois do fim para a leitura final)
+    function chegJanelaAtual(agora) {
+        const d = new Date(agora);
+        if (!chegDiaValido(d)) return null;
+        const t = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
+        return chegJanelas().find(j => t >= j.ini && t < j.fim + CHEG_TOLERANCIA_MS / 60000) || null;
+    }
+    function inicioJanela(d, j) { const x = new Date(d); x.setHours(Math.floor(j.ini / 60), j.ini % 60, 0, 0); return x.getTime(); }
+    function fimJanela(d, j) { const x = new Date(d); x.setHours(Math.floor(j.fim / 60), j.fim % 60, 0, 0); return x.getTime(); }
+    function proximaJanela(apos) {
+        const js = chegJanelas();
+        if (!js.length) return null;
+        const d0 = new Date(apos); d0.setHours(0, 0, 0, 0);
+        for (let i = 0; i <= 10; i++) {
+            const d = new Date(d0); d.setDate(d0.getDate() + i);
+            if (!chegDiaValido(d)) continue;
+            for (const j of js) { const ini = inicioJanela(d, j); if (ini > apos) return { em: ini, j }; }
+        }
+        return null;
+    }
+
+    // ---- estado (compartilhado entre as abas deste computador) ----
+    function chegEstado() { let e = null; try { e = JSON.parse(localStorage.getItem(CHEG_ESTADO_KEY)); } catch (x) { e = null; } return e && typeof e === 'object' ? e : {}; }
+    function chegSalvar(e) { try { localStorage.setItem(CHEG_ESTADO_KEY, JSON.stringify(e)); } catch (x) { /* sem espaço */ } }
+    function chegHist() { try { return JSON.parse(localStorage.getItem(CHEG_HIST_KEY)) || {}; } catch (x) { return {}; } }
+    function chegHistSalvar(dia, periodo, hora) {
+        const h = chegHist();
+        h[dia] = Object.assign({}, h[dia] || {}, { [periodo]: hora });
+        const dias = Object.keys(h).sort();
+        while (dias.length > 120) delete h[dias.shift()];
+        try { localStorage.setItem(CHEG_HIST_KEY, JSON.stringify(h)); } catch (x) { /* ok */ }
+    }
+    function chegSouLider() {
+        const agora = Date.now();
+        let l = null;
+        try { l = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); } catch (x) { l = null; }
+        if (l && l.id !== CHEG_TAB && agora - l.ts < CHEG_LIDER_TTL) return false;
+        try { localStorage.setItem(CHEG_LIDER_KEY, JSON.stringify({ id: CHEG_TAB, ts: agora })); l = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); } catch (x) { return true; }
+        return !!l && l.id === CHEG_TAB;
+    }
+    function chegOutraAbaVigia() {
+        let l = null;
+        try { l = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); } catch (x) { return false; }
+        return !!l && l.id !== CHEG_TAB && Date.now() - l.ts < CHEG_LIDER_TTL;
+    }
+    window.addEventListener('pagehide', () => {
+        try { const l = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); if (l && l.id === CHEG_TAB) localStorage.removeItem(CHEG_LIDER_KEY); } catch (x) { /* ok */ }
+    });
+
+    // ---- canais ----
+    async function chegNtfy(o, topico) {
+        const t = topico || cfg.cheg.ntfyTopico;
+        if (!t) return null;
+        const p = new URLSearchParams();
+        if (o.titulo) p.set('t', o.titulo);
+        p.set('p', String(o.prio || 3));
+        if (o.tags) p.set('ta', o.tags);
+        p.set('click', URG_LINK);
+        if (o.sid) p.set('sid', o.sid);
+        if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
+        try {
+            const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(t)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            return r.ok;
+        } catch (e) { console.warn('[PACS Plus] ntfy (chegada) falhou', e); return false; }
+    }
+    async function chegNtfyApagar(sid, topico) {
+        const t = topico || cfg.cheg.ntfyTopico;
+        if (!t || !sid) return false;
+        try { const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/delete`); return r.ok; } catch (e) { return false; }
+    }
+    function chegTela(titulo, msg, tag) {
+        if (!cfg.cheg.tela) return;
+        try {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                const n = new Notification(titulo, { body: msg, tag: tag || undefined });
+                n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
+            }
+        } catch (e) { /* sem notificação do sistema */ }
+    }
+
+    // ---- leitura do PACS (somente leitura) ----
+    async function chegConsulta(tok, teste) {
+        const mods = listaSit(cfg.cheg.modalidades || 'US');
+        const codes = await urgCodigosModalidade(tok);
+        const p = ['offset=0', 'limit=300', 'tela=EXAMES', 'pac_pacs_codigo=', 'data_inicial=', 'data_final=', 'exa_idnsomenteassinador=false', 'exa_dataparam=$exame.exa_data$',
+            'pac_nome=' + (teste ? 'TESTE' : ''), 'data_codigo=' + (teste ? 1 : 2)];
+        mods.forEach(m => { if (codes[m] != null) p.push('mod_codigo[]=' + encodeURIComponent(codes[m])); });
+        const r = await fetch('/backend/api/exame?' + p.join('&'), { headers: { 'x-access-token': tok } });
+        if (r.status === 401 || r.status === 403) { const er = new Error('sessão do PACS expirada'); er.code = 'login'; throw er; }
+        if (!r.ok) throw new Error('PACS respondeu HTTP ' + r.status);
+        const j = await r.json(), hoje = chaveDia(new Date());
+        const rows = (j.rows || []).filter(x => x && x.paciente && x.exa_hora && mods.includes(modDe(x)) && String(x.exa_situacao || '').toUpperCase() !== 'CANCELADO');
+        return teste ? rows.filter(x => ehTeste(x.paciente.pac_nome))
+            : rows.filter(x => String(x.exa_data || '').slice(0, 10) === hoje && !ehTeste(x.paciente.pac_nome));
+    }
+    async function chegLer(teste) {
+        const tok = localStorage.getItem('lwtoken');
+        if (!tok) { const er = new Error('PACS sem login'); er.code = 'login'; throw er; }
+        return chegConsulta(tok, teste);
+    }
+
+    // agenda do dia (script Agenda, mesmo computador): 1º horário do período e horário do paciente
+    function chegAgenda(periodo, pacCodigo, nome) {
+        let db = null;
+        try { db = JSON.parse(localStorage.getItem(AGENDA_DB_KEY)); } catch (x) { db = null; }
+        const lista = db && Array.isArray(db[chaveDia(new Date())]) ? db[chaveDia(new Date())] : [];
+        const corte = minutosDoDia(cfg.cheg.corteTarde || '12:00');
+        const doPer = lista.filter(i => i && /^\d{2}:\d{2}$/.test(String(i.hora || '')) && !i.removidoOrigemEm && i.status !== 'cancelado' && i.origem !== 'encaixe'
+            && ((minutosDoDia(i.hora) < corte) === (periodo === 'manha')));
+        if (!doPer.length) return null;
+        const primeiro = doPer.map(i => i.hora).sort()[0];
+        const nn = nomeNorm(nome);
+        const meu = doPer.filter(i => (pacCodigo != null && Number(i.pacsPacienteId) === Number(pacCodigo)) || nomeNorm(i.paciente) === nn).map(i => i.hora).sort()[0] || null;
+        return { primeiro, agendado: meu, total: new Set(doPer.map(i => nomeNorm(i.paciente))).size };
+    }
+
+    // 1ª ficha do período → { pac, nome, ficha 'HH:MM', exames[], conv, outros }
+    function chegPrimeiro(rows, periodo) {
+        const corte = minutosDoDia(cfg.cheg.corteTarde || '12:00');
+        const doPer = rows.filter(x => (minutosDoDia(String(x.exa_hora).slice(0, 5)) < corte) === (periodo === 'manha'));
+        if (!doPer.length) return null;
+        doPer.sort((a, b) => String(a.exa_hora).localeCompare(String(b.exa_hora)) || (a.exa_codigo - b.exa_codigo));
+        const x0 = doPer[0], pac = x0.pac_codigo;
+        const dele = doPer.filter(x => x.pac_codigo === pac);
+        const conv = String((x0.convenio && x0.convenio.conv_descricao) || '');
+        return {
+            pac, nome: String(x0.paciente.pac_nome || ''), ficha: String(x0.exa_hora).slice(0, 5),
+            exames: [...new Set(dele.map(x => usCurto(transformExamText(String((x.tipoexame && x.tipoexame.tpe_descricao) || '')))))],
+            conv: conv ? transformInsuranceText(conv).replace(/^PMRSRS$/, 'PREFEITURA') : '',
+            outros: new Set(doPer.map(x => x.pac_codigo)).size - 1
+        };
+    }
+    function chegMsg(p, periodo, teste) {
+        const ag = teste ? null : chegAgenda(periodo, p.pac, p.nome);
+        const exTxt = p.exames.slice(0, 3).join(' + ') + (p.exames.length > 3 ? ` +${p.exames.length - 3}` : '');
+        const linha1 = [iniciais(p.nome), exTxt, p.conv].filter(Boolean).join(' · ');
+        const extra = [];
+        if (ag) {
+            if (ag.agendado) extra.push('agendado ' + ag.agendado);
+            else extra.push('fora da agenda (encaixe?)');
+            extra.push(`1º horário ${ag.primeiro} · ${ag.total} paciente${ag.total > 1 ? 's' : ''} na agenda`);
+        }
+        if (p.outros > 0) extra.push(`+${p.outros} outra${p.outros > 1 ? 's' : ''} ficha${p.outros > 1 ? 's' : ''} já aberta${p.outros > 1 ? 's' : ''}`);
+        return {
+            titulo: `${teste ? '🧪 [TESTE] ' : ''}🩺 1º paciente US (${NOME_PER[periodo]}) — ficha ${p.ficha}`,
+            msg: linha1 + (extra.length ? '\n' + extra.join(' · ') : ''),
+            tela: (p.nome || '') + ' · ' + exTxt + (extra.length ? '\n' + extra.join(' · ') : '')
+        };
+    }
+
+    // ---- vigia: "monitor não iniciou" agendado no ntfy para a próxima janela ----
+    async function chegAgendarVigia(e, apos) {
+        if (!cfg.cheg.ligado || !cfg.cheg.ntfyTopico) return;
+        const prox = proximaJanela(apos || Date.now());
+        if (!prox) return;
+        const em = prox.em + 3 * 60000;
+        if (em - Date.now() > 3 * 86400000 - 120000) { e.vigiaPara = 0; return; } // ntfy agenda até 3 dias
+        if (e.vigiaPara === em) return;
+        const ok = await chegNtfy({ sid: 'pc-inicio', em, titulo: '⚠ Monitor de chegada não iniciou',
+            msg: `Às ${hm(em)} o computador de casa ainda não tinha lido o PACS (Mac dormindo, Chrome/PACS fechado, sem internet ou sessão expirada). Você não será avisado do 1º paciente desta janela.`, prio: 4, tags: 'warning' });
+        if (ok) e.vigiaPara = em;
+    }
+    async function chegCancelarVigia(e) {
+        if (e.vigiaPara && e.vigiaPara > Date.now()) await chegNtfyApagar('pc-inicio');
+        e.vigiaPara = 0;
+    }
+
+    // ---- processamento de uma leitura dentro da janela ----
+    async function chegProcessar(rows, e, j, agora) {
+        const per = e.periodos[j.periodo] = e.periodos[j.periodo] || { estado: 'vigiando' };
+        if (per.estado !== 'vigiando') return;
+        const p = chegPrimeiro(rows, j.periodo);
+        const sid = `pc-${e.dia.replace(/-/g, '')}-${j.periodo}`;
+        if (p) {
+            const m = chegMsg(p, j.periodo, false);
+            Object.assign(per, { estado: 'chegou', ficha: p.ficha, avisadoEm: agora, resumo: m.msg, nome: p.nome });
+            chegSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
+            chegHistSalvar(e.dia, j.periodo, p.ficha);
+            chegTela(m.titulo, m.tela, sid);
+            if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, tags: 'stethoscope' }));
+        } else if (agora >= fimJanela(new Date(agora), j)) {
+            Object.assign(per, { estado: 'nenhum', avisadoEm: agora });
+            chegSalvar(e);
+            chegHistSalvar(e.dia, j.periodo, '—');
+            if (cfg.cheg.avisarNenhum) {
+                const t = `⌛ Nenhuma ficha de US até ${hm(agora)} (${NOME_PER[j.periodo]})`;
+                const ag = chegAgenda(j.periodo, null, '');
+                const msg = ag ? `Agenda: 1º horário ${ag.primeiro} · ${ag.total} paciente${ag.total > 1 ? 's' : ''}. O monitor desta janela encerrou.` : 'O monitor desta janela encerrou.';
+                chegTela(t, msg, sid);
+                if (cfg.cheg.ntfyTopico) await chegNtfy({ sid, titulo: t, msg, prio: 3, tags: 'hourglass' });
+            }
+        }
+        if (per.estado !== 'vigiando') await chegAgendarVigia(e, agora);
+    }
+
+    // ---- ciclo (a cada 20 s; leitura do PACS a cada 60 s só dentro da janela) ----
+    let chegRodando = false;
+    async function chegCiclo() {
+        if (chegRodando || !cfg.cheg.ligado) return;
+        const agora = Date.now(), j = chegJanelaAtual(agora);
+        if (!chegSouLider()) return;
+        chegRodando = true;
+        const e = chegEstado();
+        try {
+            const hoje = chaveDia(new Date(agora));
+            if (e.dia !== hoje) { e.dia = hoje; e.periodos = {}; e.sessaoAvisada = false; e.erro = ''; }
+            e.periodos = e.periodos || {};
+            e.vivo = agora;
+            if (!j) { if (!e.vigiaPara || e.vigiaPara < agora) await chegAgendarVigia(e, agora); return; }
+            const per = e.periodos[j.periodo];
+            if (per && per.estado !== 'vigiando') return;
+            if (agora - (e.ultTentativa || 0) < CHEG_POLL_MS - 5000 && agora < fimJanela(new Date(agora), j)) return;
+            e.ultTentativa = agora;
+            try {
+                const rows = await chegLer(false);
+                e.ultLeitura = Date.now(); e.erro = ''; e.sessaoAvisada = false;
+                if (e.vigiaPara && Math.abs(e.vigiaPara - (inicioJanela(new Date(agora), j) + 3 * 60000)) < 60000) await chegCancelarVigia(e);
+                await chegProcessar(rows, e, j, Date.now());
+            } catch (err) {
+                e.erro = (err && err.message) || String(err);
+                if (err && err.code === 'login' && !e.sessaoAvisada) {
+                    e.sessaoAvisada = true;
+                    chegTela('⚠ Monitor de chegada parado', 'Sessão do PACS expirada — faça login.', 'pc-sessao');
+                    await chegNtfy({ titulo: '⚠ PACS pediu login (computador de casa)', msg: `O monitor do 1º paciente (${j.txt}) está parado até alguém fazer login no PACS.`, prio: 4, tags: 'warning' });
+                }
+            }
+        } catch (err) {
+            console.warn('[PACS Plus] monitor de chegada', err);
+            e.erro = String((err && err.message) || err);
+        } finally {
+            chegSalvar(e);
+            chegRodando = false;
+        }
+    }
+
+    // aba aberta pelo agendador do Mac (#ppauto) quando outra aba já vigia: fecha a duplicada
+    function chegFecharDuplicada() {
+        if (!/ppauto/.test(location.hash)) return;
+        setTimeout(() => {
+            if (!chegOutraAbaVigia()) { try { history.replaceState(null, '', location.pathname + location.search); } catch (x) { /* ok */ } return; }
+            try { window.close(); } catch (x) { /* o navegador pode não deixar: fica aberta, sem problema */ }
+        }, 8000);
+    }
+
+    function chegGerarTopico() {
+        const b = new Uint8Array(15);
+        (window.crypto || window.msCrypto).getRandomValues(b);
+        return 'pacs-chegada-' + Array.from(b, x => (x % 36).toString(36)).join('');
+    }
+    async function chegTesteEnvio() {
+        const out = [];
+        if (cfg.cheg.tela) {
+            chegTela('🧪 Teste — monitor de chegada', 'Notificação deste computador funcionando.', 'pc-teste');
+            out.push('Tela: ' + ('Notification' in window ? (Notification.permission === 'granted' ? 'notificação disparada' : 'clique em “Permitir notificações”') : 'indisponível'));
+        }
+        if (!cfg.cheg.ntfyTopico) out.push('ntfy: sem tópico'); else
+            out.push('ntfy (celular): ' + ((await chegNtfy({ sid: 'pc-teste', titulo: '🧪 Teste — monitor de chegada', msg: 'J.S.S. · ABDOME TOTAL · PREFEITURA (exemplo)\nSe você recebeu isto, o aviso do 1º paciente vai chegar neste celular.', prio: 4, tags: 'test_tube' })) ? '✅ enviado' : '❌ falhou'));
+        return out;
+    }
+    // usa o paciente TESTE mais recente do PACS (qualquer data) e manda o aviso no formato real
+    async function chegTestePaciente() {
+        const rows = await chegLer(true);
+        if (!rows.length) return 'Nenhum exame de US de paciente TESTE encontrado no PACS.';
+        rows.sort((a, b) => (String(b.exa_data) + String(b.exa_hora)).localeCompare(String(a.exa_data) + String(a.exa_hora)));
+        const dia = String(rows[0].exa_data).slice(0, 10);
+        const doDia = rows.filter(x => String(x.exa_data).slice(0, 10) === dia);
+        const corte = minutosDoDia(cfg.cheg.corteTarde || '12:00');
+        const periodo = minutosDoDia(String(doDia[0].exa_hora).slice(0, 5)) < corte ? 'manha' : 'tarde';
+        const p = chegPrimeiro(doDia, periodo);
+        const m = chegMsg(p, periodo, true);
+        chegTela(m.titulo, m.tela, 'pc-teste');
+        const ok = cfg.cheg.ntfyTopico ? await chegNtfy({ sid: 'pc-teste', titulo: m.titulo, msg: m.msg, prio: 4, tags: 'test_tube' }) : null;
+        return `Paciente TESTE de ${dia.split('-').reverse().join('/')} · ficha ${p.ficha} · ${p.exames.join(' + ')}<br>Celular: ${ok == null ? 'sem tópico' : ok ? '✅ enviado' : '❌ falhou'}<br><span class="pp-muted">${esc(m.titulo)} — ${esc(m.msg)}</span>`;
+    }
+
+    // =====================================================================
     // 4. CALCULADORAS
     // =====================================================================
     const CALCS = {
@@ -1523,7 +1863,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
 #pp-panel { position: fixed; top: 46px; left: 140px; width: 520px; max-width: 96vw; max-height: 82vh; overflow: auto; z-index: 10000002; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: none; }
 #pp-panel.open { display: block; }
 #pp-panel * { box-sizing: border-box; }
-#pp-panel .pp-tabs { display: flex; gap: 4px; padding: 8px 8px 0; border-bottom: 1px solid #334155; position: sticky; top: 0; background: #0f172a; }
+#pp-panel .pp-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 8px 0; border-bottom: 1px solid #334155; position: sticky; top: 0; background: #0f172a; }
 #pp-panel .pp-tab { background: transparent; color: #94a3b8; border: none; border-bottom: 2px solid transparent; padding: 6px 10px; font-weight: 700; font-size: 12px; cursor: pointer; }
 #pp-panel .pp-tab.on { color: #fff; border-bottom-color: #14b8a6; }
 #pp-panel .pp-close { margin-left: auto; background: none; border: none; color: #94a3b8; font-size: 16px; cursor: pointer; }
@@ -1589,7 +1929,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
     function renderPanel() {
         const p = document.getElementById('pp-panel');
         if (!p) return;
-        const tabs = [['busca', '🔎 Pesquisa'], ['calc', '🧮 Calc.'], ['filtros', '🧩 Filtros'], ['prazos', '⏱ Prazos'], ['urg', '🚨 Urgências'], ['ajustes', '⚙️ Ajustes']];
+        const tabs = [['busca', '🔎 Pesquisa'], ['calc', '🧮 Calc.'], ['filtros', '🧩 Filtros'], ['prazos', '⏱ Prazos'], ['urg', '🚨 Urgências'], ['cheg', '🩺 Chegada'], ['ajustes', '⚙️ Ajustes']];
         p.innerHTML = `<div class="pp-tabs">${tabs.map(([k, n]) => `<button class="pp-tab ${activeTab === k ? 'on' : ''}" data-tab="${k}">${n}</button>`).join('')}<button class="pp-close" title="Fechar (Esc)">✕</button></div><div class="pp-body"></div>`;
         p.querySelectorAll('.pp-tab').forEach(b => { b.onclick = () => { activeTab = b.dataset.tab; renderPanel(); }; });
         p.querySelector('.pp-close').onclick = () => togglePanel(false);
@@ -1599,6 +1939,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
         else if (activeTab === 'filtros') renderFiltros(body);
         else if (activeTab === 'prazos') renderPrazos(body);
         else if (activeTab === 'urg') renderUrgencias(body);
+        else if (activeTab === 'cheg') renderChegada(body);
         else renderAjustes(body);
     }
 
@@ -1845,6 +2186,89 @@ ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</d
     }
     function lembretesMinDe(txt) { return [...new Set(String(txt || '').split(/[^\d]+/).map(Number).filter(n => n > 0 && n <= 600))].sort((a, b) => b - a); }
 
+    // Aba 🩺 Chegada: monitor do 1º paciente de US (janelas, celular, histórico)
+    function renderChegada(body) {
+        const c = cfg.cheg, e = chegEstado(), agora = Date.now(), hoje = chaveDia(new Date());
+        const js = chegJanelas(), j = chegJanelaAtual(agora), prox = proximaJanela(agora);
+        let lider = null; try { lider = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); } catch (x) { lider = null; }
+        const vigiaAqui = lider && lider.id === CHEG_TAB && agora - lider.ts < CHEG_LIDER_TTL;
+        const pers = e.dia === hoje ? (e.periodos || {}) : {};
+        const estado = !c.ligado ? '⚪ Monitor desligado neste computador' : chegPausado() ? '⏸ Pausado até ' + esc(c.pausaAte) : j ? '🟢 Vigiando agora (' + j.txt + ')' : '🟢 Ligado — aguardando a próxima janela';
+        const linhaPer = k => {
+            const p = pers[k];
+            if (!p) return `<div class="pp-muted">${NOME_PER[k]}: —</div>`;
+            if (p.estado === 'chegou') return `<div>🩺 ${NOME_PER[k]}: ficha <b>${esc(p.ficha)}</b> — <b>${esc(p.nome)}</b> <span class="pp-muted">· avisado ${hm(p.avisadoEm)}${p.entregue === false ? ' · <span class="pp-warn">celular falhou</span>' : ''}</span></div>`;
+            if (p.estado === 'nenhum') return `<div>⌛ ${NOME_PER[k]}: nenhuma ficha na janela</div>`;
+            return `<div>👀 ${NOME_PER[k]}: vigiando…</div>`;
+        };
+        // histórico: últimas 20 datas + mediana por período
+        const h = chegHist(), dias = Object.keys(h).sort().reverse();
+        const mediana = k => {
+            const v = dias.map(d => h[d][k]).filter(x => /^\d{2}:\d{2}$/.test(x || '')).map(minutosDoDia).sort((a, b) => a - b);
+            if (!v.length) return '—';
+            const m = v.length % 2 ? v[(v.length - 1) / 2] : Math.round((v[v.length / 2 - 1] + v[v.length / 2]) / 2);
+            return `${pad2(Math.floor(m / 60))}:${pad2(m % 60)} <span class="pp-muted">(${v.length} dias)</span>`;
+        };
+        const fmtD = d => { const [y, m, dd] = d.split('-').map(Number); return `${DIAS_SEM[new Date(y, m - 1, dd).getDay()]} ${pad2(dd)}/${pad2(m)}`; };
+        const dsel = chegDias();
+        body.innerHTML = `
+<div class="pp-res" style="margin-top:0;"><b>${estado}</b>
+<div class="pp-muted">Janelas: ${js.map(x => x.txt).join(' e ') || '<span class="pp-warn">nenhuma válida</span>'}${prox ? ' · próxima: ' + fmtD(chaveDia(new Date(prox.em))) + ' ' + hm(prox.em) : ''} · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}${c.ligado ? ' · ' + (vigiaAqui ? 'esta aba é a que vigia' : 'outra aba deste computador vigia') : ''}${e.erro ? ' · <span class="pp-warn">' + esc(e.erro) + '</span>' : ''}</div>
+${linhaPer('manha')}${linhaPer('tarde')}</div>
+<label class="pp-tog"><input type="checkbox" id="pp-c-lig" ${c.ligado ? 'checked' : ''}><span>Vigiar a chegada do 1º paciente neste computador<small>Ligue em UM computador só (o de casa), que fica acordado com o PACS aberto.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-tela" ${c.tela ? 'checked' : ''}><span>Notificação também neste computador<small>Aviso do sistema (Mac/Windows) com o nome completo — o celular recebe só as iniciais.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-nenhum" ${c.avisarNenhum ? 'checked' : ''}><span>Avisar quando a janela terminar sem nenhuma ficha</span></label>
+<div class="pp-h">Dias e janelas de vigilância</div>
+<div class="pp-checks">${DIAS_SEM.map((n, i) => `<label><input type="checkbox" data-cdia="${i}" ${dsel.includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
+<div class="pp-grid3"><label>Janelas (uma por linha)<textarea id="pp-c-jan" rows="2">${esc(c.janelas)}</textarea></label><label>Corte manhã/tarde<input id="pp-c-corte" value="${esc(c.corteTarde)}"><small class="pp-muted">ficha antes = manhã</small></label><label>Modalidades<input id="pp-c-mods" value="${esc(c.modalidades)}"></label></div>
+<div class="pp-grid2"><label>Pausar até (férias/folga)<input type="date" id="pp-c-pausa" value="${esc(c.pausaAte)}"></label><span></span></div>
+<div class="pp-h">Celular — app ntfy (tópico próprio, separado do de TC urgente)</div>
+<div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-c-topico" value="${esc(c.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-c-serv" value="${esc(c.ntfyServidor)}"></label></div>
+<div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-gerar">Gerar</button> <button class="pp-btn sec" id="pp-c-copiar">Copiar</button></span></div>
+<div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-c-testar">Enviar teste</button> <button class="pp-btn sec" id="pp-c-tpac">Testar com paciente TESTE</button></span><button class="pp-btn" id="pp-c-salvar">Salvar</button></div>
+<div class="pp-res" id="pp-c-res" style="display:none;"></div>
+<div class="pp-h">Hora da 1ª ficha — mediana</div>
+<div>Manhã: <b>${mediana('manha')}</b> · Tarde: <b>${mediana('tarde')}</b></div>
+${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 20).map(d => `${fmtD(d)}: ${esc(h[d].manha || '·')} / ${esc(h[d].tarde || '·')}`).join('<br>')}</div>` : '<div class="pp-muted">Sem histórico ainda.</div>'}
+<div class="pp-muted" style="margin-top:8px;">O PACS precisa estar aberto e logado neste computador, e ele não pode dormir (no Mac: instalador “manter acordado + abrir PACS”). Se ele não ler o PACS no início de uma janela, chega no celular “monitor de chegada não iniciou”. Configuração só deste computador.</div>`;
+        const $ = id => body.querySelector(id);
+        const res = txt => { const r = $('#pp-c-res'); r.style.display = 'block'; r.innerHTML = txt; };
+        $('#pp-c-gerar').onclick = () => { if ($('#pp-c-topico').value && !confirm('Gerar um tópico NOVO? Você terá que inscrever o celular de novo.')) return; $('#pp-c-topico').value = chegGerarTopico(); res('Tópico novo gerado — clique em <b>Salvar</b> e inscreva o celular nele.'); };
+        $('#pp-c-copiar').onclick = async () => { try { await navigator.clipboard.writeText($('#pp-c-topico').value); res('Tópico copiado.'); } catch (x) { $('#pp-c-topico').select(); res('Selecione e copie (Ctrl+C / ⌘C).'); } };
+        $('#pp-c-perm').onclick = async () => {
+            if (!('Notification' in window)) return res('Este navegador não tem notificações do sistema.');
+            const p = await Notification.requestPermission();
+            res(p === 'granted' ? '✅ Notificações permitidas neste navegador.' : p === 'denied' ? '❌ Notificações bloqueadas — libere no cadeado ao lado do endereço do site.' : 'Permissão não concedida.');
+        };
+        $('#pp-c-salvar').onclick = async () => {
+            const antes = Object.assign({}, cfg.cheg);
+            const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
+            const n = {
+                ligado: $('#pp-c-lig').checked, tela: $('#pp-c-tela').checked, avisarNenhum: $('#pp-c-nenhum').checked,
+                dias: [...body.querySelectorAll('[data-cdia]')].filter(x => x.checked).map(x => x.dataset.cdia).join(','),
+                janelas: $('#pp-c-jan').value.trim() || CHEG_PADRAO.janelas,
+                corteTarde: hora($('#pp-c-corte').value, CHEG_PADRAO.corteTarde),
+                modalidades: $('#pp-c-mods').value.trim() || 'US',
+                pausaAte: $('#pp-c-pausa').value || '',
+                ntfyTopico: $('#pp-c-topico').value.trim(), ntfyServidor: $('#pp-c-serv').value.trim() || CHEG_PADRAO.ntfyServidor
+            };
+            if (n.ligado && !n.ntfyTopico) n.ntfyTopico = chegGerarTopico();
+            // regras mudaram: cancela o vigia agendado (é reagendado pelo ciclo)
+            const e2 = chegEstado();
+            if (antes.ntfyTopico && e2.vigiaPara && e2.vigiaPara > Date.now()) await chegNtfyApagar('pc-inicio', antes.ntfyTopico);
+            e2.vigiaPara = 0; chegSalvar(e2);
+            cfg.cheg = Object.assign({}, CHEG_PADRAO, n);
+            saveCfg();
+            if (!cfg.cheg.ligado) { try { const l = JSON.parse(localStorage.getItem(CHEG_LIDER_KEY)); if (l && l.id === CHEG_TAB) localStorage.removeItem(CHEG_LIDER_KEY); } catch (x) { /* ok */ } }
+            renderChegada(body);
+            const r2 = body.querySelector('#pp-c-res'); r2.style.display = 'block';
+            r2.innerHTML = '✓ Salvo neste computador.' + (cfg.cheg.ntfyTopico ? ` Tópico do celular: <b>${esc(cfg.cheg.ntfyTopico)}</b>` : '') + (chegJanelas().length ? '' : ' <span class="pp-warn">Nenhuma janela válida (use 07:45-08:15).</span>');
+            setTimeout(chegCiclo, 500);
+        };
+        $('#pp-c-testar').onclick = async () => { res('Enviando…'); res((await chegTesteEnvio()).map(esc).join('<br>')); };
+        $('#pp-c-tpac').onclick = async () => { res('Lendo o PACS…'); try { res(await chegTestePaciente()); } catch (x) { res('❌ ' + esc(x.message || x)); } };
+    }
+
     function renderAjustes(body) {
         body.innerHTML = `
 <div class="pp-row"><label class="pp-tog" style="border:none;"><input type="checkbox" id="pp-master" ${cfg.master ? 'checked' : ''}> Ajustes visuais ligados <small>Desligue para ver o PACS original (diagnóstico rápido).</small></label></div>
@@ -1952,10 +2376,13 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
             setInterval(urgCiclo, URG_TICK_MS);
             setInterval(urgBanner, 5000);
             setTimeout(urgCiclo, 3000);
+            setInterval(chegCiclo, CHEG_TICK_MS);
+            setTimeout(chegCiclo, 4000);
+            chegFecharDuplicada();
         }
         urgBanner();
     }
     start();
     // gancho só para testes automatizados (não faz nada no uso normal)
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => { cfg = loadCfg(); return cfg; } };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => { cfg = loadCfg(); return cfg; } };
 })();
