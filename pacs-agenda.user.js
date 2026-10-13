@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.7.0
+// @version      8.7.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1086,12 +1086,12 @@
         linhas.forEach(l => {
             const k = chaveSlot(l);
             const partes = normText(l.exame).split(/\s*\+\s*/).filter(Boolean);
-            if (!m.has(k)) m.set(k, { ...l, _partes: [] });
+            if (!m.has(k)) m.set(k, { ...l, _partes: [], _qtdFixa: l._qtdFixa != null ? l._qtdFixa : null });
             const g = m.get(k);
             partes.forEach(p => { if (!g._partes.includes(p)) g._partes.push(p); });
             if (l.obs && !g.obs) g.obs = l.obs;
         });
-        return [...m.values()].map(g => { const { _partes, ...r } = g; return { ...r, exame: _partes.join(' + ') || 'NÃO INFORMADO', qtd_exames: Math.max(1, _partes.length) }; });
+        return [...m.values()].map(g => { const { _partes, _qtdFixa, ...r } = g; return { ...r, exame: _partes.join(' + ') || 'NÃO INFORMADO', qtd_exames: _qtdFixa != null ? _qtdFixa : Math.max(1, _partes.length) }; });
     }
 
     async function sincronizarOrigem(origem, ini, fim, novosBrutos, { cancelarAusentes = false, sinalizarAusentes = true, datas = null } = {}) {
@@ -2289,6 +2289,41 @@
         });
     }
 
+
+    // ---- SPDATA: códigos de 4 letras da coluna "Observacao/Exame(s)" → nome do exame
+    const SPDATA_COD = {
+        ABBT: 'USG ABDOME TOTAL', ABSP: 'USG ABDOME SUPERIOR', ABIM: 'USG PROSTATA (VIA ABDOMINAL)', ARTC: 'USG ARTICULACAO',
+        TRSV: 'USG TRANSVAGINAL', OBST: 'USG OBSTETRICO', ESPP: 'USG PARTES MOLES', MAMA: 'USG MAMAS', ORSU: 'USG TIREOIDE/CERVICAL',
+        DAMI: 'DOPPLER ARTERIAL MMII', DVMI: 'DOPPLER VENOSO MMII', DVCA: 'DOPPLER DE CAROTIDAS E VERTEBRAIS'
+    };
+    const semAcento = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+    // Regra do serviço: paciente com N horários seguidos no dia = N procedimentos (o SPDATA repete os códigos em cada horário);
+    // paciente com 1 horário = nº de códigos daquele horário. Se houver mais códigos distintos que horários, o último horário recebe a diferença.
+    function aplicarRegrasSPDATA(itens) {
+        const grupos = new Map();
+        itens.forEach(x => { const k = x.data + '|' + normText(x.paciente); if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(x); });
+        const saida = [];
+        grupos.forEach(lst => {
+            lst.sort((a, b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
+            const cods = c => (Array.isArray(c) ? c : String(c || '').split(/[,\s]+/)).map(z => normText(z)).filter(z => /^[A-Z]{4}$/.test(z));
+            const todos = [...new Set(lst.flatMap(x => cods(x.codigos)))];
+            const n = lst.length, total = n > 1 ? Math.max(n, todos.length) : Math.max(1, cods(lst[0].codigos).length);
+            lst.forEach((x, i) => {
+                const c = cods(x.codigos).length ? cods(x.codigos) : todos;
+                let exame = c.length ? c.map(z => SPDATA_COD[z] || z).join(' + ') : normText(x.exame);
+                let obs = normText(x.obs);
+                if (!c.length && /OMBRO|QUADRIL|JOELHO|PUNHO|COTOVELO|TORNOZELO|ARTICULA/.test(semAcento(obs))) exame = 'USG ARTICULACAO';
+                if (/^(IPSEMG|UNIMED|GUIA|CARTEIRA)\b.*\d/.test(obs) || /^[\d\s\-/.:]*$/.test(obs)) obs = '';
+                const ws = (semAcento(obs).match(/[A-Z]+/g) || []).filter(w => !['US', 'USG', 'E', 'DE', 'DA', 'DO', 'EM'].includes(w));
+                const exw = new Set((semAcento(exame).match(/[A-Z]+/g) || []).concat(['ARTICULACOES', 'PROSTATA', 'MAMAS', 'DOPPLER', 'ARTERIAS']));
+                if (!ws.length || ws.every(w => exw.has(w))) obs = '';
+                const q = n > 1 ? (i === n - 1 ? total - (n - 1) : 1) : total;
+                saida.push({ ...x, exame: exame || 'NÃO INFORMADO', obs: obs || '', _qtdFixa: q });
+            });
+        });
+        return saida;
+    }
+
     function promptAgendaIA() {
         return `Você é um assistente especializado em transcrever agendas de exames de imagem (ultrassonografia) para dados estruturados.
 Você receberá prints e/ou PDFs. Podem conter vários dias.
@@ -2306,9 +2341,10 @@ REGRAS:
 - Ignore linhas marcadas como canceladas/desmarcadas.
 - "obs": somente se houver indicação clínica ou observação sobre o exame; senão "".
 - Não invente nada. Se um campo estiver ilegível, use o que for legível.
+- LISTAGEM DO SPDATA ("Listagem de horarios", "Nome da agenda", linhas "HH:MM - NOME - PRONTUARIO - CONVENIO"): para cada horário devolva também "codigos" = lista dos códigos de 4 letras da coluna Observacao/Exame(s) (ex.: ["ABBT","ABIM"]) e em "obs" o texto livre dessa coluna; "exame" pode ficar vazio. Use a data do cabeçalho "Dia: ...". Repita o horário mesmo que o paciente se repita. NUNCA devolva prontuário nem telefone.
 
 Responda APENAS com JSON, sem texto fora dele:
-{"exames":[{"data":"YYYY-MM-DD","hora":"HH:MM","tipo":"Prefeitura|Hospital/Convênio","convenio":"...","paciente":"...","exame":"...","obs":""}]}`;
+{"exames":[{"data":"YYYY-MM-DD","hora":"HH:MM","tipo":"Prefeitura|Hospital/Convênio","convenio":"...","paciente":"...","exame":"...","codigos":[],"obs":""}]}`;
     }
 
     function extrairJSON(raw) {
@@ -2332,16 +2368,20 @@ Responda APENAS com JSON, sem texto fora dele:
             const { texto, ia } = await chamarIA({ prompt: promptAgendaIA(), imagens, pdfs });
             const parsed = extrairJSON(texto);
             const origem = pdfs.length ? ORIGEM_PDF : 'agenda';
-            const linhas = (parsed.exames || []).filter(x => x && x.paciente).map(x => {
+            let brutos = (parsed.exames || []).filter(x => x && x.paciente).map(x => ({ ...x, data: /^\d{4}-\d{2}-\d{2}$/.test(x.data || '') ? x.data : selectedDate, hora: normalizeTime(x.hora) }));
+            if (brutos.some(x => Array.isArray(x.codigos) && x.codigos.length)) brutos = aplicarRegrasSPDATA(brutos);
+            const linhas = brutos.map(x => {
                 const data = /^\d{4}-\d{2}-\d{2}$/.test(x.data || '') ? x.data : selectedDate;
                 const prefeitura = x.tipo === 'Prefeitura' || /PREFEITURA/i.test(x.convenio || '');
-                return toCloudRow({
+                const row = toCloudRow({
                     hora: normalizeTime(x.hora),
                     tipo: prefeitura ? 'Prefeitura' : 'Hospital/Convênio',
                     convenio: prefeitura ? 'PREFEITURA' : (normText(x.convenio) || 'NÃO INFORMADO'),
                     paciente: normText(x.paciente), exame: normText(x.exame) || 'NÃO INFORMADO',
                     status: 'pendente', origem, obs: normText(x.obs) || null
                 }, data);
+                if (x._qtdFixa != null) row._qtdFixa = x._qtdFixa;
+                return row;
             });
             if (!linhas.length) throw new Error(`A IA (${ia}) não encontrou agendamentos nos arquivos.`);
             const datas = [...new Set(linhas.map(l => l.data_agenda))].sort();
