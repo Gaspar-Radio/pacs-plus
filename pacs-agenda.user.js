@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.7.1
+// @version      8.7.2
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -79,6 +79,8 @@
         .badge-multi { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; margin-left: 4px; }
         .badge-pacs { background: #ecfeff; color: #155e75; border: 1px solid #a5f3fc; margin-left: 4px; cursor: pointer; }
         .badge-enc { background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; margin-left: 4px; }
+        .badge-fusao { cursor: pointer; border: 1px dashed #f59e0b !important; color: #b45309 !important; background: #fffbeb !important; }
+        .badge-nome { margin-left: 4px; background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; cursor: help; }
         .pac-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 
         /* MODO ESCURO */
@@ -419,7 +421,9 @@
             // v8.7 — vários exames no mesmo horário, observação e saída da origem
             qtd_exames: Math.max(1, parseInt(item.qtdExames != null ? item.qtdExames : item.qtd_exames, 10) || 1),
             obs: item.obs || null,
-            removido_origem_em: item.removidoOrigemEm || item.removido_origem_em || null
+            removido_origem_em: item.removidoOrigemEm || item.removido_origem_em || null,
+            // v8.7.2 — nome como veio da planilha/PDF quando a linha passou a usar o nome do PACS
+            nome_origem: item.nomeOrigem || item.nome_origem || null
         };
     }
 
@@ -514,7 +518,8 @@
             atendidoFonte: r.atendido_fonte || null,
             qtdExames: r.qtd_exames || 1,
             obs: r.obs || null,
-            removidoOrigemEm: r.removido_origem_em || null
+            removidoOrigemEm: r.removido_origem_em || null,
+            nomeOrigem: r.nome_origem || null
         };
     }
 
@@ -611,12 +616,18 @@
         const stop = new Set(['DE', 'DA', 'DO', 'DAS', 'DOS', 'E']);
         const tx = x.split(' ').filter(t => !stop.has(t)), ty = y.split(' ').filter(t => !stop.has(t));
         let tok = 0;
+        // v8.7.2 — nome cortado no fim (SPDATA trunca nomes longos): um é prefixo do outro
+        const [curto, longo] = x.length <= y.length ? [x, y] : [y, x];
+        const nCurto = curto.split(' ').filter(t => !stop.has(t)).length;
+        if (curto.length >= 12 && longo.startsWith(curto) && nCurto >= 2) tok = nCurto >= 3 ? 0.93 : 0.85;
         if (tx.length >= 2 && ty.length >= 2 && tx[0] === ty[0]) {
             const [menor, maior] = tx.length <= ty.length ? [tx, ty] : [ty, tx];
-            const contidos = menor.filter(t => maior.includes(t)).length;
+            // a última palavra do nome menor pode estar cortada ("OLIV" = "OLIVEIRA")
+            const contem = (t, i) => maior.includes(t) || (i === menor.length - 1 && t.length >= 3 && maior.some(m => m.startsWith(t)));
+            const contidos = menor.filter(contem).length;
             // um nome contém o outro: automático só com 3+ palavras em comum (2 palavras => pede confirmação)
-            if (contidos === menor.length) tok = menor.length >= 3 ? 0.95 : 0.85;
-            else if (contidos / menor.length >= 0.67) tok = 0.8;
+            if (contidos === menor.length) tok = Math.max(tok, menor.length >= 3 ? 0.95 : 0.85);
+            else if (contidos / menor.length >= 0.67) tok = Math.max(tok, 0.8);
         }
         return Math.max(lev, tok);
     }
@@ -683,6 +694,11 @@
     // Aplica os dados do PACS a uma linha da agenda. Retorna a nova linha.
     function applyPacsToRow(row, g, examIds) {
         const r = { ...row };
+        // v8.7.2 — o nome correto é sempre o do PACS; o da origem fica guardado em nomeOrigem
+        if (g.nome && normName(g.nome) !== normName(r.paciente)) {
+            if (r.origem !== 'encaixe_pacs' && !r.nomeOrigem) r.nomeOrigem = r.paciente;
+            r.paciente = normText(g.nome);
+        }
         r.pacsPacienteId = g.pacId;
         r.pacsExameIds = examIds && examIds.length ? examIds : null;
         r.pacsAtendimento = g.atendimento;
@@ -702,7 +718,7 @@
         return r;
     }
 
-    const PACS_FIELDS = ['status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem'];
+    const PACS_FIELDS = ['paciente', 'nomeOrigem', 'status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem'];
     function rowChanged(a, b) {
         return PACS_FIELDS.some(f => JSON.stringify(a[f] == null ? null : a[f]) !== JSON.stringify(b[f] == null ? null : b[f]));
     }
@@ -744,6 +760,8 @@
             const exams = await fetchPacsExamsToday();
             // garante a agenda de hoje atualizada com a nuvem antes de comparar
             if (getSupabaseConfig()) await loadDayFromCloud(today, true);
+            // v8.7.2 — encaixe criado antes de a agenda ser importada: funde com a linha da agenda
+            const fundidos = fundirEncaixesDia(today);
             const grupos = groupPacsExams(exams);
             let list = [...(agendaDatabase[today] || [])];
             const claimed = new Set();
@@ -816,7 +834,12 @@
 
             if (updates.length || novosOk.length || removidos.length) {
                 removidos.forEach(r => { byId.delete(String(r.id)); enqueueDelete(r, today); });
-                updates.forEach(({ old, neu }) => { byId.set(String(old.id), neu); enqueueUpsert(neu, today); });
+                updates.forEach(({ old, neu }) => {
+                    byId.set(String(old.id), neu);
+                    // nome trocado pelo do PACS muda a chave única: apaga o registro antigo antes de gravar
+                    if (naturalKey(old) !== naturalKey(neu)) enqueueDelete(old, today);
+                    enqueueUpsert(neu, today);
+                });
                 list = Array.from(byId.values()).concat(novosOk);
                 novosOk.forEach(n => enqueueUpsert(n, today));
                 agendaDatabase[today] = sortPatientsList(list);
@@ -830,6 +853,7 @@
             pacsState.lastError = null;
             if (manual) alert(`🩻 PACS lido: ${grupos.length} paciente(s), ${exams.length} procedimento(s).\n` +
                 `${updates.length} linha(s) atualizada(s), ${novosOk.length} encaixe(s) criado(s), ${removidos.length} encaixe(s) removido(s)` +
+                (fundidos ? `, ${fundidos} encaixe(s) mesclado(s) com a agenda` : '') +
                 (pendentes.length ? `, ${pendentes.length} vínculo(s) para confirmar.` : '.'));
         } catch (err) {
             pacsState.lastError = err.code === 'nologin' ? 'nologin' : err.message;
@@ -862,13 +886,195 @@
         if (!confirm(`Desfazer o vínculo de "${row.paciente}" com o PACS?\n\nA linha volta para "pendente" e o paciente do PACS será lançado como encaixe.`)) return;
         const pacId = row.pacsPacienteId;
         pacsDecisions[`${selectedDate}|${pacId}`] = { tipo: 'encaixe' };
+        pacsDecisions[`${selectedDate}|fusao|${pacId}`] = { tipo: 'nao' }; // não mescla de novo sozinho
         persistPacsDecisions();
+        // volta o nome como estava na origem (planilha/PDF), se ele tinha sido trocado pelo do PACS
+        if (row.nomeOrigem && row.origem !== 'encaixe_pacs') enqueueDelete(row, selectedDate);
         updateItem(id, i => ({
             ...i, pacsPacienteId: -pacId, pacsExameIds: null, pacsAtendimento: null, pacsQtdExames: null,
+            paciente: (i.nomeOrigem && i.origem !== 'encaixe_pacs') ? i.nomeOrigem : i.paciente,
+            nomeOrigem: i.origem !== 'encaixe_pacs' ? null : i.nomeOrigem,
             status: i.origem === 'encaixe_pacs' ? i.status : 'pendente',
             chegouEm: null, chegadaFonte: null, imagemEm: null, atendidoEm: null, atendidoFonte: null, tempoEsperaMin: null
         }));
         syncPacsToday();
+    }
+
+    // =====================================================================
+    // 7C. MESCLAR ENCAIXE COM A AGENDA (v8.7.2)
+    // ---------------------------------------------------------------------
+    // Caso: o paciente fez a ficha no PACS antes de a agenda (planilha/PDF) ser importada
+    // => virou ENCAIXE; depois a importação trouxe a mesma pessoa, às vezes com o nome
+    // diferente (SOUZA × SOUSA, nome cortado no PDF). A fusão:
+    //   • mantém a linha da AGENDA (horário, exame, convênio, origem, qtd);
+    //   • traz do encaixe o vínculo PACS, chegada, imagens, atendimento e status;
+    //   • usa o NOME DO PACS (o da origem fica em nome_origem p/ casar reimportações);
+    //   • apaga o encaixe.
+    // Automática (no ciclo do PACS e após importar) com similaridade ≥ PACS_LINK_AUTO e sem
+    // ambiguidade; entre ASK e AUTO o ENCAIXE fica com "🔗?" e a fusão é pelo clique.
+    // =====================================================================
+    const ORIGENS_ENCAIXE = ['encaixe_pacs', 'encaixe_manual'];
+    const STATUS_RANK = { atendido: 3, esperando: 2, pendente: 1, faltou: 0, cancelado: 0 };
+    const ehEncaixe = r => ORIGENS_ENCAIXE.includes(r && r.origem);
+    const fusaoKey = (dateStr, enc) => `${dateStr}|fusao|${enc.pacsPacienteId > 0 ? enc.pacsPacienteId : 'n' + normName(enc.paciente)}`;
+
+    // linhas da agenda que podem ser o mesmo paciente do encaixe, da mais provável para a menos
+    function candidatosFusao(enc, list, { incluirAtendidos = false } = {}) {
+        return list.filter(r => String(r.id) !== String(enc.id) && !ehEncaixe(r)
+                && !(r.pacsPacienteId > 0)                                             // já é outro paciente do PACS
+                && !(enc.pacsPacienteId > 0 && r.pacsPacienteId === -enc.pacsPacienteId) // vínculo desfeito por você
+                && (incluirAtendidos || r.status !== 'atendido'))
+            .map(r => ({ r, score: Math.max(nameScore(r.paciente, enc.paciente), r.nomeOrigem ? nameScore(r.nomeOrigem, enc.paciente) : 0) }))
+            .sort((a, b) => (b.score - a.score) || (Math.abs(timeToMinutes(a.r.hora) - timeToMinutes(enc.hora)) - Math.abs(timeToMinutes(b.r.hora) - timeToMinutes(enc.hora))));
+    }
+
+    // todas as linhas da agenda do mesmo paciente (2 horários = 2 linhas)
+    function alvosDoPaciente(alvo, cands) {
+        const n = normName(alvo.paciente);
+        return cands.map(c => c.r).filter(r => normName(r.paciente) === n)
+            .sort((a, b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
+    }
+
+    // Puro: devolve as novas versões das linhas da agenda
+    function fundirEncaixe(enc, alvos) {
+        const ids = Array.isArray(enc.pacsExameIds) ? enc.pacsExameIds : [];
+        const nomePacs = enc.pacsPacienteId > 0 || enc.origem === 'encaixe_pacs';
+        const rankEnc = STATUS_RANK[enc.status] != null ? STATUS_RANK[enc.status] : 1;
+        return alvos.map((a, i) => {
+            const n = { ...a };
+            if (nomePacs && normName(enc.paciente) !== normName(a.paciente)) {
+                n.nomeOrigem = a.nomeOrigem || a.paciente;
+                n.paciente = normText(enc.paciente);
+            }
+            if (enc.pacsPacienteId > 0) {
+                n.pacsPacienteId = enc.pacsPacienteId;
+                n.pacsAtendimento = enc.pacsAtendimento || null;
+                const part = i < alvos.length - 1 ? (ids[i] != null ? [ids[i]] : []) : ids.slice(i);
+                n.pacsExameIds = part.length ? part : null;
+                n.pacsQtdExames = n.pacsExameIds ? n.pacsExameIds.length : null;
+            }
+            const rankA = STATUS_RANK[a.status] != null ? STATUS_RANK[a.status] : 1;
+            if (rankEnc > rankA) {
+                ['status', 'chegouEm', 'chegadaFonte', 'atendidoEm', 'atendidoFonte', 'tempoEsperaMin'].forEach(f => { n[f] = enc[f] == null ? null : enc[f]; });
+            }
+            if (!n.imagemEm && enc.imagemEm) n.imagemEm = enc.imagemEm;
+            if (!n.obs && enc.obs) n.obs = enc.obs;
+            return n;
+        });
+    }
+
+    // Aplica a fusão no dia (local + fila da nuvem)
+    function aplicarFusao(dateStr, enc, alvos) {
+        const novos = fundirEncaixe(enc, alvos);
+        enqueueDelete(enc, dateStr);
+        alvos.forEach((a, i) => { if (naturalKey(a) !== naturalKey(novos[i])) enqueueDelete(a, dateStr); });
+        novos.forEach(n => enqueueUpsert(n, dateStr));
+        const troca = new Map(alvos.map((a, i) => [String(a.id), novos[i]]));
+        agendaDatabase[dateStr] = sortPatientsList((agendaDatabase[dateStr] || [])
+            .filter(r => String(r.id) !== String(enc.id))
+            .map(r => troca.get(String(r.id)) || r));
+        persistDb();
+        return novos;
+    }
+
+    // Melhor candidato sem ambiguidade (ou null)
+    function melhorFusao(enc, list) {
+        const c = candidatosFusao(enc, list);
+        if (!c.length) return null;
+        const best = c[0];
+        const segundo = c.find(x => normName(x.r.paciente) !== normName(best.r.paciente));
+        const ambiguo = best.score < 1 && segundo && segundo.score >= PACS_LINK_ASK;
+        return { best, ambiguo, cands: c };
+    }
+
+    // Automática: só encaixes do PACS (a ficha prova que é a mesma pessoa que chegou)
+    function fundirEncaixesDia(dateStr) {
+        let n = 0;
+        const encs = (agendaDatabase[dateStr] || []).filter(r => r.origem === 'encaixe_pacs' && r.pacsPacienteId > 0);
+        encs.forEach(enc => {
+            if (pacsDecisions[fusaoKey(dateStr, enc)]) return; // você disse "não é a mesma pessoa"
+            const m = melhorFusao(enc, agendaDatabase[dateStr] || []);
+            if (!m || m.ambiguo || m.best.score < PACS_LINK_AUTO) return;
+            aplicarFusao(dateStr, enc, alvosDoPaciente(m.best.r, m.cands));
+            n++;
+        });
+        return n;
+    }
+
+    // Sugestão para o badge (entre ASK e AUTO, ou ambíguo)
+    function sugestaoFusao(enc, list) {
+        if (!ehEncaixe(enc) || pacsDecisions[fusaoKey(selectedDate, enc)]) return null;
+        const m = melhorFusao(enc, list);
+        return (m && m.best.score >= PACS_LINK_ASK) ? m.best : null;
+    }
+
+    function fecharFusao() { const o = document.getElementById('agFusaoOverlay'); if (o) o.remove(); }
+
+    // Manual: lista as linhas do dia por semelhança de nome e mescla a escolhida
+    function abrirFusao(encId) {
+        const dateStr = selectedDate;
+        const list = agendaDatabase[dateStr] || [];
+        const enc = list.find(r => String(r.id) === String(encId));
+        if (!enc) return;
+        fecharFusao();
+        const cands = candidatosFusao(enc, list, { incluirAtendidos: true });
+        const dark = isDarkMode;
+        const ov = document.createElement('div');
+        ov.id = 'agFusaoOverlay';
+        ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:2147483600; display:flex; align-items:center; justify-content:center; font-family:inherit;';
+        const st = s => ({ pendente: 'pendente', esperando: 'em espera', atendido: 'atendido', faltou: 'faltou', cancelado: 'cancelado' }[s] || s || '');
+        const linhas = cands.slice(0, 12).map(({ r, score }) => `
+            <button data-fusao-alvo="${escapeHtml(r.id)}" style="display:flex; width:100%; justify-content:space-between; gap:8px; text-align:left; padding:6px 8px; margin:3px 0; border-radius:6px; cursor:pointer;
+                border:1px solid ${score >= PACS_LINK_AUTO ? '#10b981' : score >= PACS_LINK_ASK ? '#f59e0b' : (dark ? '#334155' : '#cbd5e1')}; background:${dark ? '#0f172a' : '#fff'}; color:inherit;">
+                <span><b>${escapeHtml(normalizeTime(r.hora))}</b> · ${escapeHtml(r.paciente)}<br><small style="opacity:.75;">${escapeHtml(r.exame)} · ${escapeHtml(st(r.status))}</small></span>
+                <span style="font-weight:700; white-space:nowrap;">${Math.round(score * 100)}%</span>
+            </button>`).join('') || '<div style="opacity:.7; padding:8px 0;">Nenhuma linha da agenda disponível neste dia.</div>';
+        ov.innerHTML = `
+            <div style="background:${dark ? '#1e293b' : '#f8fafc'}; color:${dark ? '#e2e8f0' : '#0f172a'}; width:min(520px, 94vw); max-height:84vh; overflow:auto; border-radius:10px; padding:14px 16px; box-shadow:0 10px 40px rgba(0,0,0,.4); font-size:12.5px;">
+                <div style="font-weight:800; font-size:14px; margin-bottom:4px;">🔗 Mesclar encaixe com a agenda</div>
+                <div style="margin-bottom:8px; opacity:.85;">Encaixe <b>${escapeHtml(normalizeTime(enc.hora))}</b> · <b>${escapeHtml(enc.paciente)}</b> · ${escapeHtml(enc.exame)}<br>
+                Escolha a linha da agenda que é a mesma pessoa. Fica o horário/exame da agenda${enc.pacsPacienteId > 0 ? ', com o <b>nome do PACS</b>' : ''}, a chegada e o atendimento; o encaixe é apagado.</div>
+                ${linhas}
+                <div style="display:flex; justify-content:space-between; gap:8px; margin-top:10px;">
+                    <button data-fusao-nao="1" class="btn-act btn-falta" title="Não sugerir de novo hoje">Não é ninguém da agenda</button>
+                    <button data-fusao-fechar="1" class="btn-act btn-chegou">Fechar</button>
+                </div>
+            </div>`;
+        ov.addEventListener('click', e => {
+            if (e.target === ov || e.target.closest('[data-fusao-fechar]')) { fecharFusao(); return; }
+            if (e.target.closest('[data-fusao-nao]')) {
+                pacsDecisions[fusaoKey(dateStr, enc)] = { tipo: 'nao' };
+                persistPacsDecisions();
+                fecharFusao(); renderAgenda(); return;
+            }
+            const b = e.target.closest('[data-fusao-alvo]');
+            if (!b) return;
+            const alvo = cands.find(c => String(c.r.id) === String(b.dataset.fusaoAlvo));
+            if (!alvo) return;
+            const alvos = alvosDoPaciente(alvo.r, cands);
+            const nomeFinal = enc.pacsPacienteId > 0 || enc.origem === 'encaixe_pacs' ? enc.paciente : alvo.r.paciente;
+            if (!confirm(`Mesclar?\n\nENCAIXE ${normalizeTime(enc.hora)} · ${enc.paciente}\n  ⇒ AGENDA ${alvos.map(a => normalizeTime(a.hora)).join(', ')} · ${alvo.r.paciente}\n\nNome final: ${nomeFinal}\nO encaixe será apagado.`)) return;
+            delete pacsDecisions[fusaoKey(dateStr, enc)];
+            persistPacsDecisions();
+            aplicarFusao(dateStr, enc, alvos);
+            fecharFusao();
+            renderAgenda();
+            if (dateStr === getTodayIso()) syncPacsToday();
+        });
+        document.body.appendChild(ov);
+    }
+
+    // Depois de importar planilha/PDF/print: mescla encaixes já existentes nos dias importados
+    async function fundirAposImportar(datas) {
+        const hoje = getTodayIso();
+        let n = 0;
+        for (const d of datas) {
+            if (d > hoje) continue; // encaixe do PACS só existe em dia que já aconteceu
+            if (d !== selectedDate && getSupabaseConfig()) await loadDayFromCloud(d, true);
+            n += fundirEncaixesDia(d);
+        }
+        if (n) { renderAgenda(); alert(`🔗 ${n} encaixe(s) do PACS mesclado(s) com a agenda importada (mantido o nome do PACS).`); }
+        return n;
     }
 
     function updatePacsIndicator() {
@@ -1096,8 +1302,9 @@
 
     async function sincronizarOrigem(origem, ini, fim, novosBrutos, { cancelarAusentes = false, sinalizarAusentes = true, datas = null } = {}) {
         const novos = agruparPorHorario(novosBrutos);
-        const exist = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&select=id,data_agenda,hora,paciente,exame,status,origem,removido_origem_em,obs,qtd_exames&limit=10000`, 'GET');
-        const lista = Array.isArray(exist) ? exist : [];
+        const exist = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&select=id,data_agenda,hora,paciente,nome_origem,exame,status,origem,removido_origem_em,obs,qtd_exames&limit=10000`, 'GET');
+        // v8.7.2 — linha renomeada para o nome do PACS casa pelo nome original da origem
+        const lista = (Array.isArray(exist) ? exist : []).map(r => r.nome_origem ? { ...r, paciente: r.nome_origem } : r);
         const mapa = new Map(lista.map(r => [chaveLinha(r), r]));
         const slotsOutra = new Set(lista.filter(r => r.origem !== origem).map(chaveSlot));
         const novosK = new Set(novos.map(chaveLinha));
@@ -1148,6 +1355,7 @@
         datas.forEach(d => { if (d !== selectedDate && !outbox.some(op => op.date === d)) delete agendaDatabase[d]; });
         persistDb();
         await loadDayFromCloud(selectedDate);
+        try { await fundirAposImportar(datas); } catch (e) { console.error('[Agenda fusão]', e); }
     }
 
     // =====================================================================
@@ -1822,6 +2030,8 @@
         bodyScroll.addEventListener('click', e => {
             const pacsBadge = e.target.closest('[data-action="unlink"]');
             if (pacsBadge) { unlinkPacs(pacsBadge.dataset.id); return; }
+            const fusBadge = e.target.closest('[data-action="fundir"]');
+            if (fusBadge) { abrirFusao(fusBadge.dataset.id); return; }
             const btn = e.target.closest('button');
             if (!btn) return;
             if (btn.dataset.pacs) { resolvePendente(btn.dataset.pacid, btn.dataset.pacs); return; }
@@ -1903,6 +2113,8 @@
         const updated = { ...old, [field]: v };
         if (field === 'hora') updated.periodo = periodoFromHora(v);
         if (field === 'exame') updated.qtdExames = Math.max(1, v.split(/\s*\+\s*/).filter(Boolean).length);
+        // nome corrigido à mão numa linha importada: guarda o original p/ a próxima importação casar
+        if (field === 'paciente' && !ehEncaixe(old) && !old.nomeOrigem) updated.nomeOrigem = old.paciente;
         // hora/paciente/exame fazem parte da chave única: apaga o registro antigo na nuvem antes de gravar o novo
         if (['hora', 'paciente', 'exame'].includes(field)) enqueueDelete(old, selectedDate);
         enqueueUpsert(updated, selectedDate);
@@ -2066,7 +2278,13 @@
         const qtdLinha = procCount(item);
         let badges = '';
         if (nProc > 1) badges += `<span class="badge-base badge-multi" title="${nProc} procedimentos deste paciente no dia${qtdLinha > 1 ? ` (${qtdLinha} nesta linha)` : ''}">×${nProc}</span>`;
-        if (item.origem === 'encaixe_pacs') badges += `<span class="badge-base badge-enc" title="Encaixe criado automaticamente a partir do PACS">ENCAIXE</span>`;
+        if (ehEncaixe(item)) {
+            const sug = sugestaoFusao(item, agendaDatabase[selectedDate] || []);
+            const origemTxt = item.origem === 'encaixe_pacs' ? 'Encaixe criado automaticamente a partir do PACS' : 'Encaixe lançado à mão';
+            if (sug) badges += `<span class="badge-base badge-enc badge-fusao" data-action="fundir" data-id="${escapeHtml(item.id)}" title="${escapeHtml(`${origemTxt}. Parece ser ${sug.r.paciente} (${normalizeTime(sug.r.hora)}) da agenda — ${Math.round(sug.score * 100)}%. Clique para mesclar.`)}">ENCAIXE 🔗?</span>`;
+            else if (item.origem === 'encaixe_pacs') badges += `<span class="badge-base badge-enc" data-action="fundir" data-id="${escapeHtml(item.id)}" style="cursor:pointer;" title="${origemTxt}. Clique para mesclar com uma linha da agenda.">ENCAIXE</span>`;
+        }
+        if (item.nomeOrigem && normName(item.nomeOrigem) !== normName(item.paciente)) badges += `<span class="badge-base badge-nome" title="Na ${item.origem === 'prefeitura_planilha' ? 'planilha da Prefeitura' : item.origem === 'spdata_pdf' ? 'agenda do SPDATA' : 'origem'} estava: ${escapeHtml(item.nomeOrigem)}">≈</span>`;
         if (item.removidoOrigemEm && item.status !== 'cancelado') badges += `<span class="badge-base badge-saiu" title="Não veio mais na ${item.origem === 'prefeitura_planilha' ? 'planilha da Prefeitura' : 'importação mais recente'} (${fmtBR(String(item.removidoOrigemEm).slice(0, 10))}). Confirme se o paciente foi desmarcado.">⚠ SAIU</span>`;
         if (item.pacsPacienteId > 0) badges += `<span class="badge-base badge-pacs" data-action="unlink" data-id="${escapeHtml(item.id)}" title="Vinculado ao PACS — ficha ${fmtHM(item.chegouEm)}${item.imagemEm ? ', imagens ' + fmtHM(item.imagemEm) : ''}. Clique para desfazer o vínculo.">🔗 ${fmtHM(item.chegouEm)}</span>`;
 
