@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.9.1
+// @version      1.9.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1056,8 +1056,10 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     // agenda no servidor do ntfy os lembretes do prazo atual (substitui/cancela os antigos)
     async function urgAgendar(g) {
-        g.agendaVence = g.vence;
+        // v1.9.2: só marca como agendado se o celular estiver ligado — assim, ao ligar o celular
+        // com um urgente já aberto, os lembretes desse paciente também são agendados no ntfy.
         if (!cfg.urg.celular || !cfg.urg.ntfyTopico) return;
+        g.agendaVence = g.vence;
         const base = gsid(g), agora = Date.now(), plano = [];
         lembretesMin().forEach(m => plano.push(['r' + m, g.vence - m * 60000]));
         plano.push(['r0', g.vence]);
