@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      8.7.3
-// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), envio forçado de todo o histórico local, auto-refresh entre máquinas, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
+// @version      9.0.0
+// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        GM_addStyle
@@ -157,7 +157,8 @@
     const ZOOM_STORAGE_KEY = 'agenda_zoom_level';
     const TABLE = 'agenda_exames';
     const CONFLICT_COLS = 'data_agenda,hora,paciente,exame';
-    const POLL_MS = 30000; // auto-refresh da nuvem com a gaveta aberta
+    const POLL_MS = 30000; // auto-refresh da nuvem com a gaveta aberta (sem tempo real)
+    const POLL_RESERVA_MS = 180000; // com tempo real ativo, a leitura periódica vira só reserva (3 min)
     const SYNCED_DATES_KEY = 'agenda_synced_dates_v84';   // dias já confirmados com a nuvem
     const LEGACY_PUSH_KEY = 'agenda_legacy_pushed_v84';   // histórico local antigo já enviado
 
@@ -181,6 +182,8 @@
     let errorAlertShown = false; // evita spam de alert: 1 alert por sequência de falhas
     let isFlushing = false;
     let currentProcByPatient = {};
+    let ultimaLeituraNuvem = 0; // v9.0 — última releitura do dia (tempo real ou periódica)
+    let escritaGen = 0;         // v9.0 — muda a cada alteração local/envio; leitura que cruzou uma escrita é descartada
     let syncedDates = safeJsonParse(localStorage.getItem(SYNCED_DATES_KEY), {});
     function markSynced(d) { syncedDates[d] = true; localStorage.setItem(SYNCED_DATES_KEY, JSON.stringify(syncedDates)); }
 
@@ -387,22 +390,44 @@
             el.innerHTML = `⏳ ${pend} na fila`;
             el.style.color = '#fbbf24';
             el.title = 'Alterações aguardando envio.';
+        } else if (rt.status === 'on') {
+            el.innerHTML = '☁️ Nuvem OK ⚡';
+            el.style.color = '#34d399';
+            el.title = 'Sincronizado com o Supabase. ⚡ Tempo real ativo: mudanças feitas nos outros computadores aparecem em ~1 s.';
         } else {
             el.innerHTML = '☁️ Nuvem OK';
             el.style.color = '#34d399';
-            el.title = 'Sincronizado com o Supabase.';
+            el.title = 'Sincronizado com o Supabase. Tempo real ' + (rt.status === 'conectando' ? 'conectando...' : `indisponível${rt.motivo ? ' (' + rt.motivo + ')' : ''}`) + ' — atualizando a cada 30 s.';
         }
     }
 
     // =====================================================================
     // 6. FILA OFFLINE (OUTBOX) — nada se perde se a nuvem falhar
     // =====================================================================
+    // v9.0 — nome padronizado do convênio (o SPDATA/IA grava variações: "SERPRAM-SERVICO DE", "IPSENMG"...).
+    // Mesma regra da função convenio_canonico() do banco. SUS mantém o setor ("SUS - Pronto Socorro").
+    function normConvenio(c) {
+        const u = normText(c).normalize('NFD').replace(/[̀-ͯ]/g, '');
+        if (!u) return 'NÃO INFORMADO';
+        if (u.startsWith('PREFEITURA')) return 'PREFEITURA';
+        if (/^SUS\b/.test(u)) return normText(c);
+        if (/^SER[PF][A-Z]*([ -]|$)/.test(u)) return 'SERPRAM';
+        if (/^IPSEN?MG/.test(u)) return 'IPSEMG';
+        if (/^IPSM/.test(u)) return 'IPSM (PM)';
+        if (/^UNIMED INTERC/.test(u)) return 'UNIMED INTERCÂMBIO';
+        if (/^UNIMED( SUL.*)?$/.test(u)) return 'UNIMED SUL MINEIRA';
+        if (/^SPA SAUDE/.test(u)) return 'SPA SAÚDE';
+        if (/^BRADESCO/.test(u)) return 'BRADESCO';
+        if (/^CARTAO DESC/.test(u)) return 'CARTÃO DESCONTO';
+        return normText(c);
+    }
+
     function toCloudRow(item, dateStr) {
         return {
             data_agenda: dateStr,
             hora: normalizeTime(item.hora),
             tipo: item.tipo || 'Hospital/Convênio',
-            convenio: item.convenio || 'NÃO INFORMADO',
+            convenio: normConvenio(item.convenio),
             paciente: normText(item.paciente),
             exame: normText(item.exame) || 'NÃO INFORMADO',
             status: item.status || 'pendente',
@@ -427,10 +452,22 @@
         };
     }
 
+    // v9.0 — última versão de cada linha que a nuvem CONFIRMOU (lida ou gravada com sucesso).
+    // Evita reenviar linha idêntica (antes: milhares de POST/dia e eco no tempo real dos outros PCs).
+    // Datas/horas comparadas pelo instante (a nuvem devolve "+00:00", o navegador gera "Z").
+    const confirmadoNaNuvem = new Map();
+    function assinaturaLinha(row) {
+        return JSON.stringify(row, (k, v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) && !isNaN(Date.parse(v))) ? Date.parse(v) : v);
+    }
+    function marcarConfirmado(row) { confirmadoNaNuvem.set(`${row.data_agenda}|${naturalKey(row)}`, assinaturaLinha(row)); }
+
     function enqueueUpsert(item, dateStr) {
         if (!getSupabaseConfig()) return;
         const row = toCloudRow(item, dateStr);
         const k = `${dateStr}|${naturalKey(row)}`;
+        // igual ao que a nuvem já tem e nada pendente para esta linha → não reenvia
+        if (confirmadoNaNuvem.get(k) === assinaturaLinha(row) && !outbox.some(op => op.k === k)) return;
+        escritaGen++;
         // Coalescer: mantém só a última versão do mesmo registro na fila
         outbox = outbox.filter(op => !(op.k === k));
         outbox.push({ t: 'upsert', k, date: dateStr, row });
@@ -440,6 +477,7 @@
 
     function enqueueDelete(item, dateStr) {
         if (!getSupabaseConfig()) return;
+        escritaGen++;
         const row = toCloudRow(item, dateStr);
         const k = `${dateStr}|${naturalKey(row)}`;
         outbox = outbox.filter(op => !(op.k === k));
@@ -464,11 +502,15 @@
                 if (op.t === 'upsert') {
                     // Agrupa upserts consecutivos em um único lote
                     const batch = [];
-                    while (outbox.length > 0 && outbox[0].t === 'upsert' && batch.length < 200) batch.push(outbox.shift().row);
+                    // a linha em envio deixa de contar como "confirmada": se o usuário desfizer a ação
+                    // durante o envio (A→B→A), a volta para A precisa ser enviada também
+                    while (outbox.length > 0 && outbox[0].t === 'upsert' && batch.length < 200) { const o = outbox.shift(); confirmadoNaNuvem.delete(o.k); batch.push(o.row); }
                     try {
                         await requestSupabase(`${TABLE}?on_conflict=${CONFLICT_COLS}`, 'POST', batch, {
                             'Prefer': 'resolution=merge-duplicates,return=minimal'
                         });
+                        batch.forEach(marcarConfirmado);
+                        escritaGen++;
                     } catch (err) {
                         // devolve o lote para a frente da fila
                         outbox = batch.map(row => ({ t: 'upsert', k: `${row.data_agenda}|${naturalKey(row)}`, date: row.data_agenda, row })).concat(outbox);
@@ -476,7 +518,9 @@
                     }
                 } else {
                     await requestSupabase(deleteEndpoint(op.row), 'DELETE', null, { 'Prefer': 'return=minimal' });
-                    outbox.shift();
+                    confirmadoNaNuvem.delete(op.k);
+                    escritaGen++;
+                    outbox = outbox.filter(o => o !== op); // a fila pode ter sido refeita durante o envio
                 }
                 persistOutbox();
             }
@@ -532,18 +576,26 @@
         if (hasPendingForDate) { renderAgenda(); return; }
         // Não sobrescreve enquanto o usuário está digitando numa célula
         if (silent && document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('editable-cell')) return;
+        const genAntes = escritaGen;
         try {
             const rows = await requestSupabase(`${TABLE}?data_agenda=eq.${dateStr}&select=*&order=hora.asc`, 'GET');
+            // v9.0 — houve alteração/envio durante a leitura: a resposta pode estar velha.
+            // Mantém o local; o eco do tempo real (ou a próxima leitura) traz o estado final.
+            if (escritaGen !== genAntes || isFlushing) { if (dateStr === selectedDate) renderAgenda(); return; }
             if (Array.isArray(rows)) {
                 const local = agendaDatabase[dateStr] || [];
                 // PROTEÇÃO: nuvem vazia + dia local com pacientes nunca sincronizados
                 // => NÃO apaga o local; envia o local para a nuvem.
                 if (rows.length === 0 && local.length > 0 && !syncedDates[dateStr]) {
+                    for (const k of [...confirmadoNaNuvem.keys()]) if (k.startsWith(dateStr + '|')) confirmadoNaNuvem.delete(k);
                     local.forEach(item => enqueueUpsert(item, dateStr));
                 } else {
                     agendaDatabase[dateStr] = sortPatientsList(rows.map(mapCloudRow));
                     persistDb();
                     markSynced(dateStr);
+                    // o que a nuvem tem agora para este dia (linhas apagadas em outro PC deixam de constar)
+                    for (const k of [...confirmadoNaNuvem.keys()]) if (k.startsWith(dateStr + '|')) confirmadoNaNuvem.delete(k);
+                    agendaDatabase[dateStr].forEach(it => marcarConfirmado(toCloudRow(it, dateStr)));
                 }
                 clearCloudError();
             }
@@ -551,6 +603,120 @@
             reportCloudError(err, 'leitura da agenda', false);
         }
         if (dateStr === selectedDate) renderAgenda();
+    }
+
+    // =====================================================================
+    // 7A. TEMPO REAL (v9.0) — Supabase Realtime (WebSocket, protocolo Phoenix)
+    // ---------------------------------------------------------------------
+    // Uma conexão por aba escuta INSERT/UPDATE/DELETE em agenda_exames. Mudou o
+    // dia aberto (ou apagou algo — o DELETE não traz a data) → relê o dia em
+    // ~1 s. Sem nenhum dado de paciente no tráfego além do que o REST já lê.
+    // Se o WebSocket falhar/cair: reconecta com espera crescente (5 s → 5 min) e
+    // a leitura a cada 30 s volta a valer. Com o tempo real ativo, a leitura
+    // periódica vira reserva (3 min). Exige a tabela na publicação
+    // supabase_realtime (feito no banco em 14/10/2026).
+    // =====================================================================
+    const RT_TOPIC = 'realtime:pacs-agenda';
+    const RT_HEARTBEAT_MS = 25000;
+    const RT_SILENCIO_MS = 75000; // sem nenhuma mensagem (nem resposta do heartbeat) → conexão morta
+    const rt = { ws: null, status: 'off', ref: 0, hb: null, retry: 0, retryTimer: null, lastMsg: 0, debounce: null, joinRef: null, motivo: '' };
+
+    function rtSend(obj) {
+        try { if (rt.ws && rt.ws.readyState === 1) rt.ws.send(JSON.stringify(obj)); } catch (e) { /* onclose trata */ }
+    }
+
+    function rtFalha(motivo) {
+        rt.status = 'falhou';
+        rt.motivo = motivo;
+        console.warn('[Agenda tempo real]', motivo);
+        updateSyncIndicator();
+    }
+
+    function rtPermitido() {
+        return window.top === window.self && !document.documentElement.hasAttribute('data-ag-viewer');
+    }
+
+    function rtConectar() {
+        if (!rtPermitido()) return; // visualizador de imagens e iframes não abrem conexão
+        const cfg = getSupabaseConfig();
+        if (!cfg || typeof WebSocket === 'undefined') return;
+        if (rt.ws && (rt.ws.readyState === 0 || rt.ws.readyState === 1)) return;
+        clearTimeout(rt.retryTimer);
+        let ws;
+        try {
+            ws = new WebSocket(`${cfg.url.replace(/^http/i, 'ws')}/realtime/v1/websocket?apikey=${encodeURIComponent(cfg.key)}&vsn=1.0.0`);
+        } catch (e) { rtFalha('WebSocket bloqueado: ' + e.message); rtReagendar(); return; }
+        rt.ws = ws;
+        rt.status = 'conectando';
+        updateSyncIndicator();
+        ws.onopen = () => {
+            rt.lastMsg = Date.now();
+            rt.joinRef = String(++rt.ref);
+            const payload = { config: { broadcast: { self: false }, presence: { key: '' }, postgres_changes: [{ event: '*', schema: 'public', table: TABLE }] } };
+            if (cfg.key.startsWith('eyJ')) payload.access_token = cfg.key; // chave legada; a sb_publishable vai só na URL
+            rtSend({ topic: RT_TOPIC, event: 'phx_join', payload, ref: rt.joinRef, join_ref: rt.joinRef });
+            clearInterval(rt.hb);
+            rt.hb = setInterval(() => {
+                if (Date.now() - rt.lastMsg > RT_SILENCIO_MS) { try { ws.close(); } catch (e) { /* ok */ } return; }
+                rtSend({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(++rt.ref) });
+            }, RT_HEARTBEAT_MS);
+        };
+        ws.onmessage = ev => {
+            rt.lastMsg = Date.now();
+            let m;
+            try { m = JSON.parse(ev.data); } catch (e) { return; }
+            if (!m || m.topic !== RT_TOPIC) return;
+            if (m.event === 'phx_reply' && m.ref === rt.joinRef) {
+                if (m.payload && m.payload.status === 'ok') { rt.status = 'on'; rt.retry = 0; rt.motivo = ''; updateSyncIndicator(); }
+                else { rtFalha('canal recusado: ' + JSON.stringify((m.payload && m.payload.response) || {}).slice(0, 200)); try { ws.close(); } catch (e) { /* ok */ } }
+                return;
+            }
+            if (m.event === 'system' && m.payload && m.payload.status === 'error') {
+                rtFalha('assinatura recusada: ' + String(m.payload.message || '').slice(0, 200));
+                try { ws.close(); } catch (e) { /* ok */ }
+                return;
+            }
+            if (m.event === 'postgres_changes') rtMudanca(m.payload && m.payload.data);
+            if (m.event === 'phx_error' || m.event === 'phx_close') { try { ws.close(); } catch (e) { /* ok */ } }
+        };
+        ws.onerror = () => { /* onclose trata */ };
+        ws.onclose = () => {
+            if (rt.ws === ws || !rt.ws) clearInterval(rt.hb); // não derruba o heartbeat de uma conexão mais nova
+            if (rt.ws === ws) rt.ws = null;
+            if (rt.status !== 'falhou') rt.status = 'off';
+            updateSyncIndicator();
+            rtReagendar();
+        };
+    }
+
+    function rtReagendar() {
+        clearTimeout(rt.retryTimer);
+        const espera = Math.min(300000, 5000 * Math.pow(2, rt.retry++));
+        rt.retryTimer = setTimeout(rtConectar, espera);
+    }
+
+    function rtReconectar() {
+        rt.retry = 0;
+        clearTimeout(rt.retryTimer);
+        if (rt.ws) { try { rt.ws.close(); } catch (e) { /* ok */ } } else rtConectar();
+    }
+
+    function rtMudanca(data) {
+        if (!data) return;
+        const dia = (data.record && data.record.data_agenda) || (data.old_record && data.old_record.data_agenda) || null;
+        if (dia && dia !== selectedDate) return; // outro dia: será lido ao abrir aquele dia
+        rtRecarregar();
+    }
+
+    function rtRecarregar() {
+        clearTimeout(rt.debounce);
+        rt.debounce = setTimeout(() => {
+            // não sobrescreve enquanto alguém digita numa célula: tenta de novo em 3 s
+            const ae = document.activeElement;
+            if (ae && ae.classList && ae.classList.contains('editable-cell')) { rt.debounce = setTimeout(rtRecarregar, 3000); return; }
+            ultimaLeituraNuvem = Date.now();
+            loadDayFromCloud(selectedDate, true);
+        }, 1200);
     }
 
     // =====================================================================
@@ -1959,7 +2125,7 @@
                     <span style="font-weight:bold; font-size:12.5px;">📊 Painel Analítico & Gestão de Faltas (No-Show)</span>
                     <div style="display:flex; gap:4px;">
                         <button id="tabDashHoje" style="background:#2563eb; color:#fff; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📅 Dia Selecionado</button>
-                        <button id="tabDashNuvem" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📈 No-Show 30 dias</button>
+                        <button id="tabDashNuvem" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📊 Analytics (nuvem)</button>
                     </div>
                 </div>
                 <button id="btnCloseModalDash" style="background:none; border:none; color:#fff; font-size:15px; cursor:pointer;">✕</button>
@@ -2005,6 +2171,7 @@
             alert(`Configurações salvas.\nURL gravada: ${subUrl || '(vazia)'}\n\nAgora clique em 🧪 Testar Conexão.`);
             updateSyncIndicator();
             loadDayFromCloud(selectedDate);
+            rtReconectar();
         };
 
         $('btnTestSupabase').onclick = testSupabaseConnection;
@@ -2407,7 +2574,99 @@
         </div>`;
     }
 
+    // v9.0 — Analytics calculado no banco (views vw_*): no-show contado por PACIENTE
+    // (2 exames do mesmo paciente no dia = 1 falta), convênios padronizados,
+    // procedimentos perdidos e tempo de espera. Se as views não existirem
+    // (HTTP 404), cai no cálculo antigo feito no navegador.
+    function barrasHtml(rows, title, nota) {
+        if (!rows.length) return '';
+        return `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+            <div style="font-weight:bold; font-size:11.5px; margin-bottom:${nota ? 2 : 8}px;">${title}</div>
+            ${nota ? `<div style="font-size:9.5px; color:#94a3b8; margin-bottom:7px;">${nota}</div>` : ''}
+            ${rows.map(r => {
+                const pct = Math.round(Number(r.pct) || 0), poucos = r.total < 5;
+                const cor = poucos ? '#94a3b8' : pct > 25 ? '#e11d48' : pct > 15 ? '#f59e0b' : '#0284c7';
+                return `<div style="display:grid; grid-template-columns:170px 1fr 190px; gap:8px; align-items:center; margin-bottom:5px;${poucos ? ' opacity:.65;' : ''}" title="${poucos ? 'Amostra pequena (< 5): percentual pouco confiável' : ''}">
+                    <span style="font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(r.k)}</span>
+                    <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, pct)}%; background:${cor};"></div></div>
+                    <span style="font-weight:700; text-align:right; color:${poucos ? 'inherit' : cor};">${r.faltas}/${r.total} (${pct}%)${r.extra ? ` <span style="font-weight:500; color:#94a3b8;">${r.extra}</span>` : ''}</span>
+                </div>`;
+            }).join('')}
+        </div>`;
+    }
+
     async function renderDashboardNuvemFaltas() {
+        const content = document.getElementById('contentDashboard');
+        if (!getSupabaseConfig()) return renderDashboardNuvemFaltasLegado();
+        content.innerHTML = `<div style="text-align:center; padding:30px; color:#60a5fa;">⏳ Carregando Analytics da nuvem...</div>`;
+        try {
+            await flushOutbox();
+            const d = new Date(); d.setDate(d.getDate() - 30);
+            const dataMin = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const [conv, hora, dia, espera] = await Promise.all([
+                requestSupabase('vw_noshow_convenio_30d?select=*', 'GET'),
+                requestSupabase('vw_noshow_horario_30d?select=*', 'GET'),
+                requestSupabase('vw_noshow_dia_semana_90d?select=*', 'GET'),
+                requestSupabase(`vw_espera_diaria?select=*&data_agenda=gte.${dataMin}`, 'GET')
+            ]);
+            if (!Array.isArray(conv) || !conv.length) {
+                content.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">Nenhum atendimento ou falta registrado nos últimos 30 dias.</div>`;
+                return;
+            }
+            const soma = (arr, c) => arr.reduce((a, r) => a + (Number(r[c]) || 0), 0);
+            const pacientes = soma(conv, 'pacientes'), faltas = soma(conv, 'faltas'), perdidos = soma(conv, 'procedimentos_perdidos');
+            const taxa = pacientes ? Math.round(faltas / pacientes * 100) : 0;
+
+            // espera: média ponderada pelo nº de atendidos com tempo; % acima de 60 min
+            const porTipo = {};
+            (espera || []).forEach(r => {
+                const t = r.tipo || 'N/I', n = Number(r.atendidos_com_tempo) || 0;
+                if (!porTipo[t]) porTipo[t] = { n: 0, soma: 0, acima: 0, max: 0 };
+                porTipo[t].n += n;
+                porTipo[t].soma += n * (Number(r.espera_media_min) || 0);
+                porTipo[t].acima += Number(r.acima_60min) || 0;
+                porTipo[t].max = Math.max(porTipo[t].max, Number(r.espera_max_min) || 0);
+            });
+            const nEsp = Object.values(porTipo).reduce((a, x) => a + x.n, 0);
+            const mediaEsp = nEsp ? Math.round(Object.values(porTipo).reduce((a, x) => a + x.soma, 0) / nEsp) : null;
+            const acimaEsp = Object.values(porTipo).reduce((a, x) => a + x.acima, 0);
+
+            const rowsConv = conv.map(r => ({ k: r.convenio, faltas: r.faltas, total: r.pacientes, pct: r.taxa_noshow_pct, extra: r.procedimentos_perdidos ? `−${r.procedimentos_perdidos} proc.` : '' }));
+            const rowsHora = (hora || []).map(r => ({ k: `${String(r.faixa || '').slice(0, 2)}h (${r.periodo || ''})`, faltas: r.faltas, total: r.agendados, pct: r.taxa_noshow_pct }));
+            const rowsDia = (dia || []).map(r => ({ k: r.dia, faltas: r.faltas, total: r.agendados, pct: r.taxa_noshow_pct }));
+            const tiposHtml = Object.entries(porTipo).sort((a, b) => b[1].n - a[1].n).map(([t, x]) => `
+                <tr><td style="padding:3px 6px; font-weight:700;">${escapeHtml(t)}</td>
+                    <td style="padding:3px 6px; text-align:right;">${x.n}</td>
+                    <td style="padding:3px 6px; text-align:right;">${x.n ? formatMinutes(Math.round(x.soma / x.n)) : '–'}</td>
+                    <td style="padding:3px 6px; text-align:right;">${x.acima} (${x.n ? Math.round(x.acima / x.n * 100) : 0}%)</td>
+                    <td style="padding:3px 6px; text-align:right;">${formatMinutes(Math.round(x.max))}</td></tr>`).join('');
+
+            content.innerHTML = `
+                <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:6px;">
+                    ${box(pacientes, 'Pacientes com desfecho (30d)', isDarkMode ? '#f1f5f9' : '#0f172a')}
+                    ${box(`${faltas} (${taxa}%)`, 'Faltas (No-Show)', '#e11d48')}
+                    ${box(perdidos, 'Procedimentos perdidos', '#f59e0b')}
+                    ${box(formatMinutes(mediaEsp), `Espera média (${acimaEsp} > 60 min)`, '#2563eb')}
+                </div>
+                <div style="font-size:10px; color:#94a3b8; margin-bottom:10px;">Últimos 30 dias encerrados (até ontem). Falta contada por paciente/dia; cancelados e quem saiu da planilha não entram. Calculado no banco — mesmo resultado nos 3 computadores.</div>
+                ${barrasHtml(rowsConv, '📊 No-Show por Convênio / Setor', 'Nomes de convênio padronizados (ex.: variações de SERPRAM somadas). Cinza = menos de 5 pacientes.')}
+                ${barrasHtml(rowsHora, '🕒 No-Show por Faixa Horária (30 dias, por exame)')}
+                ${barrasHtml(rowsDia, '📅 No-Show por Dia da Semana (90 dias, por exame)')}
+                ${tiposHtml ? `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">⏱ Tempo de espera (chegada → atendimento, 30 dias)</div>
+                    <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
+                        <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Tipo</th><th style="text-align:right; padding:3px 6px;">Atendidos</th><th style="text-align:right; padding:3px 6px;">Média</th><th style="text-align:right; padding:3px 6px;">&gt; 60 min</th><th style="text-align:right; padding:3px 6px;">Máximo</th></tr>
+                        ${tiposHtml}
+                    </table></div>` : ''}`;
+        } catch (err) {
+            if (err.status === 404 || err.status === 400) return renderDashboardNuvemFaltasLegado();
+            if (err.status !== undefined) reportCloudError(err, 'Analytics', false); // erro HTTP; erro de desenho só aparece aqui
+            else console.error('[Agenda Analytics]', err);
+            content.innerHTML = `<div style="text-align:center; padding:20px; color:#e11d48;">Erro ao buscar dados na nuvem:<br>${escapeHtml(err.message)}</div>`;
+        }
+    }
+
+    async function renderDashboardNuvemFaltasLegado() {
         const content = document.getElementById('contentDashboard');
         if (!getSupabaseConfig()) {
             content.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">☁️ <strong>Nuvem não configurada.</strong><br>Clique em ⚙️ API e informe a Project URL e a chave.</div>`;
@@ -2644,14 +2903,25 @@ Responda APENAS com JSON, sem texto fora dele:
         if (d && d.classList.contains('open')) renderAgenda();
     }, 60000);
 
-    // Puxa alterações feitas em outros computadores a cada 30 s (só com a gaveta aberta)
+    // Puxa alterações feitas em outros computadores (só com a gaveta aberta):
+    // a cada 30 s sem tempo real; a cada 3 min (reserva) com o tempo real ativo.
     setInterval(() => {
         const d = document.getElementById('agenda-drawer-wrapper');
-        if (d && d.classList.contains('open') && getSupabaseConfig() && !document.hidden) loadDayFromCloud(selectedDate, true);
+        if (!(d && d.classList.contains('open') && getSupabaseConfig() && !document.hidden)) return;
+        const intervalo = rt.status === 'on' ? POLL_RESERVA_MS : POLL_MS;
+        if (Date.now() - ultimaLeituraNuvem < intervalo - 2000) return;
+        ultimaLeituraNuvem = Date.now();
+        loadDayFromCloud(selectedDate, true);
     }, POLL_MS);
 
-    // Reenvia fila pendente quando a internet volta
-    window.addEventListener('online', () => flushOutbox());
+    // Reenvia fila pendente e reconecta o tempo real quando a internet volta
+    window.addEventListener('online', () => { flushOutbox(); if (!rt.ws) rtReconectar(); });
+    // aba volta a ficar visível depois de muito tempo (PC dormiu): garante conexão e relê o dia
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden || !getSupabaseConfig() || !rtPermitido()) return;
+        if (!rt.ws) rtReconectar();
+        if (Date.now() - ultimaLeituraNuvem > POLL_MS) { ultimaLeituraNuvem = Date.now(); loadDayFromCloud(selectedDate, true); }
+    });
 
     window.addEventListener('keydown', e => {
         if (e.key !== 'Escape') return;
@@ -2677,4 +2947,6 @@ Responda APENAS com JSON, sem texto fora dele:
     setInterval(initUI, 1500);
     initUI();
     if (outbox.length) flushOutbox();
+    // tempo real só na aba principal do PACS (o visualizador de imagens não usa a Agenda)
+    setTimeout(rtConectar, 2500);
 })();
