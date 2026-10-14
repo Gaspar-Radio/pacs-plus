@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.2.0
+// @version      9.2.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1494,8 +1494,10 @@
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: `${endpointUrl}?key=${encodeURIComponent(apiKey)}`,
-                headers: { 'Content-Type': 'application/json' },
+                url: endpointUrl,
+                // v9.2.1: chave no cabeçalho (forma oficial). Chaves novas do AI Studio (desde mai/2026)
+                // começam com "AQ." e não funcionam no antigo ?key= da URL.
+                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
                 data: JSON.stringify(payload),
                 timeout: 90000,
                 onload(response) {
@@ -2238,7 +2240,7 @@
                         </div>
                         <div>
                             <label style="font-size:10px; font-weight:700;">🔑 Chave Google Gemini API (reserva):</label>
-                            <input type="password" id="inputApiKey" placeholder="AIzaSy..." style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
+                            <input type="password" id="inputApiKey" placeholder="AQ.... ou AIzaSy..." style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
                         </div>
                         <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
                             <div>
