@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.1.0
-// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
+// @version      9.2.0
+// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        GM_addStyle
@@ -545,7 +545,11 @@
         form.style.display = s ? 'none' : 'grid';
         st.style.display = s ? 'flex' : 'none';
         const t = document.getElementById('loginStatusTxt');
-        if (t && s) t.innerText = `✅ Logado como ${s.email || '(usuário)'} neste computador`;
+        if (t && s) {
+            const ic = v => v === true ? '✅' : v === false ? '—' : '…';
+            t.innerText = `✅ Logado como ${s.email || '(usuário)'} · 🤖 IA pela nuvem: Claude ${ic(iaNuvem.claude)} Gemini ${ic(iaNuvem.gemini)}`;
+            t.title = 'IA pela nuvem: chaves guardadas nos Secrets do Supabase (não neste computador). "—" = chave não cadastrada lá; usa a chave local deste PC, se houver.';
+        }
     }
 
     // =====================================================================
@@ -1559,33 +1563,80 @@
         });
     }
 
+    // v9.2 — IA pela nuvem: Edge Function "ia-proxy" do Supabase. As chaves da
+    // Anthropic/Google ficam nos Secrets do projeto; só funciona logado.
+    // Ordem para cada IA: nuvem (se logado e a chave existir lá) → chave local deste PC (reserva).
+    const iaNuvem = { claude: null, gemini: null }; // null = não sabe; false = sem chave na nuvem
+    async function requestProxyIA(corpo) {
+        const config = getSupabaseConfig();
+        const tok = await tokenValido();
+        if (!config || !tok) { const e = new Error('sem login'); e.codigo = 'login'; throw e; }
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `${config.url}/functions/v1/ia-proxy`,
+                headers: { apikey: config.key, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+                data: JSON.stringify(corpo),
+                timeout: 240000,
+                onload(res) {
+                    const d = safeJsonParse(res.responseText, {});
+                    if (res.status === 200) return resolve(d);
+                    const e = new Error(d.detalhe || d.erro || `HTTP ${res.status}`);
+                    e.codigo = d.erro || String(res.status);
+                    reject(e);
+                },
+                onerror() { const e = new Error('sem conexão com a nuvem (IA)'); e.codigo = 'rede'; reject(e); },
+                ontimeout() { const e = new Error('tempo esgotado (4 min)'); e.codigo = 'tempo'; reject(e); }
+            });
+        });
+    }
+    async function statusIaNuvem() {
+        try { const d = await requestProxyIA({ acao: 'status' }); iaNuvem.claude = !!d.claude; iaNuvem.gemini = !!d.gemini; }
+        catch (e) { /* sem login ou sem rede: mantém o que sabia */ }
+        return iaNuvem;
+    }
+
     async function chamarIA({ prompt, imagens = [], pdfs = [] }) {
         const kC = (localStorage.getItem(ANTHROPIC_KEY_STORAGE) || '').trim();
         const kG = (localStorage.getItem(API_KEY_STORAGE) || '').trim();
-        if (!kC && !kG) throw new Error('Configure a chave do Claude (ou a do Gemini, reserva) em ⚙️ API.');
+        const logado = !!lerSessao() && !!getSupabaseConfig();
+        if (!kC && !kG && !logado) throw new Error('Entre na nuvem (⚙️ API → 🔐 Login) ou configure a chave do Claude/Gemini em ⚙️ API.');
         const ordem = (localStorage.getItem(IA_PREF_STORAGE) || 'claude') === 'gemini' ? ['gemini', 'claude'] : ['claude', 'gemini'];
+        const content = [
+            ...imagens.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mimeType, data: i.base64 } })),
+            ...pdfs.map(p => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.base64 } })),
+            { type: 'text', text: prompt }
+        ];
+        const parts = [{ text: prompt },
+            ...imagens.map(i => ({ inline_data: { mime_type: i.mimeType, data: i.base64 } })),
+            ...pdfs.map(p => ({ inline_data: { mime_type: 'application/pdf', data: p.base64 } }))];
         const erros = [];
         for (const ia of ordem) {
-            if (ia === 'claude' && kC) {
+            const nome = ia === 'claude' ? 'Claude' : 'Gemini';
+            // 1) nuvem
+            if (logado && iaNuvem[ia] !== false) {
                 try {
-                    const content = [
-                        ...imagens.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mimeType, data: i.base64 } })),
-                        ...pdfs.map(p => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: p.base64 } })),
-                        { type: 'text', text: prompt }
-                    ];
-                    return { texto: await requestClaude(kC, content), ia: 'Claude' };
-                } catch (e) { erros.push('Claude: ' + e.message); }
+                    const d = await requestProxyIA(ia === 'claude' ? { acao: 'claude', content } : { acao: 'gemini', parts });
+                    iaNuvem[ia] = true;
+                    return { texto: d.texto, ia: nome + ' ☁️' };
+                } catch (e) {
+                    if (e.codigo === 'sem_chave') iaNuvem[ia] = false;
+                    else erros.push(`${nome} (nuvem): ${e.message}`);
+                }
+            }
+            // 2) chave local deste computador (reserva)
+            if (ia === 'claude' && kC) {
+                try { return { texto: await requestClaude(kC, content), ia: 'Claude' }; }
+                catch (e) { erros.push('Claude: ' + e.message); }
             }
             if (ia === 'gemini' && kG) {
                 try {
-                    const payload = { contents: [{ parts: [{ text: prompt },
-                        ...imagens.map(i => ({ inline_data: { mime_type: i.mimeType, data: i.base64 } })),
-                        ...pdfs.map(p => ({ inline_data: { mime_type: 'application/pdf', data: p.base64 } }))] }] };
-                    const d = await callGeminiVision(kG, payload);
+                    const d = await callGeminiVision(kG, { contents: [{ parts }] });
                     return { texto: d.candidates[0].content.parts.map(p => p.text || '').join(''), ia: 'Gemini' };
                 } catch (e) { erros.push('Gemini: ' + e.message); }
             }
         }
+        if (!erros.length) erros.push('Nenhuma chave de IA disponível: cadastre ANTHROPIC_API_KEY/GEMINI_API_KEY nos Secrets do Supabase ou a chave em ⚙️ API.');
         throw new Error(erros.join('\n'));
     }
 
@@ -2350,6 +2401,7 @@
             btn.disabled = true; btn.innerText = '...';
             try {
                 const s = await entrar($('inputLoginEmail').value, $('inputLoginSenha').value);
+                statusIaNuvem().then(atualizarPainelLogin);
                 $('inputLoginSenha').value = '';
                 clearCloudError();
                 alert(`✅ Logado como ${s.email}.\nEste computador fica conectado (a sessão se renova sozinha).`);
@@ -2367,6 +2419,7 @@
             sair();
         };
         atualizarPainelLogin();
+        if (lerSessao()) statusIaNuvem().then(atualizarPainelLogin);
         $('btnPushAllToCloud').onclick = pushAllLocalToCloud;
         $('btnPrevDay').onclick = () => changeDay(-1);
         $('btnNextDay').onclick = () => changeDay(1);
