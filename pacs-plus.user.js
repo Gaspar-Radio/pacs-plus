@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.9.0
+// @version      1.9.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -135,7 +135,21 @@
         return c;
     }
     let cfg = loadCfg();
-    function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* sem armazenamento */ } }
+    // v1.9.1: gravação por mesclagem — cada aba grava só o que ELA mudou desde a última leitura,
+    // sobre a versão mais recente salva. Evita que outra aba do PACS (aberta com ajustes antigos)
+    // regrave por cima, por ex. desligando "Enviar avisos ao celular".
+    const clone = o => JSON.parse(JSON.stringify(o));
+    let cfgBase = clone(cfg);
+    function recarregarCfg() { cfg = loadCfg(); cfgBase = clone(cfg); return cfg; }
+    function saveCfg() {
+        try {
+            const atual = loadCfg();
+            Object.keys(cfg).forEach(k => { if (JSON.stringify(cfg[k]) !== JSON.stringify(cfgBase[k])) atual[k] = cfg[k]; });
+            cfg = atual;
+            localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+            cfgBase = clone(cfg);
+        } catch (e) { /* sem armazenamento */ }
+    }
     const on = k => cfg.master && cfg.blocks[k];
 
     // =====================================================================
@@ -1260,7 +1274,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         urgRodando = true;
         const e = urgEstado();
         try {
-            if (cfg.urg.teste && !urgModoTeste()) { cfg.urg.teste = false; cfg.urg.testeAte = 0; saveCfg(); }
+            if (cfg.urg.teste && !urgModoTeste()) { recarregarCfg(); cfg.urg.teste = false; cfg.urg.testeAte = 0; saveCfg(); }
             const hoje = chaveDia(new Date());
             if (e.dia !== hoje) { e.dia = hoje; e.grupos = {}; e.sessaoAvisada = false; }
             e.grupos = e.grupos || {};
@@ -1360,7 +1374,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     window.addEventListener('storage', ev => {
         if (ev.key === URG_ESTADO_KEY || ev.key === URG_UI_KEY) urgBanner();
         else if (ev.key === URG_SOM_KEY && cfg.urg.tela && document.visibilityState === 'visible') { try { urgBip(JSON.parse(ev.newValue).nivel); } catch (x) { /* ok */ } }
-        else if (ev.key === CFG_KEY) { cfg = loadCfg(); urgBanner(); }
+        else if (ev.key === CFG_KEY) { recarregarCfg(); urgBanner(); }
     });
 
     function urgGerarTopico() {
@@ -2147,6 +2161,7 @@ ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</d
             res(p === 'granted' ? '✅ Notificações permitidas neste navegador. Som liberado.' : p === 'denied' ? '❌ Notificações bloqueadas — libere no cadeado ao lado do endereço do site.' : 'Permissão não concedida.');
         };
         $('#pp-u-salvar').onclick = async () => {
+            recarregarCfg();
             const antes = Object.assign({}, cfg.urg);
             const n = {
                 tela: $('#pp-u-tela').checked, celular: $('#pp-u-cel').checked, teste: $('#pp-u-teste').checked,
@@ -2179,9 +2194,20 @@ ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</d
             urgBanner();
             renderUrgencias(body);
             const r2 = body.querySelector('#pp-u-res'); r2.style.display = 'block';
-            r2.innerHTML = '✓ Salvo neste computador.' + (cfg.urg.celular ? ` Tópico do celular: <b>${esc(cfg.urg.ntfyTopico)}</b>` : '');
+            r2.innerHTML = '✓ Salvo neste computador.' + (cfg.urg.celular ? ` Celular: <b>ligado</b> · tópico <b>${esc(cfg.urg.ntfyTopico)}</b>` : ' Celular: <b>desligado</b>.');
             setTimeout(urgCiclo, 500);
+            // conferência: 3 s depois, relê o que ficou gravado (outra aba pode ter regravado)
+            const quer = n.celular;
+            setTimeout(() => {
+                let gravado = null; try { gravado = JSON.parse(localStorage.getItem(CFG_KEY)).urg.celular; } catch (x) { /* ok */ }
+                if (!!gravado !== !!quer) {
+                    const r3 = body.querySelector('#pp-u-res');
+                    if (r3) { r3.style.display = 'block'; r3.innerHTML = '<span class="pp-warn">⚠ Outra aba do PACS mudou este ajuste. Feche as outras abas do PACS e salve de novo.</span>'; }
+                }
+            }, 3000);
         };
+        // caixas de liga/desliga salvam na hora (não depende de clicar em Salvar)
+        ['#pp-u-tela', '#pp-u-cel', '#pp-u-teste'].forEach(id => { const cb = $(id); if (cb) cb.onchange = () => $('#pp-u-salvar').click(); });
         $('#pp-u-testar').onclick = async () => { res('Enviando…'); res((await urgTeste()).map(esc).join('<br>')); };
     }
     function lembretesMinDe(txt) { return [...new Set(String(txt || '').split(/[^\d]+/).map(Number).filter(n => n > 0 && n <= 600))].sort((a, b) => b - a); }
@@ -2288,7 +2314,7 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         body.querySelector('#pp-dens').onchange = e => { cfg.densidade = e.target.value; saveCfg(); applyAll(); renderPanel(); };
         body.querySelectorAll('[data-b]').forEach(cb => { cb.onchange = () => { cfg.blocks[cb.dataset.b] = cb.checked; saveCfg(); applyAll(); if (cb.dataset.b === 'slaUteis') recalcularLista(); }; });
         body.querySelector('#pp-save').onclick = () => { cfg.sites = body.querySelector('#pp-sites').value; cfg.links = body.querySelector('#pp-links').value; saveCfg(); const b = body.querySelector('#pp-save'); b.textContent = '✓ Salvo'; setTimeout(() => { b.textContent = 'Salvar listas'; }, 1200); };
-        body.querySelector('#pp-reset').onclick = () => { if (!confirm('Restaurar todos os ajustes e listas para o padrão?')) return; localStorage.removeItem(CFG_KEY); cfg = loadCfg(); applyAll(); renderPanel(); };
+        body.querySelector('#pp-reset').onclick = () => { if (!confirm('Restaurar todos os ajustes e listas para o padrão?')) return; localStorage.removeItem(CFG_KEY); recarregarCfg(); applyAll(); renderPanel(); };
     }
 
     // =====================================================================
@@ -2384,5 +2410,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     }
     start();
     // gancho só para testes automatizados (não faz nada no uso normal)
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => { cfg = loadCfg(); return cfg; } };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
