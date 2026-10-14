@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.0.0
-// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
+// @version      9.1.0
+// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        GM_addStyle
@@ -293,7 +293,23 @@
     // =====================================================================
     // 5. SUPABASE — TRANSPORTE
     // =====================================================================
-    function requestSupabase(endpoint, method, payload, extraHeaders = {}) {
+    // v9.1 — com login, toda chamada leva o token do usuário (Authorization: Bearer <access_token>);
+    // sem login, segue como antes (só a chave pública). 401 → renova a sessão e tenta 1 vez de novo.
+    async function requestSupabase(endpoint, method, payload, extraHeaders = {}, _repetida = false) {
+        let tok = null;
+        try { tok = await tokenValido(); } catch (e) { tok = null; } // falha de rede ao renovar: tenta sem token
+        try {
+            return await requestSupabaseRaw(endpoint, method, payload, extraHeaders, tok);
+        } catch (err) {
+            if (!_repetida && err.status === 401 && lerSessao()) {
+                try { await renovarSessao(); } catch (e) { /* segue */ }
+                return requestSupabase(endpoint, method, payload, extraHeaders, true);
+            }
+            throw err;
+        }
+    }
+
+    function requestSupabaseRaw(endpoint, method, payload, extraHeaders, tok) {
         return new Promise((resolve, reject) => {
             const config = getSupabaseConfig();
             if (!config) return reject(new Error('Supabase não configurado (⚙️ API).'));
@@ -303,9 +319,10 @@
                 'Content-Type': 'application/json',
                 ...extraHeaders
             };
-            // Chave legada (JWT "eyJ...") vai também no Authorization.
-            // Chave nova "sb_publishable_..." NÃO pode ir como Bearer (gera 401).
-            if (config.key.startsWith('eyJ')) headers['Authorization'] = `Bearer ${config.key}`;
+            // Com login: token do usuário. Sem login: chave legada (JWT "eyJ...") vai também no Authorization;
+            // chave nova "sb_publishable_..." NÃO pode ir como Bearer (gera 401).
+            if (tok) headers['Authorization'] = `Bearer ${tok}`;
+            else if (config.key.startsWith('eyJ')) headers['Authorization'] = `Bearer ${config.key}`;
 
             inflight++;
             updateSyncIndicator();
@@ -375,6 +392,8 @@
         if (!el) return;
         const config = getSupabaseConfig();
         const pend = outbox.length;
+        const ses = lerSessao();
+        atualizarPainelLogin();
         if (!config) {
             el.innerHTML = '💾 Local';
             el.style.color = '#f59e0b';
@@ -390,15 +409,143 @@
             el.innerHTML = `⏳ ${pend} na fila`;
             el.style.color = '#fbbf24';
             el.title = 'Alterações aguardando envio.';
+        } else if (!ses) {
+            el.innerHTML = '☁️ Nuvem OK 🔓';
+            el.style.color = '#fbbf24';
+            el.title = 'Funcionando, mas SEM LOGIN neste computador. Entre em ⚙️ API → 🔐 Login (uma vez por computador): em breve a nuvem só aceitará quem estiver logado.';
         } else if (rt.status === 'on') {
             el.innerHTML = '☁️ Nuvem OK ⚡';
             el.style.color = '#34d399';
-            el.title = 'Sincronizado com o Supabase. ⚡ Tempo real ativo: mudanças feitas nos outros computadores aparecem em ~1 s.';
+            el.title = `Sincronizado com o Supabase (🔐 ${ses.email}). ⚡ Tempo real ativo: mudanças feitas nos outros computadores aparecem em ~1 s.`;
         } else {
             el.innerHTML = '☁️ Nuvem OK';
             el.style.color = '#34d399';
             el.title = 'Sincronizado com o Supabase. Tempo real ' + (rt.status === 'conectando' ? 'conectando...' : `indisponível${rt.motivo ? ' (' + rt.motivo + ')' : ''}`) + ' — atualizando a cada 30 s.';
         }
+    }
+
+    // =====================================================================
+    // 5A. LOGIN (v9.1) — Supabase Auth (e-mail + senha, 1 usuário)
+    // ---------------------------------------------------------------------
+    // A senha NUNCA é guardada: só a sessão (access_token ~1 h + refresh_token),
+    // em localStorage deste computador. Renova sozinha 5 min antes de vencer
+    // (e a cada chamada, se faltar < 2 min). Várias abas no mesmo PC: trava curta
+    // em localStorage para só uma renovar (o refresh_token é de uso único).
+    // Cadastro público DESLIGADO no projeto (só o usuário criado no painel).
+    // =====================================================================
+    const AUTH_STORAGE = 'agenda_supabase_sessao_v91';
+    const AUTH_LOCK = 'agenda_supabase_sessao_trava_v91';
+    let renovacaoEmCurso = null;
+
+    function lerSessao() {
+        const s = safeJsonParse(localStorage.getItem(AUTH_STORAGE), null);
+        return s && s.access_token && s.refresh_token ? s : null;
+    }
+    function gravarSessao(j) {
+        const antiga = lerSessao() || {};
+        const s = {
+            access_token: j.access_token,
+            refresh_token: j.refresh_token,
+            expires_at: Number(j.expires_at) || (Math.floor(Date.now() / 1000) + (Number(j.expires_in) || 3600)),
+            email: (j.user && j.user.email) || antiga.email || ''
+        };
+        localStorage.setItem(AUTH_STORAGE, JSON.stringify(s));
+        return s;
+    }
+    function apagarSessao() { localStorage.removeItem(AUTH_STORAGE); }
+
+    function authPost(caminho, corpo) {
+        return new Promise((resolve, reject) => {
+            const config = getSupabaseConfig();
+            if (!config) return reject(new Error('Supabase não configurado (⚙️ API).'));
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `${config.url}/auth/v1/${caminho}`,
+                headers: { 'apikey': config.key, 'Content-Type': 'application/json' },
+                data: JSON.stringify(corpo),
+                timeout: 15000,
+                onload(res) { resolve({ status: res.status, json: safeJsonParse(res.responseText, {}) }); },
+                onerror() { const e = new Error('Sem conexão com o Supabase (login).'); e.status = 0; reject(e); },
+                ontimeout() { const e = new Error('Tempo esgotado no login (15 s).'); e.status = 0; reject(e); }
+            });
+        });
+    }
+
+    async function entrar(email, senha) {
+        const r = await authPost('token?grant_type=password', { email: String(email || '').trim(), password: String(senha || '') });
+        if (r.status === 200 && r.json.access_token) {
+            const s = gravarSessao(r.json);
+            updateSyncIndicator();
+            rtReconectar();
+            return s;
+        }
+        const cod = r.json.error_code || r.json.error || '';
+        if (cod === 'invalid_credentials' || cod === 'invalid_grant') throw new Error('E-mail ou senha incorretos.');
+        if (cod === 'email_not_confirmed') throw new Error('E-mail ainda não confirmado no Supabase (marque "Auto Confirm User" ao criar).');
+        throw new Error(`Login recusado (HTTP ${r.status}): ${r.json.msg || r.json.error_description || cod}`);
+    }
+
+    function sair() {
+        const s = lerSessao(), config = getSupabaseConfig();
+        apagarSessao();
+        // encerra a sessão no servidor (melhor esforço)
+        if (s && config) GM_xmlhttpRequest({ method: 'POST', url: `${config.url}/auth/v1/logout`, headers: { apikey: config.key, Authorization: `Bearer ${s.access_token}` }, timeout: 8000 });
+        updateSyncIndicator();
+        rtReconectar();
+    }
+
+    function renovarSessao() {
+        if (renovacaoEmCurso) return renovacaoEmCurso;
+        renovacaoEmCurso = (async () => {
+            let s = lerSessao();
+            if (!s) return null;
+            // outra aba deste computador já está renovando: espera e usa o resultado dela
+            if ((Number(localStorage.getItem(AUTH_LOCK)) || 0) > Date.now()) {
+                await new Promise(ok => setTimeout(ok, 2500));
+                s = lerSessao();
+                if (!s) return null;
+                if (s.expires_at - Date.now() / 1000 > 120) return s;
+            }
+            localStorage.setItem(AUTH_LOCK, String(Date.now() + 10000));
+            try {
+                const r = await authPost('token?grant_type=refresh_token', { refresh_token: s.refresh_token });
+                if (r.status === 200 && r.json.access_token) {
+                    const n = gravarSessao(r.json);
+                    rtAtualizarToken(n.access_token);
+                    return n;
+                }
+                const s3 = lerSessao(); // outra aba trocou o refresh_token nesse meio-tempo
+                if (s3 && s3.refresh_token !== s.refresh_token) return s3;
+                if (r.status === 400 || r.status === 401 || r.status === 403) {
+                    apagarSessao();
+                    updateSyncIndicator();
+                    reportCloudError(new Error('Sessão encerrada (senha trocada, usuário removido ou sessão expirada). Entre de novo em ⚙️ API → 🔐 Login.'), 'login', false);
+                    return null;
+                }
+                throw new Error(`HTTP ${r.status} ao renovar a sessão`);
+            } finally {
+                localStorage.removeItem(AUTH_LOCK);
+            }
+        })();
+        return renovacaoEmCurso.finally(() => { renovacaoEmCurso = null; });
+    }
+
+    async function tokenValido() {
+        const s = lerSessao();
+        if (!s) return null;
+        if (s.expires_at - Date.now() / 1000 > 120) return s.access_token;
+        const n = await renovarSessao();
+        return n ? n.access_token : null;
+    }
+
+    function atualizarPainelLogin() {
+        const form = document.getElementById('loginForm'), st = document.getElementById('loginStatus');
+        if (!form || !st) return;
+        const s = lerSessao();
+        form.style.display = s ? 'none' : 'grid';
+        st.style.display = s ? 'flex' : 'none';
+        const t = document.getElementById('loginStatusTxt');
+        if (t && s) t.innerText = `✅ Logado como ${s.email || '(usuário)'} neste computador`;
     }
 
     // =====================================================================
@@ -636,12 +783,15 @@
         return window.top === window.self && !document.documentElement.hasAttribute('data-ag-viewer');
     }
 
-    function rtConectar() {
+    async function rtConectar() {
         if (!rtPermitido()) return; // visualizador de imagens e iframes não abrem conexão
         const cfg = getSupabaseConfig();
         if (!cfg || typeof WebSocket === 'undefined') return;
         if (rt.ws && (rt.ws.readyState === 0 || rt.ws.readyState === 1)) return;
         clearTimeout(rt.retryTimer);
+        let tokUsuario = null;
+        try { tokUsuario = await tokenValido(); } catch (e) { tokUsuario = null; }
+        if (rt.ws && (rt.ws.readyState === 0 || rt.ws.readyState === 1)) return; // outra chamada abriu durante a espera
         let ws;
         try {
             ws = new WebSocket(`${cfg.url.replace(/^http/i, 'ws')}/realtime/v1/websocket?apikey=${encodeURIComponent(cfg.key)}&vsn=1.0.0`);
@@ -653,7 +803,8 @@
             rt.lastMsg = Date.now();
             rt.joinRef = String(++rt.ref);
             const payload = { config: { broadcast: { self: false }, presence: { key: '' }, postgres_changes: [{ event: '*', schema: 'public', table: TABLE }] } };
-            if (cfg.key.startsWith('eyJ')) payload.access_token = cfg.key; // chave legada; a sb_publishable vai só na URL
+            if (tokUsuario) payload.access_token = tokUsuario;            // v9.1: token do usuário logado
+            else if (cfg.key.startsWith('eyJ')) payload.access_token = cfg.key; // chave legada; a sb_publishable vai só na URL
             rtSend({ topic: RT_TOPIC, event: 'phx_join', payload, ref: rt.joinRef, join_ref: rt.joinRef });
             clearInterval(rt.hb);
             rt.hb = setInterval(() => {
@@ -687,6 +838,11 @@
             updateSyncIndicator();
             rtReagendar();
         };
+    }
+
+    // sessão renovada: o servidor do tempo real precisa do token novo (senão derruba o canal quando o antigo vence)
+    function rtAtualizarToken(tok) {
+        if (tok && rt.status === 'on') rtSend({ topic: RT_TOPIC, event: 'access_token', payload: { access_token: tok }, ref: String(++rt.ref) });
     }
 
     function rtReagendar() {
@@ -2044,6 +2200,19 @@
                             </div>
                         </div>
                         <div style="font-size:9.5px;">A URL é corrigida automaticamente (remove "/rest/v1" e barras). Nunca use a chave <b>service_role / secret</b> aqui.</div>
+                        <div id="painelLogin" style="border:1px solid #d97706; border-radius:5px; padding:5px 7px; background:rgba(217,119,6,.06);">
+                            <div style="font-size:10px; font-weight:800; margin-bottom:3px;">🔐 Login na nuvem (uma vez por computador)</div>
+                            <div id="loginForm" style="display:grid; grid-template-columns:1fr 1fr auto; gap:6px; align-items:end;">
+                                <input type="email" id="inputLoginEmail" placeholder="seu e-mail" autocomplete="username" style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
+                                <input type="password" id="inputLoginSenha" placeholder="senha (fica no 1Password)" autocomplete="current-password" style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
+                                <button id="btnLogin" style="background:#16a34a; color:#fff; font-weight:700; border:none; padding:4px 12px; border-radius:4px; font-size:10.5px; cursor:pointer;">Entrar</button>
+                            </div>
+                            <div id="loginStatus" style="display:none; justify-content:space-between; align-items:center; gap:6px; font-size:10.5px;">
+                                <span id="loginStatusTxt"></span>
+                                <button id="btnLogout" style="background:#64748b; color:#fff; font-weight:700; border:none; padding:3px 10px; border-radius:4px; font-size:10px; cursor:pointer;">Sair</button>
+                            </div>
+                            <div style="font-size:9px; opacity:.8; margin-top:3px;">A senha não fica salva: só a sessão, renovada sozinha. Use "Sair" se deixar de usar este computador.</div>
+                        </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px; gap:6px; flex-wrap:wrap;">
                             <div style="display:flex; gap:6px;">
                                 <button id="btnTestSupabase" style="background:#0284c7; color:#fff; font-weight:700; border:none; padding:4px 10px; border-radius:4px; font-size:10px; cursor:pointer;">🧪 Testar Conexão</button>
@@ -2175,6 +2344,29 @@
         };
 
         $('btnTestSupabase').onclick = testSupabaseConnection;
+        $('btnLogin').onclick = async () => {
+            const btn = $('btnLogin');
+            if (!getSupabaseConfig()) { alert('Preencha e salve a Project URL e a chave do Supabase primeiro.'); return; }
+            btn.disabled = true; btn.innerText = '...';
+            try {
+                const s = await entrar($('inputLoginEmail').value, $('inputLoginSenha').value);
+                $('inputLoginSenha').value = '';
+                clearCloudError();
+                alert(`✅ Logado como ${s.email}.\nEste computador fica conectado (a sessão se renova sozinha).`);
+                loadDayFromCloud(selectedDate);
+            } catch (err) {
+                alert('⚠️ ' + err.message);
+            } finally {
+                btn.disabled = false; btn.innerText = 'Entrar';
+                updateSyncIndicator();
+            }
+        };
+        $('inputLoginSenha').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnLogin').click(); });
+        $('btnLogout').onclick = () => {
+            if (!confirm('Sair da nuvem neste computador?\n\nDepois que a nuvem for fechada para quem não está logado, a agenda deste PC deixa de sincronizar até entrar de novo.')) return;
+            sair();
+        };
+        atualizarPainelLogin();
         $('btnPushAllToCloud').onclick = pushAllLocalToCloud;
         $('btnPrevDay').onclick = () => changeDay(-1);
         $('btnNextDay').onclick = () => changeDay(1);
@@ -2913,6 +3105,12 @@ Responda APENAS com JSON, sem texto fora dele:
         ultimaLeituraNuvem = Date.now();
         loadDayFromCloud(selectedDate, true);
     }, POLL_MS);
+
+    // v9.1 — mantém a sessão viva (renova 5 min antes de vencer), mesmo sem tráfego
+    setInterval(() => {
+        const s = lerSessao();
+        if (s && getSupabaseConfig() && s.expires_at - Date.now() / 1000 < 300) renovarSessao().catch(() => { /* tenta no próximo minuto */ });
+    }, 60000);
 
     // Reenvia fila pendente e reconecta o tempo real quando a internet volta
     window.addEventListener('online', () => { flushOutbox(); if (!rt.ws) rtReconectar(); });
