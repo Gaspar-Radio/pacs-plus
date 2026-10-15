@@ -249,7 +249,7 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; }`,
         calcLaudo: `
 .document-editor__toolbar > .v-btn.pp-calc-laudo { color: #5eead4 !important; font-weight: 700 !important; }
-#pp-panel[data-pos="laudo"] { top: 96px; left: auto; right: 16px; width: 440px; }`,
+#pp-panel[data-pos="laudo"] { top: var(--pp-top, 96px); left: auto; right: 16px; width: 440px; max-height: calc(100vh - var(--pp-top, 96px) - 12px); }`,
         historicoAcoes: `
 #datatableExamesHistorico .pp-hist-acoes { display: inline-flex !important; align-items: center; gap: 3px; margin-left: 6px; vertical-align: middle; }
 #datatableExamesHistorico td:nth-child(10) .v-icon { font-size: 17px !important; }
@@ -2162,7 +2162,13 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const ed = editorLaudo();
         if (!ed || !texto) return false;
         try {
-            ed.model.change(w => { ed.model.insertContent(w.createText(texto)); });
+            ed.model.change(w => {
+                // espaço automático se o cursor estiver colado numa palavra
+                const pos = ed.model.document.selection.getFirstPosition();
+                const antes = pos && pos.textNode ? pos.textNode.data.slice(0, pos.offset - pos.textNode.startOffset) : (pos && pos.nodeBefore && pos.nodeBefore.data) || '';
+                const prefixo = antes && !/\s$/.test(antes) ? ' ' : '';
+                ed.model.insertContent(w.createText(prefixo + texto));
+            });
             ed.editing.view.focus();
             return true;
         } catch (e) { console.warn('[PACS Plus] inserir no laudo falhou', e); return false; }
@@ -2185,6 +2191,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             if (!p) return;
             const aberto = p.classList.contains('open') && p.dataset.pos === 'laudo' && activeTab === 'calc';
             p.dataset.pos = 'laudo';
+            p.style.setProperty('--pp-top', Math.round(tb.getBoundingClientRect().bottom + 8) + 'px');
             togglePanel(!aberto, 'calc');
         };
         const ultimo = ref[ref.length - 1];
