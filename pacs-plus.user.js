@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.12.1
+// @version      1.12.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -42,6 +42,7 @@
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
         ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Claude Haiku 5.5 (e Gemini no modo duplo) procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas, contraste…). Usa o login da Agenda. Nada é alterado no laudo'],
+        ['rodapeCompacto', 'Rodapé da lista compacto', 'Linha “Linhas por página / 1-50 de …” com 30 px de altura (antes ~60 px)'],
         ['calcLaudo', 'Calculadoras na tela do laudo', 'Botão 🧮 na barra do editor: abre as calculadoras ao lado do laudo, com “Inserir no laudo” (vai para onde está o cursor)'],
         ['buscaCompacta', 'Buscar Matriz / Buscar Frase compactos', 'Janela baixa e lista com um item por linha (sigla + descrição), ocupando a altura da tela: rolagem só se não couber'],
         ['abreviar', 'Abreviar exame e convênio', 'Ex.: “ARTICULAR POR ARTICULAÇÃO” → “ARTICULAR”; passe o mouse para ver o nome completo. Ao desligar, recarregue a página'],
@@ -297,7 +298,19 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-vazio { padding: 14px 4px; text-align: center; color: #94a3b8; }
 #pp-rev .pr-rod { border-top: 1px solid #1e293b; padding: 7px 10px 9px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; }
 #pp-rev .pr-rod label { display: flex; align-items: center; gap: 5px; color: #cbd5e1; font-size: 11.5px; }
-#pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }`,
+#pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
+#pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }`,
+        rodapeCompacto: `
+.v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-select { margin: 0 0 0 10px !important; padding: 0 !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-input__slot { min-height: 0 !important; margin: 0 !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-select__selections { padding: 0 !important; min-height: 0 !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-select__selection--comma { margin: 0 4px 0 0 !important; font-size: 12px !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-input__append-inner { margin-top: 0 !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__select .v-text-field__details, .v-main .v-data-table > .v-data-footer .v-data-footer__select .v-messages { display: none !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__pagination { margin: 0 16px !important; }
+.v-main .v-data-table > .v-data-footer .v-data-footer__icons-before .v-btn, .v-main .v-data-table > .v-data-footer .v-data-footer__icons-after .v-btn { width: 28px !important; height: 28px !important; margin: 0 2px !important; }`,
         calcLaudo: `
 .document-editor__toolbar > .v-btn.pp-calc-laudo { color: #5eead4 !important; font-weight: 700 !important; }
 #pp-panel[data-pos="laudo"] { top: var(--pp-top, 96px); left: auto; right: 16px; width: 440px; max-height: calc(100vh - var(--pp-top, 96px) - 12px); }`,
@@ -2360,7 +2373,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         while ((v = reV.exec(t))) {
             let [a, b, cc] = [numBR(v[1]), numBR(v[2]), numBR(v[3])]; if (v[4].toLowerCase() === 'mm') { a /= 10; b /= 10; cc /= 10; }
             const vol = numBR(v[5]), err = Math.min(...[0.523, 0.52, 0.71].map(k => Math.abs(a * b * cc * k - vol) / Math.max(vol, 0.01)));
-            if (err > 0.2) add('medidas', 'atencao', v.index, `Volume ${v[5]} ${v[6]} não confere com ${v[1]} × ${v[2]} × ${v[3]} ${v[4]} (esperado ≈ ${fmt(a * b * cc * 0.523, 1)} cm³ com 0,523).`, 'Recalcular o volume (🧮 Calc.).');
+            if (err > 0.1) add('medidas', 'atencao', v.index, `Volume ${v[5]} ${v[6]} não confere com ${v[1]} × ${v[2]} × ${v[3]} ${v[4]} (esperado ≈ ${fmt(a * b * cc * 0.523, 1)} cm³ com 0,523).`, 'Recalcular o volume (🧮 Calc.).');
         }
         if (/doppler/.test(ex) && !/fluxo|doppler|espectr|velocidade|refluxo|\bir\b|\bip\b|resistividade|pulsatilidade|perviedade|pervi[ao]/.test(tl)) add('exame_texto', 'atencao', -1, 'Exame de Doppler sem descrição de fluxo/velocidades no texto.', 'Conferir se a matriz é a de Doppler.');
         if (t.length > 200 && !/impress[aã]o|conclus[aã]o|opini[aã]o/i.test(t)) add('corpo_conclusao', 'atencao', -1, 'Não encontrei Impressão/Conclusão no laudo.', '');
@@ -2438,15 +2451,24 @@ ${c.texto}`;
             trecho: String(a.trecho || '').slice(0, 200), explicacao: String(a.explicacao || '').slice(0, 400), sugestao: String(a.sugestao || '').slice(0, 300), fontes: [fonte]
         }));
     }
-    async function revHaiku(c) {
+    // v1.12.2: o Haiku 5.5 “pensa” por padrão e o raciocínio consumia o limite de tokens antes da resposta
+    // (erro recorrente). Agora: raciocínio adaptativo com esforço médio, limite de 6000 tokens e 1 nova tentativa.
+    async function revHaiku(c, tentativa = 1) {
         const t0 = performance.now();
-        const d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-haiku-5-5', max_tokens: 1500,
-            system: REV_BASE + '\n' + REV_ESP[c.tipo] + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.',
-            tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
+        let d;
+        try {
+            // raciocínio adaptativo com esforço médio: sem ele o Haiku errava contas (volume); com o padrão estourava o limite
+            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-haiku-5-5', max_tokens: 6000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+                system: REV_BASE + '\n' + REV_ESP[c.tipo] + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.',
+                tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
+        } catch (e) { if (tentativa < 2) return revHaiku(c, tentativa + 1); throw e; }
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'revisao');
         let lista = blk && blk.input && blk.input.achados;
         if (!lista) { const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n'); const m = txt.match(/\{[\s\S]*\}/); if (m) { try { lista = JSON.parse(m[0]).achados; } catch (e) { /* segue */ } } }
-        if (!Array.isArray(lista)) throw new Error('resposta sem a lista de achados');
+        if (!Array.isArray(lista)) {
+            if (tentativa < 2) return revHaiku(c, tentativa + 1);
+            throw new Error('resposta sem a lista de achados' + (d.stop_reason ? ' (' + d.stop_reason + ')' : ''));
+        }
         const u = d.usage || {};
         return { achados: limparAchados(lista, 'haiku'), ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.modelo || 'haiku' };
     }
@@ -2547,6 +2569,7 @@ ${c.texto}`;
 <select id="pr-modo" title="Motores de IA"><option value="haiku_gemini" ${rc.modo === 'haiku_gemini' ? 'selected' : ''}>Haiku + Gemini</option><option value="haiku" ${rc.modo === 'haiku' ? 'selected' : ''}>Só Haiku</option></select>
 <button class="pr-x" title="Fechar (Esc)">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${st('Haiku', r.haiku, r.erroH, true)}${st('Gemini', r.gemini, r.erroG, r.usaGemini)}</div>
+${r.erroH || r.erroG ? `<div class="pr-err">${r.erroH ? 'Haiku: ' + esc(r.erroH) : ''}${r.erroH && r.erroG ? '<br>' : ''}${r.erroG ? 'Gemini: ' + esc(r.erroG) : ''}</div>` : ''}
 ${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib" ${r.carregando ? 'disabled' : ''}>Liberar ${graves ? 'mesmo assim' : ''}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
