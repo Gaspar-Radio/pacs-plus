@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.10.0
+// @version      1.11.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -38,6 +38,9 @@
         ['historico', 'Histórico de exames', 'Tabela de histórico compacta (fonte 12 px), só Exame, Data/Hora, Situação e Ações'],
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
+        ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
+        ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
+        ['calcLaudo', 'Calculadoras na tela do laudo', 'Botão 🧮 na barra do editor: abre as calculadoras ao lado do laudo, com “Inserir no laudo” (vai para onde está o cursor)'],
         ['buscaCompacta', 'Buscar Matriz / Buscar Frase compactos', 'Janela baixa e lista com um item por linha (sigla + descrição), ocupando a altura da tela: rolagem só se não couber'],
         ['abreviar', 'Abreviar exame e convênio', 'Ex.: “ARTICULAR POR ARTICULAÇÃO” → “ARTICULAR”; passe o mouse para ver o nome completo. Ao desligar, recarregue a página'],
         ['preFiltros', 'Pré-filtros sem rolagem', 'A lista abre inteira, à direita, com itens compactos'],
@@ -122,6 +125,7 @@
         c.blocks = c.blocks || {};
         BLOCKS.forEach(([k]) => { if (c.blocks[k] === undefined) c.blocks[k] = !DEFAULT_OFF.includes(k); });
         if (!['auto', 'normal', 'compacta'].includes(c.densidade)) c.densidade = 'auto';
+        if (!['normal', 'suave', 'escuro'].includes(c.papel)) c.papel = 'suave';
         if (c.master === undefined) c.master = true;
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
@@ -209,6 +213,43 @@
 #datatableExamesHistorico td:nth-child(1) .v-list-item__title { flex: 1 1 auto !important; min-width: 0 !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
 #datatableExamesHistorico td:nth-child(1) .v-list-item__subtitle { flex: 0 0 auto !important; white-space: nowrap !important; font-weight: 700 !important; opacity: .75; }
 #datatableExamesHistorico.v-data-table--dense td { height: 22px !important; }`,
+        temaGrafite: `
+html { --pp-g-bg:#1b1d21; --pp-g-bg2:#23262b; --pp-g-bg3:#2c3036; --pp-g-line:#3a3f46; --pp-g-tx:#e3e6ea; }
+.document-editor__editable-container { background: var(--pp-g-bg) !important; }
+.document-editor__toolbar { background: var(--pp-g-bg2) !important; border-bottom: 1px solid var(--pp-g-line) !important; }
+.document-editor__toolbar > .v-btn { color: var(--pp-g-tx) !important; }
+.document-editor .ck.ck-toolbar { background: var(--pp-g-bg2) !important; border-color: var(--pp-g-line) !important; }
+.document-editor .ck.ck-button, .document-editor a.ck.ck-button { color: var(--pp-g-tx) !important; }
+.document-editor .ck.ck-button:not(.ck-disabled):hover { background: var(--pp-g-bg3) !important; }
+.document-editor .ck.ck-button.ck-on { background: #34404e !important; color: #9cc7f0 !important; }
+.document-editor .ck.ck-toolbar__separator { background: var(--pp-g-line) !important; }
+.document-editor .ck.ck-dropdown__panel, .document-editor .ck.ck-list { background: var(--pp-g-bg2) !important; border-color: var(--pp-g-line) !important; }
+.document-editor .ck.ck-list__item .ck-button:hover:not(.ck-disabled) { background: var(--pp-g-bg3) !important; }
+html[data-pp-papel="suave"] .ck.ck-content.ck-editor__editable { background: #e9e8e4 !important; color: #16181b !important; border-color: #4a5058 !important; box-shadow: 0 0 0 1px #000, 0 6px 24px rgba(0,0,0,.5) !important; }
+html[data-pp-papel="escuro"] .ck.ck-content.ck-editor__editable { filter: invert(.9) hue-rotate(180deg); background: #fff !important; border-color: transparent !important; box-shadow: 0 0 0 1px #555 !important; }`,
+        barraUnica: `
+#pp-dock { position: fixed; top: 0; left: 204px; height: 36px; z-index: 150; display: flex; align-items: center; gap: 6px; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; pointer-events: none; }
+html[data-pp-viewer] #pp-dock { display: none !important; }
+#pp-dock > * { pointer-events: auto; }
+#pp-dock .ppd-sep { width: 1px; height: 18px; background: #4a5058; margin: 0 2px; }
+#pp-dock > #btn-agenda-flutuante, #pp-dock > #pp-btn, #pp-dock > #hamctc-top {
+  position: static !important; inset: auto !important; transform: none !important; margin: 0 !important; opacity: 1 !important;
+  height: 26px !important; padding: 0 10px !important; border-radius: 6px !important; box-shadow: none !important;
+  font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif !important; line-height: 24px !important; display: inline-flex !important; align-items: center; gap: 5px;
+  background: #2c3036 !important; color: #e3e6ea !important; border: 1px solid #3a3f46 !important; border-bottom-width: 2px !important; cursor: pointer; white-space: nowrap; }
+#pp-dock > #btn-agenda-flutuante { border-bottom-color: #3b82f6 !important; }
+#pp-dock > #pp-btn { border-bottom-color: #14b8a6 !important; }
+#pp-dock > #hamctc-top { border-bottom-color: #7cc4c9 !important; }
+#pp-dock > button:hover { background: #363b42 !important; }
+#pp-dock .ppd-chip { height: 22px; padding: 0 8px; border-radius: 11px; display: inline-flex; align-items: center; gap: 4px; background: #23262b; border: 1px solid #3a3f46; color: #a9b0b8; font-weight: 600; font-size: 11px; cursor: default; white-space: nowrap; }
+#pp-dock .ppd-chip[hidden] { display: none; }
+#pp-dock .ppd-chip.ok { color: #34d399; } #pp-dock .ppd-chip.warn { color: #fbbf24; } #pp-dock .ppd-chip.err { color: #f87171; border-color: #7f1d1d; }
+#pp-dock .ppd-chip.urg { color: #fff; background: #b91c1c; border-color: #ef4444; cursor: pointer; }
+#pp-dock .ppd-chip.urg.azul { background: #1d4ed8; border-color: #3b82f6; } #pp-dock .ppd-chip.urg.laranja { background: #c2410c; border-color: #f97316; }
+#pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; }`,
+        calcLaudo: `
+.document-editor__toolbar > .v-btn.pp-calc-laudo { color: #5eead4 !important; font-weight: 700 !important; }
+#pp-panel[data-pos="laudo"] { top: var(--pp-top, 96px); left: auto; right: 16px; width: 440px; max-height: calc(100vh - var(--pp-top, 96px) - 12px); }`,
         historicoAcoes: `
 #datatableExamesHistorico .pp-hist-acoes { display: inline-flex !important; align-items: center; gap: 3px; margin-left: 6px; vertical-align: middle; }
 #datatableExamesHistorico td:nth-child(10) .v-icon { font-size: 17px !important; }
@@ -656,6 +697,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             abreviarTextos();
             histAcoes();
             buscaAltura();
+            calcLaudoBtn();
         } catch (e) { console.warn('[PACS Plus] ajuste dinâmico falhou', e); }
     }
 
@@ -666,7 +708,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const obs = new MutationObserver(muts => {
         if (pend) return;
         // ignora mudanças feitas dentro do próprio painel do PACS Plus
-        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel, #pp-urg, #pp-anexos, .pp-hist-acoes'); })) return;
+        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel, #pp-urg, #pp-anexos, .pp-hist-acoes, #pp-dock, .ck-content, .ck-editor__editable'); })) return;
         pend = true;
         setTimeout(() => { pend = false; applyDynamic(); aplicarPrazosLista(); }, 120);
     });
@@ -2042,6 +2084,122 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     }
 
     // =====================================================================
+    // 3F. BARRA ÚNICA, TEMA GRAFITE E CALCULADORAS NO LAUDO (v1.11)
+    // ---------------------------------------------------------------------
+    // Barra única: os botões dos outros scripts (Agenda, Anamnese TC) são
+    // MOVIDOS para dentro de #pp-dock (mesmo id; os scripts continuam achando
+    // o botão pelo id). No visualizador e com o ajuste desligado, devolve tudo.
+    // =====================================================================
+    const DOCK_IDS = ['btn-agenda-flutuante', 'pp-btn', 'hamctc-top'];
+    const PAPEIS = [['normal', '◐ Papel branco'], ['suave', '◐ Papel suave'], ['escuro', '◐ Papel escuro']];
+    function aplicarPapel() {
+        const v = on('temaGrafite') ? (cfg.papel || 'suave') : 'normal';
+        if (document.documentElement.getAttribute('data-pp-papel') !== v) document.documentElement.setAttribute('data-pp-papel', v);
+    }
+    function dockTick() {
+        aplicarPapel();
+        let d = document.getElementById('pp-dock');
+        const ativo = on('barraUnica') && !ehViewer() && document.body;
+        if (!ativo) {
+            if (d) { DOCK_IDS.forEach(id => { const b = document.getElementById(id); if (b && b.parentElement === d) document.body.appendChild(b); }); d.remove(); }
+            return;
+        }
+        if (!d) {
+            d = document.createElement('div');
+            d.id = 'pp-dock';
+            d.innerHTML = '<span class="ppd-sep"></span><span class="ppd-chip" id="ppd-nuvem" hidden></span><span class="ppd-chip urg" id="ppd-urg" hidden title="TC urgente na sua escala — clique para ver os cartões"></span><span class="ppd-chip ppd-papel" id="ppd-papel" hidden title="Cor do papel do laudo (só na tela)"></span>';
+            document.body.appendChild(d);
+            d.querySelector('#ppd-urg').onclick = () => { const ui = urgUi(); ui.ocultar = {}; urgUiSalvar(ui); urgBanner(); };
+            d.querySelector('#ppd-papel').onclick = () => {
+                const i = PAPEIS.findIndex(x => x[0] === (cfg.papel || 'suave'));
+                cfg.papel = PAPEIS[(i + 1) % PAPEIS.length][0]; saveCfg(); dockTick();
+            };
+        }
+        const sep = d.querySelector('.ppd-sep');
+        DOCK_IDS.forEach(id => { const b = document.getElementById(id); if (b && b.parentElement !== d) d.insertBefore(b, sep); });
+        // ordem fixa: Agenda, Plus, Anamnese
+        DOCK_IDS.forEach(id => { const b = document.getElementById(id); if (b && b.parentElement === d) d.insertBefore(b, sep); });
+        // nuvem da Agenda (espelha o indicador da gaveta)
+        const nv = d.querySelector('#ppd-nuvem'), ind = document.getElementById('indicatorNuvem');
+        if (ind) {
+            const t = (ind.textContent || '').replace('Nuvem ', '').trim();
+            const c = ind.style.color || '';
+            const cls = 'ppd-chip ' + (/34d399|52, 211, 153/.test(c) ? 'ok' : /f87171|248, 113, 113/.test(c) ? 'err' : 'warn');
+            if (nv.textContent !== t) nv.textContent = t;
+            if (nv.className !== cls) nv.className = cls;
+            if (nv.title !== 'Agenda: ' + ind.title) nv.title = 'Agenda: ' + ind.title;
+            nv.hidden = !t;
+        } else nv.hidden = true;
+        // TC urgente
+        const ug = d.querySelector('#ppd-urg');
+        let txt = '', cor = '';
+        if (urgLigado()) {
+            const e = urgEstado(), agora = Date.now();
+            const gs = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+            if (gs.length) {
+                const f = gs[0].vence - agora;
+                txt = `🚨 ${gs.length} TC urgente${gs.length > 1 ? 's' : ''} · ${f <= 0 ? 'vencido' : faltaTxt(f)}`;
+                cor = f <= 30 * 60000 ? '' : f <= 60 * 60000 ? 'laranja' : 'azul';
+            }
+        }
+        if (ug.textContent !== txt) ug.textContent = txt;
+        const ucl = 'ppd-chip urg' + (cor ? ' ' + cor : '');
+        if (ug.className !== ucl) ug.className = ucl;
+        ug.hidden = !txt;
+        // papel
+        const pp = d.querySelector('#ppd-papel');
+        pp.hidden = !on('temaGrafite');
+        const rot = (PAPEIS.find(x => x[0] === (cfg.papel || 'suave')) || PAPEIS[1])[1];
+        if (pp.textContent !== rot) pp.textContent = rot;
+    }
+
+    // Calculadoras na tela do laudo
+    function editorLaudo() {
+        const el = document.querySelector('.v-dialog--active .ck-editor__editable, .ck-editor__editable');
+        return el && el.ckeditorInstance && !el.ckeditorInstance.isReadOnly ? el.ckeditorInstance : null;
+    }
+    function inserirNoLaudo(texto) {
+        const ed = editorLaudo();
+        if (!ed || !texto) return false;
+        try {
+            ed.model.change(w => {
+                // espaço automático se o cursor estiver colado numa palavra
+                const pos = ed.model.document.selection.getFirstPosition();
+                const antes = pos && pos.textNode ? pos.textNode.data.slice(0, pos.offset - pos.textNode.startOffset) : (pos && pos.nodeBefore && pos.nodeBefore.data) || '';
+                const prefixo = antes && !/\s$/.test(antes) ? ' ' : '';
+                ed.model.insertContent(w.createText(prefixo + texto));
+            });
+            ed.editing.view.focus();
+            return true;
+        } catch (e) { console.warn('[PACS Plus] inserir no laudo falhou', e); return false; }
+    }
+    function calcLaudoBtn() {
+        const tb = document.querySelector('.document-editor__toolbar');
+        let b = document.querySelector('.document-editor__toolbar > .pp-calc-laudo');
+        if (!tb || !on('calcLaudo')) { if (b) b.remove(); return; }
+        if (b) return;
+        const ref = [...tb.querySelectorAll(':scope > .v-btn')].filter(x => /^(frase|matriz|formatacao)/.test(norm(x.innerText)));
+        b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'v-btn v-btn--text theme--dark v-size--small pp-calc-laudo';
+        b.innerHTML = '<span class="v-btn__content">🧮 Calc.</span>';
+        b.title = 'Calculadoras do PACS Plus (o resultado vai para o cursor do laudo)';
+        b.addEventListener('mousedown', e => e.preventDefault()); // não tira o cursor do laudo
+        b.onclick = e => {
+            e.stopPropagation();
+            const p = document.getElementById('pp-panel');
+            if (!p) return;
+            const aberto = p.classList.contains('open') && p.dataset.pos === 'laudo' && activeTab === 'calc';
+            p.dataset.pos = 'laudo';
+            const tbAtual = b.closest('.document-editor__toolbar') || tb;
+            p.style.setProperty('--pp-top', Math.round(Math.max(48, Math.min(tbAtual.getBoundingClientRect().bottom + 8, window.innerHeight - 320))) + 'px');
+            togglePanel(!aberto, 'calc');
+        };
+        const ultimo = ref[ref.length - 1];
+        if (ultimo && ultimo.nextSibling) tb.insertBefore(b, ultimo.nextSibling); else tb.insertBefore(b, tb.firstChild);
+    }
+
+    // =====================================================================
     // 4. CALCULADORAS
     // =====================================================================
     const CALCS = {
@@ -2241,7 +2399,7 @@ html[data-pp-viewer] #pp-btn { top: auto; bottom: 8px; left: 8px; padding: 3px 8
         btn.textContent = '🧰 Plus';
         const ver = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '';
         btn.title = `PACS Plus ${ver ? 'v' + ver + ' — ' : ''}pesquisa, calculadoras e ajustes visuais (Alt+R)`;
-        btn.onclick = () => togglePanel();
+        btn.onclick = () => { const p = document.getElementById('pp-panel'); if (p) delete p.dataset.pos; togglePanel(); };
         document.body.appendChild(btn);
         const p = document.createElement('div');
         p.id = 'pp-panel';
@@ -2297,7 +2455,7 @@ ${links.length ? `<div class="pp-h">Links rápidos</div><div class="pp-chips">${
 <label>Calculadora<select id="pp-calc-sel">${Object.entries(CALCS).map(([k, c]) => `<option value="${k}" ${k === activeCalc ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></label>
 <div id="pp-calc-form">${CALCS[activeCalc].html}</div>
 <div class="pp-res" id="pp-calc-res"><span class="pp-muted">Preencha os campos.</span></div>
-<div class="pp-row" style="margin-top:8px;"><span class="pp-muted" id="pp-calc-txt"></span><button class="pp-btn" id="pp-calc-copy">📋 Copiar para o laudo</button></div>`;
+<div class="pp-row" style="margin-top:8px;"><span class="pp-muted" id="pp-calc-txt"></span><span style="display:flex;gap:6px;flex:0 0 auto;">${editorLaudo() ? '<button class="pp-btn" id="pp-calc-ins" title="Insere onde está o cursor do laudo">↵ Inserir no laudo</button>' : ''}<button class="pp-btn ${editorLaudo() ? 'sec' : ''}" id="pp-calc-copy">📋 Copiar</button></span></div>`;
         body.querySelector('#pp-calc-sel').onchange = e => { activeCalc = e.target.value; renderCalc(body); };
         const form = body.querySelector('#pp-calc-form');
         let ultimo = null;
@@ -2316,7 +2474,14 @@ ${links.length ? `<div class="pp-h">Links rápidos</div><div class="pp-chips">${
             if (!ultimo) return;
             const b = body.querySelector('#pp-calc-copy');
             try { await navigator.clipboard.writeText(ultimo.texto); b.textContent = '✓ Copiado'; } catch (e) { b.textContent = 'Falhou — selecione e copie'; }
-            setTimeout(() => { b.textContent = '📋 Copiar para o laudo'; }, 1500);
+            setTimeout(() => { b.textContent = '📋 Copiar'; }, 1500);
+        };
+        const ins = body.querySelector('#pp-calc-ins');
+        if (ins) ins.onclick = () => {
+            if (!ultimo) return;
+            const ok = inserirNoLaudo(ultimo.texto);
+            ins.textContent = ok ? '✓ Inserido' : 'Falhou — use Copiar';
+            setTimeout(() => { ins.textContent = '↵ Inserir no laudo'; }, 1500);
         };
         run();
         const first = form.querySelector('input'); if (first) setTimeout(() => first.focus(), 30);
@@ -2620,6 +2785,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
 <option value="auto" ${cfg.densidade === 'auto' ? 'selected' : ''}>Automática — compacta quando a janela tiver menos de ${LARGURA_COMPACTA}px (agora: ${densidadeAtual()})</option>
 <option value="normal" ${cfg.densidade === 'normal' ? 'selected' : ''}>Normal (fonte 13 px — tela cheia)</option>
 <option value="compacta" ${cfg.densidade === 'compacta' ? 'selected' : ''}>Compacta (fonte 11 px — meia tela)</option></select></label>
+<label style="margin-top:6px;">Papel do laudo (tema grafite — só a tela; impressão não muda)<select id="pp-papel">${PAPEIS.map(([v, n]) => `<option value="${v}" ${(cfg.papel || 'suave') === v ? 'selected' : ''}>${esc(n.replace('◐ ', ''))}</option>`).join('')}</select></label>
 <div class="pp-h">Ajustes (cada um liga/desliga na hora)</div>
 ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b="${k}" ${cfg.blocks[k] ? 'checked' : ''} ${cfg.master ? '' : 'disabled'}><span>${esc(n)}${d ? `<small>${esc(d)}</small>` : ''}</span></label>`).join('')}
 <div class="pp-h">Sites de pesquisa — “Nome | URL com %s”</div>
@@ -2630,7 +2796,8 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
 <div class="pp-muted" style="margin-top:8px;">As configurações ficam salvas neste computador.</div>`;
         body.querySelector('#pp-master').onchange = e => { cfg.master = e.target.checked; saveCfg(); applyAll(); renderPanel(); };
         body.querySelector('#pp-dens').onchange = e => { cfg.densidade = e.target.value; saveCfg(); applyAll(); renderPanel(); };
-        body.querySelectorAll('[data-b]').forEach(cb => { cb.onchange = () => { cfg.blocks[cb.dataset.b] = cb.checked; saveCfg(); applyAll(); if (cb.dataset.b === 'slaUteis') recalcularLista(); }; });
+        body.querySelector('#pp-papel').onchange = e => { cfg.papel = e.target.value; saveCfg(); dockTick(); };
+        body.querySelectorAll('[data-b]').forEach(cb => { cb.onchange = () => { cfg.blocks[cb.dataset.b] = cb.checked; saveCfg(); applyAll(); dockTick(); if (cb.dataset.b === 'slaUteis') recalcularLista(); }; });
         body.querySelector('#pp-save').onclick = () => { cfg.sites = body.querySelector('#pp-sites').value; cfg.links = body.querySelector('#pp-links').value; saveCfg(); const b = body.querySelector('#pp-save'); b.textContent = '✓ Salvo'; setTimeout(() => { b.textContent = 'Salvar listas'; }, 1200); };
         body.querySelector('#pp-reset').onclick = () => { if (!confirm('Restaurar todos os ajustes e listas para o padrão?')) return; localStorage.removeItem(CFG_KEY); recarregarCfg(); applyAll(); renderPanel(); };
     }
@@ -2657,7 +2824,7 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     document.addEventListener('mousedown', e => {
         const p = document.getElementById('pp-panel');
         if (!p || !p.classList.contains('open')) return;
-        if (e.target.closest('#pp-panel') || e.target.closest('#pp-btn')) return;
+        if (e.target.closest('#pp-panel') || e.target.closest('#pp-btn') || e.target.closest('.pp-calc-laudo')) return;
         p.classList.remove('open');
     }, true);
 
@@ -2714,6 +2881,8 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         if (ehViewer()) document.documentElement.setAttribute('data-pp-viewer', '');
         applyAll();
         buildPanel();
+        dockTick();
+        setInterval(dockTick, 1000);
         obs.observe(document.body, { childList: true, subtree: true, characterData: true });
         setInterval(() => { if (!document.getElementById('pp-btn')) { const p = document.getElementById('pp-panel'); if (p) p.remove(); buildPanel(); } }, 2000);
         if (!(window.__PP_TEST__ && window.__PP_TEST__.semTimers)) {
