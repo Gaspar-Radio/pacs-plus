@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.13.0
+// @version      1.14.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -271,6 +271,7 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .document-editor__toolbar > .v-btn.pp-rev-btn { color: #fbbf24 !important; font-weight: 700 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 #pp-rev .pr-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; z-index: 1; }
+#pp-rev .pr-top { flex-wrap: wrap; }
 #pp-rev .pr-top b { flex: 1; font-size: 13px; }
 #pp-rev select { background: #1e293b; color: #f1f5f9; border: 1px solid #475569; border-radius: 5px; padding: 2px 4px; font-size: 12px; }
 #pp-rev .pr-x { background: none; border: 0; color: #94a3b8; font-size: 16px; cursor: pointer; }
@@ -301,7 +302,7 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -2296,7 +2297,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true };
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'auto' }; // revisor: auto (TC → Sonnet, US → Haiku) | haiku | sonnet
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
@@ -2495,7 +2496,7 @@ ${c.texto}`;
             if (k === 'critico_presente') { if (p >= 0.7) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (Jev ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
             const m = mapa[k];
             if (!m || p < 0.5) return;
-            achados.push({ categoria: m[0], gravidade: p >= 0.8 ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
+            achados.push({ categoria: m[0], gravidade: p >= 0.85 ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
         });
         const u = d.usage || {};
         return { achados, probs, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || 'jev' };
@@ -2522,6 +2523,7 @@ ${c.texto}`;
     }
     const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
     const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
+    const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
     async function revGemini(c) {
         const t0 = performance.now();
         const d = await iaProxy({ acao: 'gemini', system: REV_BASE + '\n' + REV_ESP[c.tipo], parts: [{ text: revMensagem(c) }],
@@ -2533,13 +2535,17 @@ ${c.texto}`;
     }
     // junta achados iguais de fontes diferentes (mesmo trecho ou mesma categoria com trechos parecidos)
     const tokensDe = s => new Set(norm(s).replace(/[^a-z0-9 ]/g, ' ').split(' ').filter(w => w.length > 2));
+    // mesmo erro = mesma categoria + trecho igual/contido ou palavras em comum (categorias diferentes nunca se fundem:
+    // “lado trocado” e “medida divergente” podem estar na mesma frase e são erros distintos)
     function parecidos(a, b) {
+        if (a.categoria !== b.categoria) return false;
         const na = norm(a.trecho), nb = norm(b.trecho);
-        if (na && nb && (na.includes(nb) || nb.includes(na))) return true;
-        const ta = tokensDe(a.trecho + ' ' + (a.categoria === b.categoria ? '' : a.explicacao)), tb = tokensDe(b.trecho);
-        if (!ta.size || !tb.size) return a.categoria === b.categoria && !a.trecho && !b.trecho;
+        if (!na || !nb) return !na && !nb;
+        if (na.includes(nb) || nb.includes(na)) return true;
+        const ta = tokensDe(a.trecho), tb = tokensDe(b.trecho);
+        if (!ta.size || !tb.size) return false;
         let inter = 0; ta.forEach(w => { if (tb.has(w)) inter++; });
-        return inter / Math.min(ta.size, tb.size) >= (a.categoria === b.categoria ? 0.5 : 0.75);
+        return inter / Math.min(ta.size, tb.size) >= 0.5;
     }
     function juntarAchados(listas) {
         const out = [];
@@ -2592,7 +2598,7 @@ ${c.texto}`;
         let l = []; try { l = JSON.parse(localStorage.getItem(REV_LOG_KEY) || '[]'); } catch (e) { l = []; }
         if (!l.length) return '';
         const med = k => { const v = l.map(x => x[k]).filter(x => x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
-        const partes = ['jev', 'haiku', 'gemini', 'opus'].filter(m => l.some(x => x[m + 'Ms'] > 0 || (m === 'haiku' && x.hMs > 0) || (m === 'gemini' && x.gMs > 0)))
+        const partes = ['jev', 'haiku', 'sonnet', 'gemini', 'opus'].filter(m => l.some(x => x[m + 'Ms'] > 0 || (m === 'haiku' && x.hMs > 0) || (m === 'gemini' && x.gMs > 0)))
             .map(m => { const k = m === 'haiku' && !l.some(x => x.haikuMs) ? 'h' : m === 'gemini' && !l.some(x => x.geminiMs) ? 'g' : m; return `${MOTORES[m].nome} ${fmt(med(k + 'Ms') / 1000, 1)} s / ${Math.round(med(k + 'In'))}+${Math.round(med(k + 'Out'))} tok`; });
         return `${l.length} revisões neste PC · média: ${partes.join(' · ')}`;
     }
@@ -2620,6 +2626,7 @@ ${c.texto}`;
         p.innerHTML = `
 <div class="pr-top"><b>🛡 Revisão · ${r.ctx.tipo === 'GERAL' ? esc(r.ctx.mod) : r.ctx.tipo}</b>
 <select id="pr-modo" title="Motores">${Object.entries(REV_MODOS).map(([k, v]) => `<option value="${k}" ${rc.modo === k ? 'selected' : ''}>${v.nome}</option>`).join('')}</select>
+<select id="pr-revisor" title="Qual Claude revisa">${Object.entries(REVISORES).map(([k, v]) => `<option value="${k}" ${(rc.revisor || 'auto') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
 <button class="pr-x" title="Fechar (Esc)">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
@@ -2640,6 +2647,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-log">${esc(revResumoLog())}</div><div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x').onclick = fecharRevisao;
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
+        p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-opus-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
@@ -2655,25 +2663,29 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
     const MOTORES = {
         jev: { nome: 'Jev', fn: c => revJev(c) },
         haiku: { nome: 'Haiku', fn: c => revHaiku(c) },
+        sonnet: { nome: 'Sonnet', fn: c => revSonnet(c) },
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
         opus: { nome: 'Opus', fn: c => revOpus(c) }
     };
     const REV_MODOS = {
-        completo: { nome: 'Jev + Haiku + Gemini', motores: ['jev', 'haiku', 'gemini'] },
-        jev_haiku: { nome: 'Jev + Haiku', motores: ['jev', 'haiku'] },
-        haiku_gemini: { nome: 'Haiku + Gemini', motores: ['haiku', 'gemini'] },
-        haiku: { nome: 'Só Haiku', motores: ['haiku'] }
+        completo: { nome: 'Jev + Claude + Gemini', motores: ['jev', 'claude', 'gemini'] },
+        jev_haiku: { nome: 'Jev + Claude', motores: ['jev', 'claude'] },
+        haiku_gemini: { nome: 'Claude + Gemini', motores: ['claude', 'gemini'] },
+        haiku: { nome: 'Só Claude', motores: ['claude'] }
     };
+    const REVISORES = { auto: 'Claude: auto (TC Sonnet · US Haiku)', haiku: 'Claude: Haiku', sonnet: 'Claude: Sonnet' };
+    const revisorDe = (rc, c) => rc.revisor === 'haiku' || rc.revisor === 'sonnet' ? rc.revisor : (c.tipo === 'TC' ? 'sonnet' : 'haiku');
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'gemini', 'opus'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
+        ['haiku', 'sonnet', 'gemini', 'opus'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
         const base = juntarAchados(listas);
-        if (r.res.jev) r.res.jev.achados.forEach(j => {
-            const igual = base.find(o => o.categoria === j.categoria && !o.fontes.includes('jev'));
-            if (igual) { igual.fontes.push('jev'); igual.prob = j.prob; if (j.gravidade === 'grave') igual.gravidade = 'grave'; }
-            else base.push(Object.assign({}, j, { fontes: ['jev'] }));
+        // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
+        if (r.res.jev) r.res.jev.achados.slice().sort((x, y) => y.prob - x.prob).forEach(j => {
+            const iguais = base.filter(o => o.categoria === j.categoria);
+            if (iguais.length) { iguais.forEach(o => { if (!o.fontes.includes('jev')) o.fontes.push('jev'); o.prob = Math.max(o.prob || 0, j.prob); }); return; }
+            if (j.prob >= 0.7) base.push(Object.assign({}, j, { fontes: ['jev'], gravidade: j.prob >= 0.85 ? j.gravidade : 'atencao' }));
         });
         const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0);
         return base.sort((x, y) => peso(y) - peso(x));
@@ -2698,17 +2710,18 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico);
         const rc = revCfg();
         const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
-        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && !revAtual.carregando) {
+        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && revAtual.revisor === revisorDe(rc, c) && !revAtual.carregando) {
             revAtual.depois = depois || null; renderRevisao(); return revAtual;
         }
         const r = revAtual = { hash, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
         renderRevisao();
         if (c.texto.length >= 30) {
-            const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m));
+            r.revisor = revisorDe(rc, c);
+            const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
             if (rc.opusAuto && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
             // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
-            const ias = r.ativos.filter(m => m !== 'opus' && r.res[m]);
+            const ias = r.ativos.filter(m => ['haiku', 'sonnet', 'gemini'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
             if (rc.opusAuto && !r.ativos.includes('opus') && ias.length >= 2) {
                 const disc = achadosAtuais(r).find(a => a.gravidade === 'grave' && !a.fontes.includes('regra') && a.fontes.filter(f => ias.includes(f)).length === 1);
                 if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); }
