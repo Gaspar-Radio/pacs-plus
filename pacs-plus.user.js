@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.12.2
+// @version      1.13.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -41,7 +41,7 @@
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
-        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Claude Haiku 5.5 (e Gemini no modo duplo) procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas, contraste…). Usa o login da Agenda. Nada é alterado no laudo'],
+        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Haiku 5.5 + Gemini, e Opus 5.5 como sênior, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas, contraste…). Usa o login da Agenda. Nada é alterado no laudo'],
         ['rodapeCompacto', 'Rodapé da lista compacto', 'Linha “Linhas por página / 1-50 de …” com 30 px de altura (antes ~60 px)'],
         ['calcLaudo', 'Calculadoras na tela do laudo', 'Botão 🧮 na barra do editor: abre as calculadoras ao lado do laudo, com “Inserir no laudo” (vai para onde está o cursor)'],
         ['buscaCompacta', 'Buscar Matriz / Buscar Frase compactos', 'Janela baixa e lista com um item por linha (sigla + descrição), ocupando a altura da tela: rolagem só se não couber'],
@@ -299,7 +299,9 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-rod { border-top: 1px solid #1e293b; padding: 7px 10px 9px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; }
 #pp-rev .pr-rod label { display: flex; align-items: center; gap: 5px; color: #cbd5e1; font-size: 11.5px; }
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
-#pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }`,
+#pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
+#pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -2294,7 +2296,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'haiku_gemini', noLiberar: false };
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true };
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
@@ -2451,27 +2453,75 @@ ${c.texto}`;
             trecho: String(a.trecho || '').slice(0, 200), explicacao: String(a.explicacao || '').slice(0, 400), sugestao: String(a.sugestao || '').slice(0, 300), fontes: [fonte]
         }));
     }
-    // v1.12.2: o Haiku 5.5 “pensa” por padrão e o raciocínio consumia o limite de tokens antes da resposta
-    // (erro recorrente). Agora: raciocínio adaptativo com esforço médio, limite de 6000 tokens e 1 nova tentativa.
-    async function revHaiku(c, tentativa = 1) {
+    // ---------- Jev (TypeSafe): checklist sim/não com probabilidade ----------
+    // Afirmações de ERRO: probabilidade alta = provável erro. Rápido (< 1 s); não localiza o trecho.
+    const JEV_COMUNS = {
+        lado_corpo_conclusao: ['lateralidade', 'grave', 'O lado (direito/esquerdo) de algum achado na impressão/conclusão é diferente do lado descrito no corpo do laudo.'],
+        lado_exame: ['lateralidade', 'grave', 'O nome do exame indica um lado (direito ou esquerdo) e o laudo descreve estruturas do lado oposto.'],
+        achado_omitido: ['corpo_conclusao', 'grave', 'Existe achado anormal relevante descrito no corpo do laudo que NÃO aparece na impressão/conclusão.'],
+        conclusao_sem_base: ['corpo_conclusao', 'grave', 'A impressão/conclusão cita um achado que não foi descrito no corpo do laudo.'],
+        conclusao_contradiz: ['corpo_conclusao', 'grave', 'A impressão/conclusão contradiz o corpo do laudo (por exemplo, diz normal havendo alteração descrita).'],
+        medida_divergente: ['medidas', 'grave', 'Alguma medida citada na impressão/conclusão é diferente da mesma medida no corpo do laudo.'],
+        unidade_implausivel: ['medidas', 'atencao', 'Há medida com unidade provavelmente errada (mm no lugar de cm ou o contrário) ou valor anatomicamente implausível.'],
+        volume_incoerente: ['medidas', 'atencao', 'Algum volume informado não confere com as três dimensões multiplicadas por cerca de 0,52 (elipsoide).'],
+        sexo_anatomia: ['sexo_anatomia', 'grave', 'O laudo descreve órgão incompatível com o sexo do paciente informado.'],
+        regiao_errada: ['exame_texto', 'grave', 'O laudo descreve região anatômica ou tipo de exame diferente do nome do exame (provável matriz errada).'],
+        contradicao_interna: ['redacao_sentido', 'grave', 'O laudo afirma e nega o mesmo achado em trechos diferentes.'],
+        frase_sem_sentido: ['redacao_sentido', 'atencao', 'Há frase truncada, sem sentido ou palavra trocada pelo ditado que altera o significado.'],
+        classificacao_incoerente: ['classificacao', 'grave', 'Alguma classificação (TI-RADS, BI-RADS, O-RADS, Bosniak, LI-RADS, Fleischner) é incoerente com a descrição do achado.'],
+        campo_vazio: ['campo_vazio', 'grave', 'O laudo contém campo de modelo não preenchido (XX, ___, colchetes vazios).']
+    };
+    const JEV_ESP = {
+        US: { doppler_incoerente: ['exame_texto', 'grave', 'Em exame com Doppler, a conclusão sobre estenose, refluxo ou trombose não é coerente com as velocidades ou achados descritos.'] },
+        TC: { tecnica_incoerente: ['exame_texto', 'grave', 'A técnica descrita (com ou sem contraste, fases) é incoerente com o nome do exame.'],
+              nivel_incoerente: ['corpo_conclusao', 'grave', 'Níveis vertebrais, segmentos ou lobos citados na conclusão diferem dos descritos no corpo do laudo.'],
+              agudo_fora_conclusao: ['corpo_conclusao', 'grave', 'Achado agudo (hemorragia, pneumoperitônio, dissecção, tromboembolismo, fratura, obstrução) descrito no corpo não está na conclusão.'] },
+        GERAL: {}
+    };
+    const JEV_CRITICO = 'O laudo descreve achado agudo ou crítico que exige comunicação imediata ao médico assistente.';
+    async function revJev(c) {
+        const t0 = performance.now();
+        const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {});
+        const questions = {};
+        Object.entries(mapa).forEach(([k, v]) => { questions[k] = { type: 'noul', instructions: v[2] }; });
+        if (!c.critico) questions.critico_presente = { type: 'noul', instructions: JEV_CRITICO };
+        const d = await iaProxy({ acao: 'jev', state: revMensagem(c), questions });
+        const ans = d.answers || {};
+        const achados = [], probs = {};
+        Object.entries(ans).forEach(([k, a]) => {
+            const p = a && typeof a.noul === 'number' ? a.noul : null;
+            if (p == null) return;
+            probs[k] = p;
+            if (k === 'critico_presente') { if (p >= 0.7) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (Jev ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
+            const m = mapa[k];
+            if (!m || p < 0.5) return;
+            achados.push({ categoria: m[0], gravidade: p >= 0.8 ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
+        });
+        const u = d.usage || {};
+        return { achados, probs, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || 'jev' };
+    }
+
+    // ---------- Claude (Haiku = revisor; Opus = sênior) ----------
+    async function revClaude(c, modelo, esforco, fonte, tentativa = 1) {
         const t0 = performance.now();
         let d;
         try {
-            // raciocínio adaptativo com esforço médio: sem ele o Haiku errava contas (volume); com o padrão estourava o limite
-            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-haiku-5-5', max_tokens: 6000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
-                system: REV_BASE + '\n' + REV_ESP[c.tipo] + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.',
+            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: fonte === 'opus' ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
+                system: REV_BASE + '\n' + REV_ESP[c.tipo] + (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.',
                 tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
-        } catch (e) { if (tentativa < 2) return revHaiku(c, tentativa + 1); throw e; }
+        } catch (e) { if (tentativa < 2) return revClaude(c, modelo, esforco, fonte, tentativa + 1); throw e; }
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'revisao');
         let lista = blk && blk.input && blk.input.achados;
         if (!lista) { const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n'); const m = txt.match(/\{[\s\S]*\}/); if (m) { try { lista = JSON.parse(m[0]).achados; } catch (e) { /* segue */ } } }
         if (!Array.isArray(lista)) {
-            if (tentativa < 2) return revHaiku(c, tentativa + 1);
+            if (tentativa < 2) return revClaude(c, modelo, esforco, fonte, tentativa + 1);
             throw new Error('resposta sem a lista de achados' + (d.stop_reason ? ' (' + d.stop_reason + ')' : ''));
         }
         const u = d.usage || {};
-        return { achados: limparAchados(lista, 'haiku'), ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.modelo || 'haiku' };
+        return { achados: limparAchados(lista, fonte), ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.modelo || modelo };
     }
+    const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
+    const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
     async function revGemini(c) {
         const t0 = performance.now();
         const d = await iaProxy({ acao: 'gemini', system: REV_BASE + '\n' + REV_ESP[c.tipo], parts: [{ text: revMensagem(c) }],
@@ -2541,9 +2591,12 @@ ${c.texto}`;
     function revResumoLog() {
         let l = []; try { l = JSON.parse(localStorage.getItem(REV_LOG_KEY) || '[]'); } catch (e) { l = []; }
         if (!l.length) return '';
-        const med = (k) => { const v = l.map(x => x[k]).filter(x => x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
-        return `${l.length} revisões neste PC · média Haiku ${fmt(med('hMs') / 1000, 1)} s / ${Math.round(med('hIn'))}+${Math.round(med('hOut'))} tokens · Gemini ${fmt(med('gMs') / 1000, 1)} s / ${Math.round(med('gIn'))}+${Math.round(med('gOut'))} tokens`;
+        const med = k => { const v = l.map(x => x[k]).filter(x => x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
+        const partes = ['jev', 'haiku', 'gemini', 'opus'].filter(m => l.some(x => x[m + 'Ms'] > 0 || (m === 'haiku' && x.hMs > 0) || (m === 'gemini' && x.gMs > 0)))
+            .map(m => { const k = m === 'haiku' && !l.some(x => x.haikuMs) ? 'h' : m === 'gemini' && !l.some(x => x.geminiMs) ? 'g' : m; return `${MOTORES[m].nome} ${fmt(med(k + 'Ms') / 1000, 1)} s / ${Math.round(med(k + 'In'))}+${Math.round(med(k + 'Out'))} tok`; });
+        return `${l.length} revisões neste PC · média: ${partes.join(' · ')}`;
     }
+
 
     // ---------- tela ----------
     let revAtual = null; // { hash, ctx, regras, haiku, gemini, erroH, erroG, carregando, ignorados:Set, depois:fn }
@@ -2559,33 +2612,38 @@ ${c.texto}`;
         const p = revPainel(), r = revAtual, rc = revCfg();
         const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
         p.style.top = Math.round(Math.max(48, Math.min(tb ? tb.getBoundingClientRect().bottom + 8 : 96, window.innerHeight - 320))) + 'px';
-        const listas = [r.regras || []]; if (r.haiku) listas.push(r.haiku.achados); if (r.gemini) listas.push(r.gemini.achados);
-        const todos = juntarAchados(listas).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
+        const todos = achadosAtuais(r).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
         const graves = todos.filter(a => a.gravidade === 'grave').length;
-        const st = (nome, x, erro, ativo) => !ativo ? '' : `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || '')}">${nome} ${erro ? '⚠ erro' : x ? `✓ ${fmt(x.ms / 1000, 1)} s · ${x.achados.length}` : '⏳'}</span>`;
-        const fonteChip = f => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : f === 'haiku' ? 'Haiku' : 'Gemini'}</span>`;
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x ? x.modelo + ' · ' + x.tin + '+' + x.tout + ' tokens' : ''))}">${MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${fmt(x.ms / 1000, 1)} s · ${x.achados.length}` : '⏳'}</span>`; };
+        const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : ''}</span>`;
+        const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
 <div class="pr-top"><b>🛡 Revisão · ${r.ctx.tipo === 'GERAL' ? esc(r.ctx.mod) : r.ctx.tipo}</b>
-<select id="pr-modo" title="Motores de IA"><option value="haiku_gemini" ${rc.modo === 'haiku_gemini' ? 'selected' : ''}>Haiku + Gemini</option><option value="haiku" ${rc.modo === 'haiku' ? 'selected' : ''}>Só Haiku</option></select>
+<select id="pr-modo" title="Motores">${Object.entries(REV_MODOS).map(([k, v]) => `<option value="${k}" ${rc.modo === k ? 'selected' : ''}>${v.nome}</option>`).join('')}</select>
 <button class="pr-x" title="Fechar (Esc)">✕</button></div>
-<div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${st('Haiku', r.haiku, r.erroH, true)}${st('Gemini', r.gemini, r.erroG, r.usaGemini)}</div>
-${r.erroH || r.erroG ? `<div class="pr-err">${r.erroH ? 'Haiku: ' + esc(r.erroH) : ''}${r.erroH && r.erroG ? '<br>' : ''}${r.erroG ? 'Gemini: ' + esc(r.erroG) : ''}</div>` : ''}
+<div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
+${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
+${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib" ${r.carregando ? 'disabled' : ''}>Liberar ${graves ? 'mesmo assim' : ''}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
-<div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(fonteChip).join('')}</div>
+<div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
 <div class="pr-ex">${esc(a.explicacao)}</div>
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}<button class="pr-b sec" data-ign>Ignorar</button></div></div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
-<div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label><button class="pr-b sec" id="pr-de-novo">↻ Revisar de novo</button>
-<div class="pr-log">${esc(revResumoLog())}</div><div class="pr-log">Vermelho = grave · borda dupla = apontado por mais de uma fonte. A IA pode errar: a decisão é sua.</div></div>`;
+<div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
+<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>
+<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">↻ De novo</button></span>
+<div class="pr-log">${esc(revResumoLog())}</div><div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x').onclick = fecharRevisao;
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
+        p.querySelector('#pr-opus-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
+        p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
@@ -2594,30 +2652,76 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         const bl = p.querySelector('#pr-lib'); if (bl) bl.onclick = () => { const f = r.depois; r.depois = null; fecharRevisao(); if (f) f(); };
         const bc = p.querySelector('#pr-canc'); if (bc) bc.onclick = () => { r.depois = null; renderRevisao(); };
     }
+    const MOTORES = {
+        jev: { nome: 'Jev', fn: c => revJev(c) },
+        haiku: { nome: 'Haiku', fn: c => revHaiku(c) },
+        gemini: { nome: 'Gemini', fn: c => revGemini(c) },
+        opus: { nome: 'Opus', fn: c => revOpus(c) }
+    };
+    const REV_MODOS = {
+        completo: { nome: 'Jev + Haiku + Gemini', motores: ['jev', 'haiku', 'gemini'] },
+        jev_haiku: { nome: 'Jev + Haiku', motores: ['jev', 'haiku'] },
+        haiku_gemini: { nome: 'Haiku + Gemini', motores: ['haiku', 'gemini'] },
+        haiku: { nome: 'Só Haiku', motores: ['haiku'] }
+    };
+    const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
+    function achadosAtuais(r) {
+        // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
+        const listas = [r.regras || []];
+        ['haiku', 'gemini', 'opus'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
+        const base = juntarAchados(listas);
+        if (r.res.jev) r.res.jev.achados.forEach(j => {
+            const igual = base.find(o => o.categoria === j.categoria && !o.fontes.includes('jev'));
+            if (igual) { igual.fontes.push('jev'); igual.prob = j.prob; if (j.gravidade === 'grave') igual.gravidade = 'grave'; }
+            else base.push(Object.assign({}, j, { fontes: ['jev'] }));
+        });
+        const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0);
+        return base.sort((x, y) => peso(y) - peso(x));
+    }
+    function rodarMotor(r, m) {
+        if (!r.ativos.includes(m)) r.ativos.push(m);
+        delete r.err[m]; r.res[m] = null;
+        return MOTORES[m].fn(r.ctx).then(x => { r.res[m] = x; }).catch(e => { r.err[m] = e.message; }).finally(() => { if (revAtual === r) renderRevisao(); });
+    }
+    async function rodarOpus(r, motivo) {
+        if (r.ativos.includes('opus') && (r.res.opus || !r.err.opus)) return;
+        r.motivoOpus = motivo;
+        r.carregando = true;
+        renderRevisao();
+        await rodarMotor(r, 'opus');
+        r.carregando = false;
+        if (revAtual === r) renderRevisao();
+    }
     async function revisar(forcar, depois) {
         const c = contextoLaudo();
         if (!c) return null;
         const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico);
         const rc = revCfg();
-        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === rc.modo && !revAtual.carregando) {
+        const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
+        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && !revAtual.carregando) {
             revAtual.depois = depois || null; renderRevisao(); return revAtual;
         }
-        const r = revAtual = { hash, ctx: c, modo: rc.modo, regras: regrasLaudo(c), haiku: null, gemini: null, erroH: '', erroG: '', usaGemini: rc.modo === 'haiku_gemini', carregando: true, ignorados: new Set(), depois: depois || null };
+        const r = revAtual = { hash, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
         renderRevisao();
-        const tarefas = [];
         if (c.texto.length >= 30) {
-            tarefas.push(revHaiku(c).then(x => { r.haiku = x; }).catch(e => { r.erroH = e.message; }).finally(() => { if (revAtual === r) renderRevisao(); }));
-            if (r.usaGemini) tarefas.push(revGemini(c).then(x => { r.gemini = x; }).catch(e => { r.erroG = e.message; }).finally(() => { if (revAtual === r) renderRevisao(); }));
+            const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m));
+            if (rc.opusAuto && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
+            await Promise.all(onda);
+            // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
+            const ias = r.ativos.filter(m => m !== 'opus' && r.res[m]);
+            if (rc.opusAuto && !r.ativos.includes('opus') && ias.length >= 2) {
+                const disc = achadosAtuais(r).find(a => a.gravidade === 'grave' && !a.fontes.includes('regra') && a.fontes.filter(f => ias.includes(f)).length === 1);
+                if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); }
+            }
         }
-        await Promise.all(tarefas);
         r.carregando = false;
-        revLog({ t: Date.now(), tipo: c.tipo, modo: r.modo, nR: r.regras.length, nH: r.haiku ? r.haiku.achados.length : -1, nG: r.gemini ? r.gemini.achados.length : -1,
-            hMs: r.haiku ? Math.round(r.haiku.ms) : 0, hIn: r.haiku ? r.haiku.tin : 0, hOut: r.haiku ? r.haiku.tout : 0,
-            gMs: r.gemini ? Math.round(r.gemini.ms) : 0, gIn: r.gemini ? r.gemini.tin : 0, gOut: r.gemini ? r.gemini.tout : 0, erros: (r.erroH ? 'H' : '') + (r.erroG ? 'G' : '') });
+        const reg = { t: Date.now(), tipo: c.tipo, modo, n: c.texto.length, nR: r.regras.length, erros: Object.keys(r.err).join('') };
+        Object.entries(r.res).forEach(([m, x]) => { if (x) Object.assign(reg, { [m + 'Ms']: Math.round(x.ms), [m + 'In']: x.tin, [m + 'Out']: x.tout, [m + 'N']: x.achados.length }); });
+        revLog(reg);
         if (revAtual === r) {
-            const graves = juntarAchados([r.regras, r.haiku ? r.haiku.achados : [], r.gemini ? r.gemini.achados : []]).filter(a => a.gravidade === 'grave').length;
+            const graves = achadosAtuais(r).filter(a => a.gravidade === 'grave').length;
             // revisão no Liberar sem nada grave → segue sozinho
-            if (r.depois && !graves && !r.erroH) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
+            if (r.depois && !graves && !Object.keys(r.err).length) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
             renderRevisao();
         }
         return r;
@@ -2631,7 +2735,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
         b.innerHTML = '<span class="v-btn__content">🛡 Revisar</span>';
-        b.title = 'Revisão do laudo: regras fixas + IA (Haiku / Gemini). Nada é alterado no laudo.';
+        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku / Gemini; Opus como sênior). Nada é alterado no laudo.';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); if (document.getElementById('pp-rev') && !(revAtual && revAtual.carregando)) { fecharRevisao(); return; } revisar(false); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
