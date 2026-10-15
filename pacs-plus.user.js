@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.12.0
+// @version      1.12.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -258,7 +258,13 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input .v-messages, .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input .v-text-field__details { display: none !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input__slot { margin-bottom: 0 !important; min-height: 26px !important; align-items: center !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .row { align-items: center !important; flex-wrap: nowrap !important; }
-.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) > [class*="col-"] { padding-top: 2px !important; padding-bottom: 2px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) > [class*="col-"] { padding-top: 6px !important; padding-bottom: 6px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-btn:not(.v-btn--icon) { height: 34px !important; min-width: 80px !important; padding: 0 14px !important; margin: 0 4px !important; font-size: 13.5px !important; font-weight: 600 !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-btn.v-btn--icon { width: 40px !important; height: 40px !important; margin: 0 4px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-btn.v-btn--icon .v-icon { font-size: 26px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-label { font-size: 14.5px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input--selection-controls__input { transform: none !important; margin-right: 6px !important; }
+.v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input { margin: 0 6px !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) > [class*="col-"]:first-child { padding-right: 14px !important; }`,
         revisaoIA: `
 .document-editor__toolbar > .v-btn.pp-rev-btn { color: #fbbf24 !important; font-weight: 700 !important; }
