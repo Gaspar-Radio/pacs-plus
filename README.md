@@ -12,3 +12,6 @@ Scripts de interface para o PACS Laudo Web. Contêm **apenas código** — nenhu
 | Anamnese TC (HAMC) | Ficha de anamnese de TC: botão 📋 nas linhas de TC, grava contraste, resumo e PDF no exame | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/anamnese-tc.user.js |
 
 O Tampermonkey verifica novas versões automaticamente (`@updateURL`).
+
+## App da Agenda para iPhone
+Pasta `app/` (PWA), servida em https://gaspar-radio.github.io/pacs-plus/app/ — sem dados nem credenciais no código; exige login.

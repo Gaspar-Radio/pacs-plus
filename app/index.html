@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Agenda US">
+<meta name="theme-color" content="#0f172a">
+<meta name="robots" content="noindex, nofollow">
+<title>Agenda US</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<style>
+:root{--bg:#f1f5f9;--card:#fff;--tx:#0f172a;--mut:#64748b;--ln:#e2e8f0;--pri:#2563eb;--ok:#059669;--okbg:#ecfdf5;--wa:#d97706;--wabg:#fefce8;--er:#e11d48;--erbg:#fff1f2;--cn:#94a3b8;--chip:#e2e8f0}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1220;--card:#162033;--tx:#e2e8f0;--mut:#94a3b8;--ln:#24324a;--pri:#60a5fa;--ok:#34d399;--okbg:#0d2e25;--wa:#fbbf24;--wabg:#2e2408;--er:#fb7185;--erbg:#33121c;--cn:#64748b;--chip:#24324a}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}
+body{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+input,select{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:11px 12px;width:100%}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:calc(env(safe-area-inset-top) + 8px) 14px 8px;border-bottom:1px solid var(--ln)}
+.top{display:flex;align-items:center;gap:8px}
+.top h1{flex:1;margin:0;font-size:19px;font-weight:700;text-align:center}
+.top h1 small{display:block;font-size:12px;color:var(--mut);font-weight:500}
+.nav{width:40px;height:40px;border-radius:12px;background:var(--card);font-size:20px;border:1px solid var(--ln)}
+.sync{font-size:12px;color:var(--mut);text-align:center;margin-top:2px;min-height:15px}
+.sync.err{color:var(--er);font-weight:600}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 14px 2px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;background:var(--card);border:1px solid var(--ln);border-radius:999px;padding:5px 10px;font-size:13px;font-weight:600;white-space:nowrap}
+main{padding:6px 12px 20px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:16px 4px 6px;display:flex;justify-content:space-between}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:10px 12px;margin-bottom:8px}
+.card.esperando{background:var(--wabg)}.card.atendido{background:var(--okbg)}.card.faltou{background:var(--erbg)}.card.cancelado{opacity:.55}
+.row1{display:flex;gap:10px;align-items:flex-start}
+.hora{font-size:18px;font-weight:700;min-width:52px}
+.who{flex:1;min-width:0}
+.pac{font-weight:650;word-break:break-word}
+.ex{font-size:13px;color:var(--mut);margin-top:2px}
+.obs{font-size:12px;color:var(--mut);margin-top:3px;font-style:italic}
+.tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:7px;background:var(--chip)}
+.tag.pref{background:#dbeafe;color:#1e40af}.tag.part{background:#fae8ff;color:#86198f}.tag.sus{background:#fee2e2;color:#991b1b}.tag.enc{background:#fef3c7;color:#92400e}
+@media (prefers-color-scheme:dark){.tag.pref{background:#1e3a8a;color:#bfdbfe}.tag.part{background:#581c87;color:#f5d0fe}.tag.sus{background:#7f1d1d;color:#fecaca}.tag.enc{background:#78350f;color:#fde68a}}
+.st{font-size:12px;font-weight:700;padding:3px 8px;border-radius:8px;white-space:nowrap;background:var(--chip)}
+.st.s30{background:#fef08a;color:#713f12}.st.s45{background:#fed7aa;color:#7c2d12}.st.s60{background:#fecaca;color:#7f1d1d}
+.st.ok{background:#bbf7d0;color:#14532d}.st.fal{background:#fecdd3;color:#881337}
+.acts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:9px}
+.b{border-radius:10px;padding:9px 4px;font-weight:700;font-size:14px;border:1px solid var(--ln);background:var(--bg)}
+.b.on-chegou{background:#fde68a;color:#713f12;border-color:#f59e0b}
+.b.on-atend{background:#86efac;color:#14532d;border-color:#16a34a}
+.b.on-falta{background:#fda4af;color:#881337;border-color:#e11d48}
+.vazio{text-align:center;color:var(--mut);padding:30px 10px}
+.fab{position:fixed;right:16px;bottom:calc(76px + env(safe-area-inset-bottom));width:56px;height:56px;border-radius:50%;background:var(--pri);color:#fff;font-size:28px;box-shadow:0 6px 18px rgba(0,0,0,.25);z-index:6}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:7;display:grid;grid-template-columns:repeat(5,1fr);background:var(--card);border-top:1px solid var(--ln);padding-bottom:env(safe-area-inset-bottom)}
+.tabs button{padding:8px 0 6px;font-size:11px;color:var(--mut);display:flex;flex-direction:column;align-items:center;gap:2px}
+.tabs button b{font-size:20px;font-weight:400}
+.tabs button.on{color:var(--pri);font-weight:700}
+.sheetbg{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:20;display:none}
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:21;background:var(--card);border-radius:18px 18px 0 0;padding:14px 16px calc(18px + env(safe-area-inset-bottom));max-height:88vh;overflow:auto;transform:translateY(105%);transition:transform .2s}
+.sheet.open{transform:none}
+.sheet h3{margin:4px 0 12px;font-size:17px}
+.sheet label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+.btnp{width:100%;padding:13px;border-radius:12px;background:var(--pri);color:#fff;font-weight:700;margin-top:14px}
+.btns{width:100%;padding:12px;border-radius:12px;background:var(--bg);border:1px solid var(--ln);font-weight:600;margin-top:8px}
+.btnd{width:100%;padding:12px;border-radius:12px;color:var(--er);border:1px solid var(--er);font-weight:600;margin-top:8px}
+.tl{font-size:14px;margin:4px 0}
+.tl span{color:var(--mut)}
+.tbl{width:100%;border-collapse:collapse;font-size:14px}
+.tbl td,.tbl th{padding:8px 6px;border-bottom:1px solid var(--ln);text-align:left}
+.tbl th{font-size:11px;text-transform:uppercase;color:var(--mut)}
+.tbl tr.hoje td{font-weight:700}
+.num{text-align:right!important}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kpi{background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:10px}
+.kpi b{display:block;font-size:22px}.kpi span{font-size:12px;color:var(--mut)}
+.bar{height:7px;border-radius:4px;background:var(--chip);margin-top:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--er)}
+.doc{display:flex;align-items:center;gap:10px;padding:12px;background:var(--card);border:1px solid var(--ln);border-radius:12px;margin-bottom:8px;text-decoration:none;color:var(--tx)}
+.doc small{color:var(--mut);display:block}
+.login{max-width:420px;margin:40px auto;padding:0 18px}
+.login h1{font-size:24px;margin:0 0 6px}
+.login p{color:var(--mut);margin:0 0 14px}
+.msg{margin-top:10px;font-size:14px;color:var(--er)}
+.note{font-size:12px;color:var(--mut);margin-top:12px}
+.toast{position:fixed;left:50%;bottom:calc(140px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#0f172a;color:#fff;padding:10px 14px;border-radius:12px;font-size:14px;z-index:30;display:none;max-width:90vw}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="sheetbg" id="sheetbg"></div>
+<div class="sheet" id="sheet"></div>
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+// =====================================================================
+// Agenda US — app web (PWA) para iPhone sobre o mesmo Supabase da Agenda.
+// NADA de endereço do banco, chave ou dado de paciente no código: o endereço
+// e a chave pública são digitados uma vez no aparelho; os dados só chegam
+// com login (RLS = authenticated). Grava com PATCH por id (só os campos da
+// ação), para não sobrescrever o que os PCs/integração PACS gravaram.
+// =====================================================================
+const VERSAO = '1.0.0';
+const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
+const TABELA = 'agenda_exames';
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ls = { get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* cheio */ } }, del(k) { try { localStorage.removeItem(k); } catch (e) { /* ok */ } } };
+const pad = n => String(n).padStart(2, '0');
+const isoDia = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const hojeIso = () => isoDia(new Date());
+const DIAS = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+const fmtDia = iso => { const [y, m, d] = iso.split('-').map(Number); const dt = new Date(y, m - 1, d); return `${DIAS[dt.getDay()]} ${pad(d)}/${pad(m)}`; };
+const somaDias = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return isoDia(new Date(y, m - 1, d + n)); };
+const hm = iso => { if (!iso) return '--:--'; const d = new Date(iso); return isNaN(d) ? '--:--' : `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const normTime = h => { const p = String(h || '').trim().replace(/[hH.]/g, ':').split(':'); return `${(p[0] || '0').replace(/\D/g, '').padStart(2, '0').slice(-2)}:${(p[1] || '00').replace(/\D/g, '').padEnd(2, '0').slice(0, 2)}`; };
+const normText = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toUpperCase();
+const normName = s => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
+const minutos = (a, b) => { if (!a) return null; const d = ((b ? new Date(b) : new Date()) - new Date(a)); return d < 0 ? 0 : Math.floor(d / 60000); };
+const fmtMin = m => m == null || isNaN(m) ? '–' : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${pad(m % 60)}`;
+const slaCls = m => m == null ? '' : m >= 60 ? 's60' : m >= 45 ? 's45' : m >= 30 ? 's30' : '';
+const proc = r => Math.max(r.qtd_exames || 1, r.pacs_qtd_exames || 1);
+const chavePac = r => r.pacs_paciente_id > 0 ? 'p' + r.pacs_paciente_id : 'n' + normName(r.paciente);
+function normConvenio(c) {
+    const u = normText(c).normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (!u) return 'NÃO INFORMADO';
+    if (u.startsWith('PREFEITURA')) return 'PREFEITURA';
+    if (/^SUS\b/.test(u)) return normText(c);
+    if (/^SER[PF][A-Z]*([ -]|$)/.test(u)) return 'SERPRAM';
+    if (/^IPSEN?MG/.test(u)) return 'IPSEMG';
+    if (/^IPSM/.test(u)) return 'IPSM (PM)';
+    if (/^UNIMED INTERC/.test(u)) return 'UNIMED INTERCÂMBIO';
+    if (/^UNIMED( SUL.*)?$/.test(u)) return 'UNIMED SUL MINEIRA';
+    if (/^SPA SAUDE/.test(u)) return 'SPA SAÚDE';
+    if (/^BRADESCO/.test(u)) return 'BRADESCO';
+    if (/^CARTAO DESC/.test(u)) return 'CARTÃO DESCONTO';
+    return normText(c);
+}
+function toast(t, ms = 2600) { const el = $('#toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => { el.style.display = 'none'; }, ms); }
+
+// ---------------------------------------------------------------- estado
+const S = { tab: ls.get(K.tab, 'agenda'), dia: hojeIso(), linhas: [], carregando: false, erro: '', rt: 'off', ultima: 0 };
+
+// ---------------------------------------------------------------- configuração e sessão
+function cfg() { const c = ls.get(K.cfg, null); return c && c.url && c.key ? c : null; }
+function salvarCfg(url, key) {
+    let u = String(url || '').trim().replace(/^["']|["']$/g, '');
+    if (u && !/^https?:\/\//i.test(u)) u = 'https://' + u;
+    try { u = new URL(u).origin; } catch (e) { throw new Error('Endereço do projeto inválido.'); }
+    const k = String(key || '').replace(/\s+/g, '');
+    if (!k) throw new Error('Informe a chave pública (publishable/anon).');
+    ls.set(K.cfg, { url: u, key: k });
+}
+function sessao() { return ls.get(K.ses, null); }
+function gravarSessao(j) { const s = { access_token: j.access_token, refresh_token: j.refresh_token, expires_at: j.expires_at || Math.floor(Date.now() / 1000) + (j.expires_in || 3600), email: (j.user && j.user.email) || (sessao() || {}).email || '' }; ls.set(K.ses, s); return s; }
+async function authPost(caminho, corpo) {
+    const c = cfg();
+    const r = await fetch(`${c.url}/auth/v1/${caminho}`, { method: 'POST', headers: { apikey: c.key, 'content-type': 'application/json' }, body: JSON.stringify(corpo) });
+    let j = {}; try { j = await r.json(); } catch (e) { /* vazio */ }
+    return { status: r.status, json: j };
+}
+async function entrar(email, senha) {
+    const r = await authPost('token?grant_type=password', { email: String(email || '').trim(), password: String(senha || '') });
+    if (r.status === 200 && r.json.access_token) return gravarSessao(r.json);
+    const cod = r.json.error_code || r.json.error || '';
+    if (cod === 'invalid_credentials' || cod === 'invalid_grant') throw new Error('E-mail ou senha incorretos.');
+    throw new Error(`Login recusado (HTTP ${r.status}).`);
+}
+let renovando = null;
+function renovar() {
+    if (renovando) return renovando;
+    renovando = (async () => {
+        const s = sessao(); if (!s) return null;
+        const r = await authPost('token?grant_type=refresh_token', { refresh_token: s.refresh_token });
+        if (r.status === 200 && r.json.access_token) { const n = gravarSessao(r.json); rtToken(n.access_token); return n; }
+        if (r.status === 400 || r.status === 401 || r.status === 403) { sair(true); throw new Error('Sessão encerrada. Entre de novo.'); }
+        throw new Error(`HTTP ${r.status} ao renovar a sessão`);
+    })().finally(() => { renovando = null; });
+    return renovando;
+}
+async function token() {
+    let s = sessao(); if (!s) throw new Error('sem login');
+    if (s.expires_at - Date.now() / 1000 < 300) s = await renovar();
+    if (!s) throw new Error('sem login');
+    return s.access_token;
+}
+function sair(silencioso) {
+    const s = sessao(), c = cfg();
+    if (s && c) fetch(`${c.url}/auth/v1/logout`, { method: 'POST', headers: { apikey: c.key, Authorization: 'Bearer ' + s.access_token } }).catch(() => {});
+    ls.del(K.ses); ls.del(K.cache); ls.del(K.fila);
+    S.linhas = [];
+    rtFechar();
+    if (!silencioso) toast('Sessão encerrada e dados locais apagados.');
+    render();
+}
+
+// ---------------------------------------------------------------- REST
+async function api(caminho, metodo = 'GET', corpo, prefer, tentativa = 1) {
+    const c = cfg(); if (!c) throw new Error('App não configurado');
+    const h = { apikey: c.key, Authorization: 'Bearer ' + await token(), 'content-type': 'application/json' };
+    if (prefer) h.Prefer = prefer;
+    let r;
+    try { r = await fetch(`${c.url}/rest/v1/${caminho}`, { method: metodo, headers: h, body: corpo ? JSON.stringify(corpo) : undefined }); }
+    catch (e) { const er = new Error('Sem conexão'); er.rede = true; throw er; }
+    if (r.status === 401 && tentativa === 1) { await renovar(); return api(caminho, metodo, corpo, prefer, 2); }
+    const txt = await r.text();
+    let j = null; try { j = txt ? JSON.parse(txt) : null; } catch (e) { j = txt; }
+    if (!r.ok) { const er = new Error((j && (j.message || j.msg)) || `HTTP ${r.status}`); er.status = r.status; er.code = j && j.code; throw er; }
+    return j;
+}
+
+// ---------------------------------------------------------------- fila offline (ações feitas sem rede)
+function fila() { return ls.get(K.fila, []); }
+function enfileirar(op) { const f = fila().filter(o => !(o.t === 'patch' && op.t === 'patch' && o.id === op.id)); if (op.t === 'patch') { const ant = fila().find(o => o.t === 'patch' && o.id === op.id); if (ant) op.campos = Object.assign({}, ant.campos, op.campos); } f.push(op); ls.set(K.fila, f); }
+let enviando = false;
+async function enviarFila() {
+    if (enviando || !fila().length || !sessao()) return;
+    enviando = true;
+    try {
+        while (fila().length) {
+            const op = fila()[0];
+            if (op.t === 'patch') await api(`${TABELA}?id=eq.${op.id}`, 'PATCH', op.campos, 'return=minimal');
+            else if (op.t === 'insert') { try { await api(TABELA, 'POST', op.linha, 'return=minimal'); } catch (e) { if (e.status !== 409) throw e; } }
+            else if (op.t === 'delete') await api(`${TABELA}?id=eq.${op.id}`, 'DELETE', null, 'return=minimal');
+            ls.set(K.fila, fila().slice(1));
+        }
+        S.erro = '';
+    } catch (e) { S.erro = e.rede ? 'Sem conexão — as ações ficam guardadas e vão quando a internet voltar.' : 'Erro ao gravar: ' + e.message; }
+    finally { enviando = false; pintarSync(); }
+}
+
+// ---------------------------------------------------------------- leitura
+async function carregarDia(dia = S.dia, silencioso) {
+    if (!sessao()) return;
+    if (!silencioso) { S.carregando = true; pintarSync(); }
+    try {
+        await enviarFila();
+        const d = await api(`${TABELA}?data_agenda=eq.${dia}&select=*&order=hora.asc,id.asc`);
+        if (dia !== S.dia) return;
+        // ações ainda na fila prevalecem sobre a leitura
+        const pend = {}; fila().forEach(o => { if (o.t === 'patch') pend[o.id] = Object.assign(pend[o.id] || {}, o.campos); });
+        S.linhas = (d || []).map(r => pend[r.id] ? Object.assign({}, r, pend[r.id]) : r);
+        S.erro = ''; S.ultima = Date.now();
+        const cache = ls.get(K.cache, {}); cache[dia] = S.linhas;
+        const dias = Object.keys(cache).sort(); while (dias.length > 7) delete cache[dias.shift()]; // guarda só os últimos dias abertos
+        ls.set(K.cache, cache);
+    } catch (e) {
+        if (e.message === 'sem login') return render();
+        const cache = ls.get(K.cache, {});
+        if (cache[dia] && dia === S.dia && !S.linhas.length) S.linhas = cache[dia];
+        S.erro = e.rede ? 'Sem conexão — mostrando a última cópia deste dia.' : 'Erro ao ler a agenda: ' + e.message;
+    } finally { S.carregando = false; if (S.tab === 'agenda') pintarAgenda(); pintarSync(); }
+}
+
+// ---------------------------------------------------------------- ações (mesmas regras da Agenda dos PCs)
+function aplicar(id, fn) {
+    const r = S.linhas.find(x => x.id === id); if (!r) return;
+    if (id < 0) { toast('Encaixe ainda não enviado: aguarde a conexão.'); return; }
+    const campos = fn(r); if (!campos) return;
+    Object.assign(r, campos);
+    pintarAgenda();
+    enfileirar({ t: 'patch', id, campos });
+    enviarFila();
+    if (navigator.vibrate) navigator.vibrate(10);
+}
+const agoraIso = () => new Date().toISOString();
+function acaoChegou(id) { aplicar(id, r => r.status !== 'esperando'
+    ? { status: 'esperando', chegou_em: agoraIso(), chegada_fonte: 'manual', atendido_em: null, atendido_fonte: null, tempo_espera_min: null }
+    : { status: 'pendente', chegou_em: null, chegada_fonte: null, atendido_em: null, atendido_fonte: null, tempo_espera_min: null }); }
+function acaoAtend(id) { aplicar(id, r => {
+    if (r.status === 'atendido') return { status: r.chegou_em ? 'esperando' : 'pendente', atendido_em: null, atendido_fonte: null, tempo_espera_min: null };
+    const n = agoraIso(); return { status: 'atendido', atendido_em: n, atendido_fonte: 'manual', tempo_espera_min: r.chegou_em ? minutos(r.chegou_em, n) : null };
+}); }
+function acaoFalta(id) { aplicar(id, r => r.status === 'faltou'
+    ? { status: 'pendente' }
+    : { status: 'faltou', chegou_em: null, chegada_fonte: null, atendido_em: null, atendido_fonte: null, tempo_espera_min: null }); }
+async function remover(id) {
+    if (!confirm('Remover este paciente da agenda deste dia?')) return;
+    S.linhas = S.linhas.filter(x => x.id !== id); fecharSheet(); pintarAgenda();
+    enfileirar({ t: 'delete', id }); enviarFila();
+}
+async function salvarEncaixe(f) {
+    const hora = normTime(f.hora.value), paciente = normText(f.paciente.value), exame = normText(f.exame.value) || 'NÃO INFORMADO', origem = f.origem.value;
+    if (!f.hora.value.trim() || !paciente) { toast('Preencha horário e paciente.'); return; }
+    let tipo = 'Hospital/Convênio', convenio = origem.toUpperCase();
+    if (origem === 'Prefeitura') { tipo = 'Prefeitura'; convenio = 'PREFEITURA'; } else if (origem.startsWith('SUS -')) { tipo = 'SUS Hospitalar'; convenio = origem; }
+    const linha = { data_agenda: S.dia, hora, tipo, convenio: normConvenio(convenio), paciente, exame, status: 'pendente', origem: 'encaixe_manual', qtd_exames: Math.max(1, exame.split(' + ').length) };
+    if (S.linhas.some(r => normTime(r.hora) === hora && normText(r.paciente) === paciente && normText(r.exame) === exame)) { toast('Já está agendado neste horário para este exame.'); return; }
+    fecharSheet();
+    try {
+        const d = await api(TABELA, 'POST', linha, 'return=representation');
+        if (Array.isArray(d) && d[0]) S.linhas.push(d[0]);
+        S.linhas.sort((a, b) => (a.hora > b.hora ? 1 : a.hora < b.hora ? -1 : a.id - b.id));
+        pintarAgenda(); toast('Encaixe lançado.');
+    } catch (e) {
+        if (e.rede) { enfileirar({ t: 'insert', linha }); S.linhas.push(Object.assign({ id: -Date.now() }, linha)); pintarAgenda(); toast('Sem conexão: encaixe guardado, vai quando a internet voltar.'); }
+        else toast(e.status === 409 ? 'Já existe esse paciente nesse horário/exame.' : 'Erro: ' + e.message, 4000);
+    }
+}
+
+// ---------------------------------------------------------------- tempo real (Supabase Realtime)
+const RT = { ws: null, ref: 0, hb: null, retry: 0, timer: null, last: 0, join: null, deb: null };
+const RT_TOPIC = 'realtime:agenda-app';
+function rtSend(o) { try { if (RT.ws && RT.ws.readyState === 1) RT.ws.send(JSON.stringify(o)); } catch (e) { /* ok */ } }
+async function rtConectar() {
+    const c = cfg(); if (!c || !sessao() || document.hidden) return;
+    if (RT.ws && RT.ws.readyState <= 1) return;
+    clearTimeout(RT.timer);
+    let tk; try { tk = await token(); } catch (e) { return; }
+    const ws = new WebSocket(`${c.url.replace(/^http/i, 'ws')}/realtime/v1/websocket?apikey=${encodeURIComponent(c.key)}&vsn=1.0.0`);
+    RT.ws = ws; S.rt = 'conectando'; pintarSync();
+    ws.onopen = () => {
+        RT.last = Date.now(); RT.join = String(++RT.ref);
+        rtSend({ topic: RT_TOPIC, event: 'phx_join', ref: RT.join, join_ref: RT.join, payload: { access_token: tk, config: { broadcast: { self: false }, presence: { key: '' }, postgres_changes: [{ event: '*', schema: 'public', table: TABELA }] } } });
+        clearInterval(RT.hb);
+        RT.hb = setInterval(() => { if (Date.now() - RT.last > 75000) { try { ws.close(); } catch (e) { /* ok */ } return; } rtSend({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(++RT.ref) }); }, 25000);
+    };
+    ws.onmessage = ev => {
+        RT.last = Date.now();
+        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (!m || m.topic !== RT_TOPIC) return;
+        if (m.event === 'phx_reply' && m.ref === RT.join) { if (m.payload && m.payload.status === 'ok') { S.rt = 'on'; RT.retry = 0; } else { S.rt = 'falhou'; try { ws.close(); } catch (e) { /* ok */ } } pintarSync(); return; }
+        if (m.event === 'postgres_changes') {
+            const d = m.payload && m.payload.data; if (!d) return;
+            const rec = d.record || d.old_record || {};
+            if (d.type === 'DELETE' || !rec.data_agenda || rec.data_agenda === S.dia) { clearTimeout(RT.deb); RT.deb = setTimeout(() => carregarDia(S.dia, true), 900); }
+        }
+        if (m.event === 'phx_error' || m.event === 'phx_close') { try { ws.close(); } catch (e) { /* ok */ } }
+    };
+    ws.onclose = () => { if (RT.ws === ws) { RT.ws = null; clearInterval(RT.hb); } if (S.rt !== 'falhou') S.rt = 'off'; pintarSync(); if (sessao() && !document.hidden) { RT.timer = setTimeout(rtConectar, Math.min(300000, 3000 * Math.pow(2, RT.retry++))); } };
+}
+function rtToken(tk) { if (S.rt === 'on') rtSend({ topic: RT_TOPIC, event: 'access_token', payload: { access_token: tk }, ref: String(++RT.ref) }); }
+function rtFechar() { clearTimeout(RT.timer); clearInterval(RT.hb); if (RT.ws) { const w = RT.ws; RT.ws = null; try { w.close(); } catch (e) { /* ok */ } } S.rt = 'off'; }
+
+// ---------------------------------------------------------------- telas
+function render() {
+    const app = $('#app');
+    if (!cfg() || !sessao()) { app.innerHTML = telaLogin(); ligarLogin(); return; }
+    app.innerHTML = `
+<header><div class="top"><button class="nav" id="ant" aria-label="Dia anterior">‹</button><h1 id="titulo"></h1><button class="nav" id="prox" aria-label="Próximo dia">›</button></div><div class="sync" id="sync"></div></header>
+<div id="tela"></div>
+<button class="fab" id="fab" aria-label="Lançar encaixe">+</button>
+<nav class="tabs">${[['agenda', '📅', 'Agenda'], ['semana', '🗓', 'Semana'], ['analytics', '📊', 'Faltas'], ['consulta', '📚', 'Consulta'], ['ajustes', '⚙️', 'Ajustes']].map(([k, i, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><b>${i}</b>${n}</button>`).join('')}</nav>`;
+    $('#ant').onclick = () => irDia(somaDias(S.dia, -1));
+    $('#prox').onclick = () => irDia(somaDias(S.dia, 1));
+    $('#titulo').onclick = () => irDia(hojeIso());
+    $('#fab').onclick = abrirEncaixe;
+    document.querySelectorAll('.tabs button').forEach(b => { b.onclick = () => { S.tab = b.dataset.tab; ls.set(K.tab, S.tab); render(); }; });
+    pintarTela();
+}
+function irDia(d) { S.dia = d; S.linhas = (ls.get(K.cache, {})[d]) || []; if (S.tab !== 'agenda') { S.tab = 'agenda'; ls.set(K.tab, 'agenda'); render(); } else pintarTela(); carregarDia(d); }
+function pintarTela() {
+    const t = $('#titulo'), hdr = $('header'), fab = $('#fab');
+    const ehAgenda = S.tab === 'agenda';
+    if (hdr) { $('#ant').style.visibility = $('#prox').style.visibility = ehAgenda ? 'visible' : 'hidden'; }
+    fab.style.display = ehAgenda ? 'block' : 'none';
+    t.innerHTML = ehAgenda ? `${S.dia === hojeIso() ? 'Hoje' : fmtDia(S.dia)}<small>${fmtDia(S.dia)} · toque para voltar a hoje</small>` : { semana: 'Próximos dias', analytics: 'Faltas e espera', consulta: 'Consulta', ajustes: 'Ajustes' }[S.tab];
+    if (ehAgenda) pintarAgenda(); else if (S.tab === 'semana') telaSemana(); else if (S.tab === 'analytics') telaAnalytics(); else if (S.tab === 'consulta') telaConsulta(); else telaAjustes();
+    pintarSync();
+}
+function pintarSync() {
+    const el = $('#sync'); if (!el) return;
+    const n = fila().length;
+    let t = S.carregando ? '⏳ atualizando…' : S.rt === 'on' ? '⚡ tempo real' : S.ultima ? `☁️ atualizado ${hm(new Date(S.ultima).toISOString())}` : '☁️';
+    if (n) t += ` · ${n} ação(ões) a enviar`;
+    if (S.erro) t = '⚠ ' + S.erro;
+    el.textContent = t; el.className = 'sync' + (S.erro ? ' err' : '');
+}
+function tagConv(r) {
+    const c = String(r.convenio || '');
+    const cls = r.tipo === 'Prefeitura' ? 'pref' : c === 'PARTICULAR' ? 'part' : c.startsWith('SUS') ? 'sus' : '';
+    return `<span class="tag ${cls}">${esc(c || '—')}</span>`;
+}
+function statusHtml(r) {
+    if (r.status === 'esperando') { const w = minutos(r.chegou_em); return `<span class="st ${slaCls(w)}">⏳ ${fmtMin(w)}</span>`; }
+    if (r.status === 'atendido') { const w = r.tempo_espera_min != null ? r.tempo_espera_min : (r.chegou_em ? minutos(r.chegou_em, r.atendido_em) : null); return `<span class="st ok">✓ ${w != null ? fmtMin(w) : ''}${r.atendido_fonte === 'imagem' ? ' 🩻' : ''}</span>`; }
+    if (r.status === 'faltou') return '<span class="st fal">FALTOU</span>';
+    if (r.status === 'cancelado') return '<span class="st">CANCELADO</span>';
+    return '';
+}
+function cardHtml(r, nProc) {
+    const s = r.status || 'pendente';
+    const tags = [tagConv(r)];
+    if (nProc > 1) tags.push(`<span class="tag">×${nProc}</span>`);
+    if (r.origem === 'encaixe_pacs' || r.origem === 'encaixe_manual') tags.push('<span class="tag enc">ENCAIXE</span>');
+    if (r.pacs_paciente_id > 0) tags.push(`<span class="tag">🔗 ${r.chegou_em ? hm(r.chegou_em) : 'PACS'}</span>`);
+    if (r.removido_origem_em && s !== 'cancelado') tags.push('<span class="tag sus">⚠ SAIU</span>');
+    return `<div class="card ${s}" data-id="${r.id}">
+<div class="row1" data-det="${r.id}"><div class="hora">${esc(normTime(r.hora))}</div><div class="who"><div class="pac">${esc(r.paciente)}</div><div class="ex">${esc(r.exame)}</div>${r.obs ? `<div class="obs">📝 ${esc(r.obs)}</div>` : ''}<div class="tags">${tags.join('')}</div></div>${statusHtml(r)}</div>
+${s === 'cancelado' ? `<div class="acts"><button class="b" data-a="chegou" data-id="${r.id}">Chegou</button><span></span><span></span></div>` : `<div class="acts">
+<button class="b ${s === 'esperando' ? 'on-chegou' : ''}" data-a="chegou" data-id="${r.id}">${s === 'esperando' ? 'Em espera' : 'Chegou'}</button>
+<button class="b ${s === 'atendido' ? 'on-atend' : ''}" data-a="atend" data-id="${r.id}">Atend</button>
+<button class="b ${s === 'faltou' ? 'on-falta' : ''}" data-a="falta" data-id="${r.id}">Falta</button></div>`}</div>`;
+}
+function pintarAgenda() {
+    const tela = $('#tela'); if (!tela || S.tab !== 'agenda') return;
+    const L = S.linhas, ativos = L.filter(r => r.status !== 'cancelado');
+    const porPac = {}; ativos.forEach(r => { const k = chavePac(r); porPac[k] = (porPac[k] || 0) + proc(r); });
+    const cnt = st => L.filter(r => (r.status || 'pendente') === st).length;
+    const m = L.filter(r => normTime(r.hora) < '12:00'), t = L.filter(r => normTime(r.hora) >= '12:00');
+    const st = arr => { const a = arr.filter(r => r.status !== 'cancelado'); return `${new Set(a.map(chavePac)).size} pac · ${a.reduce((x, r) => x + proc(r), 0)} proc`; };
+    const esp = L.filter(r => r.status === 'esperando').map(r => minutos(r.chegou_em) || 0);
+    tela.innerHTML = `<div class="chips">
+<span class="chip">👤 ${new Set(ativos.map(chavePac)).size}</span><span class="chip">🧾 ${ativos.reduce((a, r) => a + proc(r), 0)}</span>
+<span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${cnt('cancelado') ? `<span class="chip">⊘ ${cnt('cancelado')}</span>` : ''}</div>
+<main>${!L.length ? `<div class="vazio">${S.carregando ? 'Carregando…' : 'Nenhum paciente neste dia.'}</div>` : `
+${m.length ? `<h2><span>Manhã</span><span>${st(m)}</span></h2>${m.map(r => cardHtml(r, porPac[chavePac(r)])).join('')}` : ''}
+${t.length ? `<h2><span>Tarde</span><span>${st(t)}</span></h2>${t.map(r => cardHtml(r, porPac[chavePac(r)])).join('')}` : ''}`}</main>`;
+    tela.querySelectorAll('[data-a]').forEach(b => { b.onclick = e => { e.stopPropagation(); const id = Number(b.dataset.id); ({ chegou: acaoChegou, atend: acaoAtend, falta: acaoFalta })[b.dataset.a](id); }; });
+    tela.querySelectorAll('[data-det]').forEach(d => { d.onclick = () => abrirDetalhe(Number(d.dataset.det)); });
+}
+function abrirSheet(html) { const s = $('#sheet'); s.innerHTML = html; $('#sheetbg').style.display = 'block'; requestAnimationFrame(() => s.classList.add('open')); }
+function fecharSheet() { $('#sheet').classList.remove('open'); $('#sheetbg').style.display = 'none'; }
+function abrirDetalhe(id) {
+    const r = S.linhas.find(x => x.id === id); if (!r) return;
+    const orig = { agenda: 'agenda (print)', prefeitura_planilha: 'planilha da Prefeitura', spdata_pdf: 'PDF do SPDATA', encaixe_manual: 'encaixe manual', encaixe_pacs: 'encaixe criado pelo PACS' }[r.origem] || r.origem || '—';
+    abrirSheet(`<h3>${esc(r.paciente)}</h3>
+<div class="tl"><span>Horário:</span> ${esc(normTime(r.hora))} · ${esc(r.tipo || '')}</div>
+<div class="tl"><span>Convênio:</span> ${esc(r.convenio)}</div>
+<div class="tl"><span>Exame:</span> ${esc(r.exame)} ${proc(r) > 1 ? `(${proc(r)} proc.)` : ''}</div>
+${r.obs ? `<div class="tl"><span>Obs.:</span> ${esc(r.obs)}</div>` : ''}
+<div class="tl"><span>Origem:</span> ${esc(orig)}${r.nome_origem && normName(r.nome_origem) !== normName(r.paciente) ? ` · na origem: ${esc(r.nome_origem)}` : ''}</div>
+<div class="tl"><span>Chegada:</span> ${hm(r.chegou_em)} ${r.chegou_em ? `(${r.chegada_fonte === 'pacs' ? 'ficha PACS' : 'clique'})` : ''}</div>
+<div class="tl"><span>Imagens no PACS:</span> ${hm(r.imagem_em)}</div>
+<div class="tl"><span>Atendido:</span> ${hm(r.atendido_em)} ${r.atendido_em ? `(${r.atendido_fonte === 'imagem' ? 'pela imagem' : 'clique'})` : ''}${r.tempo_espera_min != null ? ` · espera ${fmtMin(r.tempo_espera_min)}` : ''}</div>
+<button class="btnd" id="rem">Remover da agenda</button><button class="btns" id="fec">Fechar</button>`);
+    $('#rem').onclick = () => remover(id); $('#fec').onclick = fecharSheet;
+}
+function abrirEncaixe() {
+    const d = new Date(); const h = `${pad(d.getHours())}:${pad(Math.floor(d.getMinutes() / 5) * 5)}`;
+    abrirSheet(`<h3>Encaixe — ${fmtDia(S.dia)}</h3><form id="fenc">
+<label>Horário</label><input name="hora" type="time" value="${h}" required>
+<label>Origem</label><select name="origem">${['Prefeitura', 'SUS - Pronto Socorro', 'SUS - UTI', 'SUS - Internado', 'SUS - Maternidade', 'Convênio', 'Particular', 'Social'].map(o => `<option>${o}</option>`).join('')}</select>
+<label>Paciente</label><input name="paciente" autocomplete="off" autocapitalize="characters" required>
+<label>Exame</label><input name="exame" autocomplete="off" autocapitalize="characters" placeholder="ex.: USG ABDOME TOTAL + USG PROSTATA">
+<button class="btnp" type="submit">Lançar encaixe</button><button class="btns" type="button" id="fec">Cancelar</button></form>`);
+    $('#fec').onclick = fecharSheet;
+    $('#fenc').onsubmit = e => { e.preventDefault(); salvarEncaixe(e.target); };
+}
+async function telaSemana() {
+    const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
+    try {
+        const ini = somaDias(hojeIso(), -3), fim = somaDias(hojeIso(), 14);
+        const d = await api(`vw_resumo_dia?data_agenda=gte.${ini}&data_agenda=lte.${fim}&order=data_agenda.asc`);
+        if (S.tab !== 'semana') return;
+        tela.innerHTML = `<main><table class="tbl"><tr><th>Dia</th><th class="num">Pac.</th><th class="num">Proc.</th><th>Início</th><th class="num">✓/✗</th></tr>
+${(d || []).map(r => `<tr class="${r.data_agenda === hojeIso() ? 'hoje' : ''}" data-dia="${r.data_agenda}"><td>${fmtDia(r.data_agenda)}${r.feriado ? `<br><small style="color:var(--er)">${esc(r.feriado)}</small>` : ''}</td><td class="num">${r.pacientes}<br><small style="color:var(--mut)">${r.pacientes_manha}/${r.pacientes_tarde}</small></td><td class="num">${r.procedimentos}</td><td>${r.inicio_manha || '–'}<br>${r.inicio_tarde || '–'}</td><td class="num">${r.atendidos}/${r.faltas}</td></tr>`).join('')}</table>
+<div class="note">Pac. = pacientes (manhã/tarde). Início = primeiro horário da manhã e da tarde. Toque num dia para abrir a agenda.</div></main>`;
+        tela.querySelectorAll('[data-dia]').forEach(tr => { tr.onclick = () => irDia(tr.dataset.dia); });
+    } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
+}
+async function telaAnalytics() {
+    const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
+    try {
+        const d0 = somaDias(hojeIso(), -30);
+        const [conv, hora, dia, espera] = await Promise.all([api('vw_noshow_convenio_30d?select=*'), api('vw_noshow_horario_30d?select=*'), api('vw_noshow_dia_semana_90d?select=*'), api(`vw_espera_diaria?select=*&data_agenda=gte.${d0}`)]);
+        if (S.tab !== 'analytics') return;
+        const soma = (a, c) => (a || []).reduce((x, r) => x + (Number(r[c]) || 0), 0);
+        const pac = soma(conv, 'pacientes'), fal = soma(conv, 'faltas'), perd = soma(conv, 'procedimentos_perdidos');
+        const nEsp = soma(espera, 'atendidos_com_tempo'), media = nEsp ? Math.round((espera || []).reduce((x, r) => x + (Number(r.atendidos_com_tempo) || 0) * (Number(r.espera_media_min) || 0), 0) / nEsp) : null;
+        const barras = (rows, tit) => `<h2><span>${tit}</span></h2><div class="card">${rows.map(r => `<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><span><b>${r.f}</b>/${r.t} · ${r.p ?? 0}%</span></div><div class="bar"><i style="width:${Math.min(100, Number(r.p) || 0)}%"></i></div></div>`).join('') || '<div class="vazio">Sem dados</div>'}</div>`;
+        tela.innerHTML = `<main><div class="kpis"><div class="kpi"><b>${pac}</b><span>Pacientes com desfecho (30 d)</span></div><div class="kpi"><b style="color:var(--er)">${fal} (${pac ? Math.round(fal / pac * 100) : 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${perd}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(media)}</b><span>Espera média (${soma(espera, 'acima_60min')} acima de 60 min)</span></div></div>
+${barras((conv || []).map(r => ({ k: r.convenio, f: r.faltas, t: r.pacientes, p: r.taxa_noshow_pct })), 'Faltas por convênio (30 d)')}
+${barras((hora || []).map(r => ({ k: `${String(r.faixa || '').slice(0, 2)}h · ${r.periodo || ''}`, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por faixa horária (30 d)')}
+${barras((dia || []).map(r => ({ k: r.dia, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por dia da semana (90 d)')}
+<div class="note">Dias encerrados (até ontem). Mesmo cálculo da aba Analytics dos PCs (views do banco).</div></main>`;
+    } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
+}
+async function telaConsulta() {
+    const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
+    try {
+        const d = await api('agenda_documentos?ativo=eq.true&select=id,categoria,titulo,mes,drive_id,pdf_drive_id,ordem&order=categoria.asc,mes.desc.nullslast,ordem.asc');
+        if (S.tab !== 'consulta') return;
+        const CAT = { escala_us: '🩻 Escalas — Ultrassom', escala_tc: '🚨 Escalas — TC urgência', pop: '📋 POPs', manual: '📘 Manuais e guias' };
+        const grupos = {}; (d || []).forEach(x => { (grupos[x.categoria] = grupos[x.categoria] || []).push(x); });
+        tela.innerHTML = `<main>${Object.keys(CAT).filter(k => grupos[k]).map(k => `<h2><span>${CAT[k]}</span></h2>${grupos[k].map(x => `<a class="doc" href="https://drive.google.com/file/d/${encodeURIComponent(x.drive_id)}/view" target="_blank" rel="noopener"><div style="font-size:22px">📄</div><div><b>${esc(x.titulo)}</b><small>${x.mes ? esc(x.mes) : ''}${x.pdf_drive_id ? ' · tem PDF' : ''}</small></div></a>`).join('')}`).join('') || '<div class="vazio">Nada cadastrado.</div>'}
+<div class="note">Abre no app do Google Drive (conta dona dos arquivos). O cadastro continua pelos PCs (📚 Consulta → Gerenciar).</div></main>`;
+    } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
+}
+function telaAjustes() {
+    const s = sessao() || {};
+    $('#tela').innerHTML = `<main><div class="card"><div class="tl"><span>Conectado como:</span> ${esc(s.email || '—')}</div><div class="tl"><span>Tempo real:</span> ${S.rt === 'on' ? 'ativo ⚡' : S.rt}</div><div class="tl"><span>Ações aguardando envio:</span> ${fila().length}</div><div class="tl"><span>Versão:</span> ${VERSAO}</div></div>
+<button class="btns" id="atu">↻ Recarregar e procurar atualização</button>
+<button class="btnd" id="sai">Sair (apaga sessão e cópia local)</button>
+<div class="note">Os dados são os mesmos da Agenda dos 3 PCs (Supabase, só com login). Este aparelho guarda só os últimos dias abertos, apagados ao sair. Chegada pela ficha, encaixe automático e atendido pela imagem continuam vindo do PC com o PACS aberto.</div></main>`;
+    $('#sai').onclick = () => { if (confirm('Sair deste aparelho?')) sair(); };
+    $('#atu').onclick = async () => { try { const reg = await navigator.serviceWorker.getRegistration(); if (reg) await reg.update(); } catch (e) { /* ok */ } location.reload(); };
+}
+function telaLogin() {
+    const c = cfg() || {};
+    return `<div class="login"><h1>📅 Agenda US</h1><p>Mesma agenda dos PCs, no iPhone.</p><form id="flog">
+${cfg() ? '' : `<label class="note">Endereço do projeto Supabase (Project URL)</label><input name="url" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="https://…supabase.co" value="${esc(c.url || '')}">
+<label class="note">Chave pública (publishable/anon)</label><input name="key" autocapitalize="off" autocorrect="off" placeholder="sb_publishable_…">`}
+<label class="note">E-mail</label><input name="email" type="email" autocomplete="username" autocapitalize="off">
+<label class="note">Senha</label><input name="senha" type="password" autocomplete="current-password">
+<button class="btnp" type="submit">Entrar</button>${cfg() ? '<button class="btns" type="button" id="trocar">Trocar endereço/chave do projeto</button>' : ''}
+<div class="msg" id="lmsg"></div></form>
+<div class="note">Endereço e chave são os mesmos do ⚙️ API da Agenda nos PCs. A senha não fica gravada.</div></div>`;
+}
+function ligarLogin() {
+    const f = $('#flog');
+    const tr = $('#trocar'); if (tr) tr.onclick = () => { ls.del(K.cfg); render(); };
+    f.onsubmit = async e => {
+        e.preventDefault(); const m = $('#lmsg'); m.textContent = '';
+        try {
+            if (!cfg()) salvarCfg(f.url.value, f.key.value);
+            await entrar(f.email.value, f.senha.value);
+            render(); carregarDia(S.dia); rtConectar();
+        } catch (er) { m.textContent = er.message || String(er); }
+    };
+}
+
+// ---------------------------------------------------------------- ciclo de vida
+$('#sheetbg').onclick = fecharSheet;
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { rtFechar(); return; }
+    if (!sessao()) return;
+    if (S.dia !== hojeIso() && Date.now() - S.ultima > 6 * 3600e3) S.dia = hojeIso(); // reabriu no dia seguinte
+    carregarDia(S.dia, true); rtConectar();
+});
+window.addEventListener('online', () => { enviarFila(); carregarDia(S.dia, true); rtConectar(); });
+setInterval(() => { if (!document.hidden && S.tab === 'agenda' && S.linhas.some(r => r.status === 'esperando')) pintarAgenda(); }, 30000); // cronômetro de espera
+setInterval(() => { if (!document.hidden && sessao() && S.rt !== 'on') carregarDia(S.dia, true); }, 60000); // reserva sem tempo real
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+S.linhas = (ls.get(K.cache, {})[S.dia]) || [];
+render();
+if (sessao()) { carregarDia(S.dia); rtConectar(); }
+</script>
+</body>
+</html>
