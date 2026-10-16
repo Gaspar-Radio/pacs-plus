@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.14.1
+// @version      1.15.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -41,8 +41,9 @@
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
-        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Haiku 5.5 + Gemini, e Opus 5.5 como sênior, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas, contraste…). Usa o login da Agenda. Nada é alterado no laudo'],
+        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Haiku 5.5 + Gemini, e Opus 5.5 como sênior, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas/unidades, contraste, padrão do serviço…). ✍ Corrigir propõe antes → depois (conta: o Plus; frase/lado: Sonnet; diagnóstico: Opus) e só altera ao clicar Aplicar. Usa o login da Agenda'],
         ['rodapeCompacto', 'Rodapé da lista compacto', 'Linha “Linhas por página / 1-50 de …” com 30 px de altura (antes ~60 px)'],
+        ['zoomLaudo', 'Laudo: zoom só da folha (A− 120% A+)', 'Controle na barra do editor: aumenta ou diminui só o texto da folha do laudo (90–160%), salvo neste computador. Só a tela: a impressão não muda'],
         ['calcLaudo', 'Calculadoras na tela do laudo', 'Botão 🧮 na barra do editor: abre as calculadoras ao lado do laudo, com “Inserir no laudo” (vai para onde está o cursor)'],
         ['buscaCompacta', 'Buscar Matriz / Buscar Frase compactos', 'Janela baixa e lista com um item por linha (sigla + descrição), ocupando a altura da tela: rolagem só se não couber'],
         ['abreviar', 'Abreviar exame e convênio', 'Ex.: “ARTICULAR POR ARTICULAÇÃO” → “ARTICULAR”; passe o mouse para ver o nome completo. Ao desligar, recarregue a página'],
@@ -129,6 +130,7 @@
         BLOCKS.forEach(([k]) => { if (c.blocks[k] === undefined) c.blocks[k] = !DEFAULT_OFF.includes(k); });
         if (!['auto', 'normal', 'compacta'].includes(c.densidade)) c.densidade = 'auto';
         if (!['normal', 'suave', 'escuro'].includes(c.papel)) c.papel = 'suave';
+        c.zoomLaudo = Math.min(160, Math.max(90, Math.round((Number(c.zoomLaudo) || 100) / 10) * 10));
         if (c.master === undefined) c.master = true;
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
@@ -267,6 +269,11 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input--selection-controls__input { transform: none !important; margin-right: 6px !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input { margin: 0 6px !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) > [class*="col-"]:first-child { padding-right: 14px !important; }`,
+        zoomLaudo: `
+.document-editor__toolbar > .pp-zoom-laudo { display: inline-flex; align-items: center; gap: 2px; margin: 0 6px; padding: 0 4px; border: 1px solid rgba(148,163,184,.35); border-radius: 6px; height: 28px; align-self: center; }
+.pp-zoom-laudo button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 2px 6px; border-radius: 4px; }
+.pp-zoom-laudo button:hover { background: rgba(148,163,184,.2); }
+.pp-zoom-laudo .pz-v { min-width: 44px; color: #93c5fd; }`,
         revisaoIA: `
 .document-editor__toolbar > .v-btn.pp-rev-btn { color: #fbbf24 !important; font-weight: 700 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -275,6 +282,20 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-top b { flex: 1; font-size: 13px; }
 #pp-rev select { background: #1e293b; color: #f1f5f9; border: 1px solid #475569; border-radius: 5px; padding: 2px 4px; font-size: 12px; }
 #pp-rev .pr-x { background: none; border: 0; color: #94a3b8; font-size: 16px; cursor: pointer; }
+#pp-rev .pr-b.cor { background: #4c1d95; border-color: #7c3aed; color: #ede9fe; }
+#pp-rev .pr-b.cor small { opacity: .75; font-weight: 400; margin-left: 3px; }
+#pp-rev .pr-full { padding: 6px 10px 2px; }
+#pp-rev .pr-full > b { font-size: 12px; color: #c4b5fd; }
+#pp-rev .pr-co { margin-top: 6px; padding: 6px 8px; border: 1px solid #4c1d95; border-radius: 6px; background: #1e1b4b; }
+#pp-rev .pr-co.err, #pp-rev .pr-ok.err { color: #fca5a5; }
+#pp-rev .pr-tq { padding: 4px 0; border-bottom: 1px dashed #312e81; }
+#pp-rev .pr-tq:last-of-type { border-bottom: 0; }
+#pp-rev .pr-antes { color: #fca5a5; text-decoration: line-through; text-decoration-color: rgba(252,165,165,.5); }
+#pp-rev .pr-dep { color: #86efac; }
+#pp-rev .pr-tq.ok .pr-antes { opacity: .5; }
+#pp-rev .pr-ok { font-size: 11px; color: #86efac; }
+#pp-rev .pr-obs { font-size: 11.5px; color: #cbd5e1; margin-top: 4px; font-style: italic; }
+#pp-rev .pr-niv { font-size: 10.5px; color: #a5b4fc; margin-left: auto; align-self: center; }
 #pp-rev .pr-sts { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 10px 2px; }
 #pp-rev .pr-st { padding: 1px 8px; border-radius: 10px; background: #1e293b; border: 1px solid #334155; font-size: 11px; font-weight: 600; }
 #pp-rev .pr-st.ok { color: #34d399; } #pp-rev .pr-st.wait { color: #fbbf24; } #pp-rev .pr-st.err { color: #f87171; border-color: #7f1d1d; cursor: help; }
@@ -766,6 +787,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             buscaAltura();
             calcLaudoBtn();
             revBtn();
+            zoomLaudoCtl();
             marcarBotoesLaudo();
         } catch (e) { console.warn('[PACS Plus] ajuste dinâmico falhou', e); }
     }
@@ -2302,7 +2324,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
         exame_texto: 'Exame × texto', corpo_conclusao: 'Corpo × conclusão', medidas: 'Medidas / unidades',
-        classificacao: 'Classificação', redacao_sentido: 'Redação / ditado', critico: 'Resultado crítico', outro: 'Outro'
+        classificacao: 'Classificação', redacao_sentido: 'Redação / ditado', critico: 'Resultado crítico', padrao: 'Padrão do serviço', outro: 'Outro'
     };
     function laudoComp() {
         let el = document.querySelector('.v-dialog__content .document-editor'), vm = null;
@@ -2352,7 +2374,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     const CRITICOS = ['pneumoperitonio', 'pneumotorax hipertensivo', 'disseccao', 'tromboembolismo pulmonar', 'embolia pulmonar', 'hemorragia subaracnoide', 'hemorragia intraparenquimatosa', 'hematoma subdural', 'hematoma extradural', 'hematoma epidural', 'hemorragia intracraniana', 'torcao testicular', 'torcao ovariana', 'torcao anexial', 'gestacao ectopica', 'gravidez ectopica', 'aneurisma roto', 'ruptura de aneurisma', 'isquemia mesenterica', 'trombose venosa profunda', 'apendicite perfurada', 'herniacao', 'desvio da linha media'];
     function regrasLaudo(c) {
         const t = c.texto, tn = norm(t), ex = norm(c.exame), out = [];
-        const add = (categoria, gravidade, idx, explicacao, sugestao) => out.push({ categoria, gravidade, trecho: idx >= 0 ? frase(t, idx) : '', explicacao, sugestao: sugestao || '', fontes: ['regra'] });
+        const add = (categoria, gravidade, idx, explicacao, sugestao) => { const it = { categoria, gravidade, trecho: idx >= 0 ? frase(t, idx) : '', explicacao, sugestao: sugestao || '', fontes: ['regra'] }; out.push(it); return it; };
         if (t.length < 30) { add('outro', 'atencao', -1, 'Laudo vazio ou muito curto.', ''); return out; }
         let m = t.match(/\b[Xx]{2,}\b|_{3,}|\[\s*\]|\(\s*\)|\?{2,}/);
         if (m) add('campo_vazio', 'grave', m.index, `Campo de matriz não preenchido (“${m[0]}”).`, 'Preencher ou remover.');
@@ -2368,18 +2390,78 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         // contraste
         if (/sem contraste/.test(ex)) { const i = tl.search(/apos (a )?(injecao|administracao)|contraste (iodado )?(endovenoso|intravenoso)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|realce (pelo|ao|apos o) (meio de )?contraste/); if (i >= 0) add('exame_texto', 'grave', i, 'Exame SEM contraste, mas o texto descreve uso de contraste/fases.', 'Conferir técnica e matriz.'); }
         if (/com contraste/.test(ex)) { const i = tl.search(/sem (a )?(injecao|uso|administracao) (de|do) (meio de )?contraste|\bsem contraste\b/); if (i >= 0) add('exame_texto', 'atencao', i, 'Exame COM contraste, mas o texto diz “sem contraste”.', 'Conferir técnica.'); }
-        // unidades implausíveis
-        const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![³²0-9a-z])(?!\s*\/\s*s)/gi; // não pega cm³/cm²/cm3/cm/s let u;
+        // unidades implausíveis (linear: não pega cm³/cm²/cm3/cm/s)
+        const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![³²0-9a-z])(?!\s*\/\s*s)/gi;
+        let u;
         while ((u = reU.exec(t))) { const v = numBR(u[1]), un = u[2].toLowerCase(); if ((un === 'cm' && v > 40) || (un === 'mm' && v > 300)) { add('medidas', 'atencao', u.index, `Medida implausível: ${u[0]}.`, 'Conferir a unidade (mm × cm).'); break; } }
-        // volume × dimensões
-        const reV = /(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm)\b[^.\n]{0,90}?(\d+(?:[.,]\d+)?)\s*(cm³|cm3|ml|cc)/gi; let v;
+        // unidade × grandeza: volume em cm³/mL; área em mm²/cm²
+        let g;
+        if ((g = /volume[^.\n]{0,60}?\d+(?:[.,]\d+)?\s*(cm²|cm2|mm²|mm2)(?![0-9])/i.exec(t))) add('medidas', 'atencao', g.index, `Volume com unidade de área (${g[1]}).`, 'Volume em cm³ ou mL.');
+        if ((g = /(?<![a-zà-ú])[áa]rea[^.\n]{0,60}?\d+(?:[.,]\d+)?\s*(cm³|cm3|mm³|mm3|ml)(?![0-9a-z])/i.exec(t))) add('medidas', 'atencao', g.index, `Área com unidade de volume (${g[1]}).`, 'Área em mm² ou cm².');
+        if ((g = /(?<![a-zà-ú])[áa]rea (?:seccional |transversa |de sec[çc][ãa]o )?[^.\n]{0,40}?(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![²³23a-z])/i.exec(t))) add('medidas', 'atencao', g.index, `Área com unidade linear (${g[1]} ${g[2]}).`, `Área em ${g[2]}².`);
+        // volume elipsoide (0,52 ou 0,523), tolerando o arredondamento das medidas e do volume
+        const casas = s => { const p = String(s).split(/[.,]/)[1]; return p ? p.length : 0; };
+        const reV = /(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm)\b[^.\n]{0,90}?(\d+(?:[.,]\d+)?)\s*(cm³|cm3|ml|mL|cc)/gi; let v;
         while ((v = reV.exec(t))) {
-            let [a, b, cc] = [numBR(v[1]), numBR(v[2]), numBR(v[3])]; if (v[4].toLowerCase() === 'mm') { a /= 10; b /= 10; cc /= 10; }
-            const vol = numBR(v[5]), err = Math.min(...[0.523, 0.52, 0.71].map(k => Math.abs(a * b * cc * k - vol) / Math.max(vol, 0.01)));
-            if (err > 0.1) add('medidas', 'atencao', v.index, `Volume ${v[5]} ${v[6]} não confere com ${v[1]} × ${v[2]} × ${v[3]} ${v[4]} (esperado ≈ ${fmt(a * b * cc * 0.523, 1)} cm³ com 0,523).`, 'Recalcular o volume (🧮 Calc.).');
+            const f = v[4].toLowerCase() === 'mm' ? 0.1 : 1;
+            const dims = [v[1], v[2], v[3]].map(x => ({ d: numBR(x) * f, e: 0.5 * Math.pow(10, -casas(x)) * f }));
+            const vol = numBR(v[5]), ev = 0.5 * Math.pow(10, -casas(v[5]));
+            const prod = dims.reduce((p, x) => p * x.d, 1);
+            const vmin = dims.reduce((p, x) => p * Math.max(0, x.d - x.e), 1) * 0.52 * 0.97 - ev;
+            const vmax = dims.reduce((p, x) => p * (x.d + x.e), 1) * 0.523 * 1.03 + ev;
+            if (vol < vmin || vol > vmax) {
+                const certo = fmt(prod * 0.523, 1), fator = prod > 0 ? fmt(vol / prod, 2) : '–';
+                const r = add('medidas', 'grave', v.index, `Volume ${v[5]} ${v[6]} não confere com ${v[1]} × ${v[2]} × ${v[3]} ${v[4]}: com 0,523 dá ${certo} cm³ (o valor escrito equivale a fator ${fator}).`, `Corrigir para ${certo} ${v[6]}.`);
+                const bV = v[0].slice(v[0].lastIndexOf(v[5])); r.fix = { busca: bV, troca: certo + bV.slice(v[5].length) };
+            }
         }
         if (/doppler/.test(ex) && !/fluxo|doppler|espectr|velocidade|refluxo|\bir\b|\bip\b|resistividade|pulsatilidade|perviedade|pervi[ao]/.test(tl)) add('exame_texto', 'atencao', -1, 'Exame de Doppler sem descrição de fluxo/velocidades no texto.', 'Conferir se a matriz é a de Doppler.');
         if (t.length > 200 && !/impress[aã]o|conclus[aã]o|opini[aã]o/i.test(t)) add('corpo_conclusao', 'atencao', -1, 'Não encontrei Impressão/Conclusão no laudo.', '');
+        // ---- PATCH do serviço: esvaziamento vesical (resíduo pelo volume absoluto; ≥ 80% eliminado = satisfatório) ----
+        const iImp = (() => { const m = /impress[aã]o|conclus[aã]o/i.exec(t); return m ? m.index : -1; })();
+        const corpo = iImp >= 0 ? t.slice(0, iImp) : t, imp = iImp >= 0 ? t.slice(iImp) : '';
+        const reVol = '(\\d+(?:[.,]\\d+)?)\\s*(?:ml|mL|cm³|cm3|cc)';
+        const pre = new RegExp('pr[ée][- ]?miccional[^.\\n]{0,80}?' + reVol, 'i').exec(corpo);
+        const posTodos = [...corpo.matchAll(new RegExp('(?:p[óo]s[- ]?miccional|residual)[^.\\n]{0,80}?' + reVol, 'gi'))];
+        const pos = posTodos.length ? posTodos[posTodos.length - 1] : null; // várias tentativas: vale a última
+        const naoUrinou = /n[ãa]o consegui[ur] (realizar a etapa|urinar)|n[ãa]o realizou a etapa p[óo]s/i.test(t);
+        const catRes = ml => ml <= 30 ? 'desprezível' : ml <= 80 ? 'pequeno' : ml <= 150 ? 'moderado' : ml <= 300 ? 'acentuado' : 'muito acentuado';
+        if (naoUrinou && /incomplet/i.test(t)) add('padrao', 'grave', t.search(/incomplet/i), 'Paciente não urinou, mas o laudo classifica o esvaziamento como incompleto.', 'Usar “Estudo pós-miccional não realizado.” (padrão do serviço).');
+        if (pos && !naoUrinou) {
+            const vPos = numBR(pos[1]), cat = catRes(vPos);
+            const trechoRes = (s, base) => { const re = /(?:res[ií]duo|residual)[^.\n]{0,120}?\b(muito acentuado|acentuado|moderado|pequeno|desprez[ií]vel)\b/ig; let m, ult = null; while ((m = re.exec(s))) ult = { cat: m[1].toLowerCase(), idx: base + m.index + m[0].length - m[1].length, txt: m[1] }; return ult; };
+            const norma = x => x.normalize('NFD').replace(/[̀-ͯ]/g, '');
+            [[trechoRes(corpo, 0), 'análise'], [trechoRes(imp, Math.max(iImp, 0)), 'impressão']].forEach(([r, onde]) => {
+                if (r && norma(r.cat) !== norma(cat)) {
+                    const it = add('padrao', 'grave', r.idx, `Resíduo de ${pos[1]} mL é “${cat}” (0–30 desprezível · 31–80 pequeno · 81–150 moderado · 151–300 acentuado · > 300 muito acentuado), mas a ${onde} diz “${r.txt}”.`, `Trocar por “${cat}”.`);
+                    it.fix = { busca: r.txt, troca: cat, pos: r.idx };
+                }
+            });
+            if (pre) {
+                const vPre = numBR(pre[1]);
+                if (vPre > 0 && vPos <= vPre) {
+                    const elim = vPre - vPos, pct = Math.round(elim / vPre * 100), satisf = pct >= 80;
+                    const mP = /(?:cerca de|aproximadamente|~)?\s*(\d{1,3})\s*%/.exec(corpo);
+                    if (mP && Math.abs(Number(mP[1]) - pct) > 1) { const it = add('padrao', 'grave', mP.index, `Percentual eliminado: (${pre[1]} − ${pos[1]}) ÷ ${pre[1]} = ${pct}%, mas o laudo diz ${mP[1]}%.`, `Corrigir para ${pct}%.`); const bP = mP[0].slice(mP[0].indexOf(mP[1])); it.fix = { busca: bP, troca: bP.replace(mP[1], String(pct)) }; }
+                    const mE = /elimina[çc][ãa]o de (?:aproximadamente |cerca de )?(\d+(?:[.,]\d+)?)\s*(?:ml|mL)/i.exec(corpo);
+                    if (mE && Math.abs(numBR(mE[1]) - elim) > 2) { const certo = Number.isInteger(elim) ? String(elim) : fmt(elim, 1); const it = add('padrao', 'grave', mE.index, `Volume eliminado: ${pre[1]} − ${pos[1]} = ${certo} mL, mas o laudo diz ${mE[1]} mL.`, `Corrigir para ${certo} mL.`); it.fix = { busca: mE[1], troca: certo, pos: mE.index + mE[0].indexOf(mE[1]) }; }
+                    const mS = /esvaziamento vesical (satisfat[óo]rio|incompleto)/ig; let s;
+                    while ((s = mS.exec(t))) {
+                        const disse = /satisf/i.test(s[1]);
+                        if (disse !== satisf) { const it = add('padrao', 'grave', s.index, `Eliminou ${pct}% do volume inicial → esvaziamento ${satisf ? 'SATISFATÓRIO (≥ 80%)' : 'INCOMPLETO (< 80%)'}, mas o laudo diz “${s[1]}”.`, `Trocar por “${satisf ? 'satisfatório' : 'incompleto'}”.`); it.fix = { busca: s[1], troca: satisf ? 'satisfatório' : 'incompleto', pos: s.index + s[0].length - s[1].length }; }
+                    }
+                }
+            }
+            if (imp && /res[ií]duo[^.\n]{0,80}?\d+(?:[.,]\d+)?\s*(?:ml|mL|%)/i.test(imp)) add('padrao', 'atencao', iImp + imp.search(/res[ií]duo/i), 'Volume/percentual do resíduo na IMPRESSÃO (padrão do serviço: só a classificação).', 'Deixar os números na ANÁLISE.');
+        }
+        // ---- PATCH do serviço: doença de depósito hepático ----
+        const tlx = tl;
+        if (/aumento (difuso )?da ecogenicidade|hiperecogenicidade/.test(tlx) && /hepatopatia cronica|cirrose|fibrose/.test(tlx)
+            && !/(contornos? (irregular|lobulad|nodular)|superficie (irregular|nodular)|hipertrofia do (lobo )?caudado|esplenomegalia|ascite|colaterais|circulacao colateral|recanaliza)/.test(tlx))
+            add('padrao', 'atencao', tlx.search(/hepatopatia cronica|cirrose|fibrose/), 'Hepatopatia crônica/cirrose/fibrose citada com base só no aumento da ecogenicidade (sem outros sinais morfológicos descritos).', 'Usar “doença de depósito, mais comumente relacionada à esteatose” se só houver aumento da ecogenicidade.');
+        let gr;
+        if ((gr = /esteatose[^.\n]{0,60}?(?:grau\s*(?:ii|iii|2|3)\b|moderad|acentuad)|grau\s*(?:ii|iii|2|3)\b[^.\n]{0,40}?esteatose/.exec(tlx)) && !/atenua/.test(tlx))
+            add('padrao', 'atencao', gr.index, 'Esteatose graduada como moderada/acentuada sem descrição de atenuação posterior do feixe.', 'Grau II/III exige atenuação e redução da visualização das estruturas profundas (padrão do serviço).');
         if (!c.critico) {
             for (const k of CRITICOS) {
                 const i = tl.indexOf(k); if (i < 0) continue;
@@ -2397,7 +2479,7 @@ Procure:
 1. lateralidade (direito/esquerdo) incoerente entre nome do exame, corpo e conclusão;
 2. anatomia incompatível com sexo ou idade;
 3. achado relevante descrito no corpo e ausente na impressão/conclusão; conclusão que cita algo não descrito ou contradiz o corpo;
-4. medidas divergentes entre corpo e conclusão, unidade errada (mm × cm), valor implausível, volume que não confere com as dimensões (elipsoide 0,523);
+4. medidas divergentes entre corpo e conclusão, unidade errada (mm × cm), valor implausível; grandeza × unidade: linear em mm/cm, ÁREA em mm²/cm² (ex.: nervo mediano em mm²), VOLUME em cm³/mL, velocidade em cm/s — aponte volume com unidade de área/linear e vice-versa; volume elipsoide = D1 × D2 × D3 × 0,52 (ou 0,523) — aceite a diferença explicada pelo arredondamento das medidas a 1 casa decimal (cerca de ±3–5%); outro fator (0,65, 0,71…) é erro;
 5. classificações (TI-RADS, BI-RADS, O-RADS, Bosniak, LI-RADS, Fleischner, Lung-RADS etc.) incoerentes com a descrição;
 6. texto de outra região/exame (matriz errada) ou técnica incompatível com o nome do exame;
 7. contradição interna (“sem X” e depois “X presente”), frase truncada ou palavra trocada pelo ditado que muda o sentido;
@@ -2408,7 +2490,17 @@ Regras: aponte só o que está no texto; NÃO invente achados; "trecho" deve ser
         TC: `Contexto: TOMOGRAFIA COMPUTADORIZADA. Atenção especial: técnica (sem/com contraste, fases) coerente com o nome do exame; achados agudos (hemorragia, pneumoperitônio, dissecção, TEP, isquemia, fratura, obstrução) obrigatoriamente na conclusão; níveis vertebrais e segmentos coerentes entre corpo e conclusão; nódulos — medida e conduta (Fleischner/Lung-RADS) coerentes; Bosniak/LI-RADS coerentes; lateralidade de lesões; incidental relevante sem menção na conclusão.`,
         GERAL: `Contexto: exame de imagem.`
     };
-    const REV_CATS = ['lateralidade', 'sexo_anatomia', 'corpo_conclusao', 'medidas', 'classificacao', 'exame_texto', 'redacao_sentido', 'campo_vazio', 'outro'];
+    // Padrão do serviço (PATCH ABDOME/URO 2026-09, ativo por decisão do usuário) — enviado só quando o exame envolve abdome/vias urinárias/pelve
+    const REV_PATCH_URO = `PADRÃO DO SERVIÇO (prevalece sobre tabelas genéricas) — use categoria "padrao" quando violado:
+• Resíduo pós-miccional pelo volume absoluto: 0–30 mL desprezível; 31–80 pequeno; 81–150 moderado; 151–300 acentuado; > 300 muito acentuado.
+• Esvaziamento: % eliminado = (pré − pós) ÷ pré × 100; ≥ 80% = satisfatório; < 80% = incompleto. A categoria do resíduo é independente do %.
+• Várias tentativas: vale o ÚLTIMO pós-miccional, calculado sobre o pré-miccional inicial.
+• Não conseguiu urinar: "Estudo pós-miccional não realizado" — nunca classificar como incompleto.
+• IMPRESSÃO sem números/percentuais do resíduo: "Resíduo vesical pós-miccional <categoria>, com esvaziamento vesical satisfatório/incompleto."
+• Fígado: aumento da ecogenicidade = "doença de depósito, mais comumente relacionada à esteatose hepática"; Grau I/II/III só com os descritores correspondentes (ecogenicidade; atenuação posterior; visualização dos vasos e do diafragma); NÃO chamar hepatopatia crônica/cirrose/fibrose só pela ecogenicidade (exige contornos/superfície irregular, hipertrofia do caudado, sinais de hipertensão portal etc.); hepatomegalia em linha separada; "limite superior da normalidade" não é hepatomegalia.`;
+    const ehUro = c => /abdom|rins|renal|vias urin|aparelho urin|bexig|prostat|pelv|retroperit|figado|hepat/.test(norm(c.exame));
+    const revSistema = (c, extra) => REV_BASE + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (extra || '');
+    const REV_CATS = ['lateralidade', 'sexo_anatomia', 'corpo_conclusao', 'medidas', 'classificacao', 'exame_texto', 'redacao_sentido', 'campo_vazio', 'padrao', 'outro'];
     const REV_TOOL = {
         name: 'revisao', description: 'Registra os possíveis erros de incompatibilidade encontrados no laudo (lista vazia se coerente).',
         input_schema: { type: 'object', properties: { achados: { type: 'array', items: { type: 'object', properties: {
@@ -2464,7 +2556,8 @@ ${c.texto}`;
         conclusao_contradiz: ['corpo_conclusao', 'grave', 'A impressão/conclusão contradiz o corpo do laudo (por exemplo, diz normal havendo alteração descrita).'],
         medida_divergente: ['medidas', 'grave', 'Alguma medida citada na impressão/conclusão é diferente da mesma medida no corpo do laudo.'],
         unidade_implausivel: ['medidas', 'atencao', 'Há medida com unidade provavelmente errada (mm no lugar de cm ou o contrário) ou valor anatomicamente implausível.'],
-        volume_incoerente: ['medidas', 'atencao', 'Algum volume informado não confere com as três dimensões multiplicadas por cerca de 0,52 (elipsoide).'],
+        volume_incoerente: ['medidas', 'atencao', 'Algum volume informado não confere com as três dimensões multiplicadas por 0,52 a 0,523 (elipsoide), mesmo considerando o arredondamento das medidas a uma casa decimal.'],
+        unidade_grandeza: ['medidas', 'atencao', 'Há volume escrito com unidade de área ou linear (mm², cm², mm, cm), ou área escrita com unidade de volume ou linear (deveria ser mm² ou cm²).'],
         sexo_anatomia: ['sexo_anatomia', 'grave', 'O laudo descreve órgão incompatível com o sexo do paciente informado.'],
         regiao_errada: ['exame_texto', 'grave', 'O laudo descreve região anatômica ou tipo de exame diferente do nome do exame (provável matriz errada).'],
         contradicao_interna: ['redacao_sentido', 'grave', 'O laudo afirma e nega o mesmo achado em trechos diferentes.'],
@@ -2473,6 +2566,8 @@ ${c.texto}`;
         campo_vazio: ['campo_vazio', 'grave', 'O laudo contém campo de modelo não preenchido (XX, ___, colchetes vazios).']
     };
     const JEV_ESP = {
+        URO: { esvaziamento_incoerente: ['padrao', 'grave', 'A classificação do resíduo pós-miccional ou do esvaziamento vesical não segue: resíduo 0–30 mL desprezível, 31–80 pequeno, 81–150 moderado, 151–300 acentuado, acima de 300 muito acentuado; esvaziamento satisfatório se eliminou 80% ou mais do volume pré-miccional, senão incompleto.'],
+               hepatopatia_so_ecogenicidade: ['padrao', 'atencao', 'O laudo diagnostica hepatopatia crônica, cirrose ou fibrose baseado apenas no aumento da ecogenicidade hepática, sem outros sinais morfológicos descritos.'] },
         US: { doppler_incoerente: ['exame_texto', 'grave', 'Em exame com Doppler, a conclusão sobre estenose, refluxo ou trombose não é coerente com as velocidades ou achados descritos.'] },
         TC: { tecnica_incoerente: ['exame_texto', 'grave', 'A técnica descrita (com ou sem contraste, fases) é incoerente com o nome do exame.'],
               nivel_incoerente: ['corpo_conclusao', 'grave', 'Níveis vertebrais, segmentos ou lobos citados na conclusão diferem dos descritos no corpo do laudo.'],
@@ -2482,7 +2577,7 @@ ${c.texto}`;
     const JEV_CRITICO = 'O laudo descreve achado agudo ou crítico que exige comunicação imediata ao médico assistente.';
     async function revJev(c) {
         const t0 = performance.now();
-        const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {});
+        const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {}, c.tipo !== 'TC' && ehUro(c) ? JEV_ESP.URO : {});
         const questions = {};
         Object.entries(mapa).forEach(([k, v]) => { questions[k] = { type: 'noul', instructions: v[2] }; });
         if (!c.critico) questions.critico_presente = { type: 'noul', instructions: JEV_CRITICO };
@@ -2508,7 +2603,7 @@ ${c.texto}`;
         let d;
         try {
             d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: fonte === 'opus' ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
-                system: REV_BASE + '\n' + REV_ESP[c.tipo] + (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.',
+                system: revSistema(c, (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.'),
                 tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
         } catch (e) { if (tentativa < 2) return revClaude(c, modelo, esforco, fonte, tentativa + 1); throw e; }
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'revisao');
@@ -2526,7 +2621,7 @@ ${c.texto}`;
     const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
     async function revGemini(c) {
         const t0 = performance.now();
-        const d = await iaProxy({ acao: 'gemini', system: REV_BASE + '\n' + REV_ESP[c.tipo], parts: [{ text: revMensagem(c) }],
+        const d = await iaProxy({ acao: 'gemini', system: revSistema(c), parts: [{ text: revMensagem(c) }],
             generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0 } });
         let j = null; try { j = JSON.parse(d.texto); } catch (e) { const m = String(d.texto || '').match(/\{[\s\S]*\}/); if (m) { try { j = JSON.parse(m[0]); } catch (x) { /* segue */ } } }
         if (!j || !Array.isArray(j.achados)) throw new Error('resposta sem a lista de achados');
@@ -2550,7 +2645,7 @@ ${c.texto}`;
     function juntarAchados(listas) {
         const out = [];
         listas.flat().forEach(a => {
-            const igual = out.find(o => parecidos(o, a));
+            const igual = out.find(o => parecidos(o, a) && !(o.fontes.includes('regra') && a.fontes.includes('regra'))); // dois itens de regra nunca se fundem (cada um tem a sua correção)
             if (igual) { a.fontes.forEach(f => { if (!igual.fontes.includes(f)) igual.fontes.push(f); }); if (a.gravidade === 'grave') igual.gravidade = 'grave'; if (!igual.sugestao && a.sugestao) igual.sugestao = a.sugestao; }
             else out.push(Object.assign({}, a, { fontes: a.fontes.slice() }));
         });
@@ -2604,6 +2699,119 @@ ${c.texto}`;
     }
 
 
+    // ---------- ✍ Corrigir: cálculo (Plus) · frase/lado (Sonnet) · diagnóstico/global (Opus) ----------
+    const CORR_SONNET = ['lateralidade', 'campo_vazio', 'redacao_sentido', 'medidas', 'exame_texto', 'sexo_anatomia'];
+    const nivelCorrecao = a => a.fix ? 'calc' : CORR_SONNET.includes(a.categoria) ? 'sonnet' : 'opus';
+    const NIVEL_NOME = { calc: 'cálculo do Plus', sonnet: 'Sonnet', opus: 'Opus' };
+    const chaveTxt = x => String(x).normalize('NFC').toLowerCase().split('').map(ch => ch.normalize('NFD').replace(/[̀-ͯ]/g, '') || ch).join('');
+    function blocosLaudo(ed) {
+        const blocos = [];
+        // elementos não-texto (quebra de linha etc.) ocupam 1 posição no modelo → '\u0001' mantém os índices
+        (function andar(el) { for (const ch of el.getChildren()) { if (ch.is('element')) { const filhos = [...ch.getChildren()]; if (filhos.some(n => n.is('$text') || n.is('text'))) blocos.push({ el: ch, txt: filhos.map(n => n.is('$text') || n.is('text') ? n.data : '\u0001').join('') }); andar(ch); } } })(ed.model.document.getRoot());
+        return blocos;
+    }
+    // acha "original" no laudo; "dica" (frase do achado) desempata quando o mesmo texto aparece mais de uma vez
+    function acharNoLaudo(ed, original, dica) {
+        const alvo = chaveTxt(String(original || '').trim());
+        if (!alvo) return null;
+        const blocos = blocosLaudo(ed), ocorr = [];
+        blocos.forEach(b => { const k = chaveTxt(b.txt); let i = k.indexOf(alvo); while (i >= 0) { ocorr.push({ b, i, k }); i = k.indexOf(alvo, i + 1); } });
+        if (!ocorr.length) return null;
+        if (dica) {
+            const d = chaveTxt(String(dica).replace(/^[“"']|[”"']$/g, '').trim()).slice(0, 80);
+            const comDica = ocorr.filter(o => { const j = o.k.indexOf(d); return j >= 0 && o.i >= j && o.i < j + Math.max(d.length, chaveTxt(dica).length); });
+            if (comDica.length) return { el: comDica[0].b.el, i: comDica[0].i, n: alvo.length };
+            const d2 = d.slice(0, 40), perto = ocorr.filter(o => d2 && o.k.includes(d2));
+            if (perto.length === 1) return { el: perto[0].b.el, i: perto[0].i, n: alvo.length };
+        }
+        if (ocorr.length > 1) return { ambiguo: ocorr.length };
+        return { el: ocorr[0].b.el, i: ocorr[0].i, n: alvo.length };
+    }
+    function substituirNoLaudo(original, novo, dica) {
+        const ed = editorLaudo();
+        if (!ed) return 'editor fechado';
+        const pos = acharNoLaudo(ed, original, dica);
+        if (!pos) return 'trecho não encontrado (o laudo mudou?)';
+        if (pos.ambiguo) return `trecho aparece ${pos.ambiguo} vezes — corrija à mão`;
+        try {
+            ed.model.change(w => {
+                const p0 = w.createPositionAt(pos.el, pos.i), p1 = w.createPositionAt(pos.el, pos.i + pos.n);
+                const no = p0.textNode || p0.nodeAfter;
+                const attrs = no && no.getAttributes ? new Map(no.getAttributes()) : new Map(); // mantém negrito/fonte do 1º caractere
+                w.remove(w.createRange(p0, p1));
+                w.insertText(String(novo), attrs, w.createPositionAt(pos.el, pos.i));
+                w.setSelection(w.createRange(w.createPositionAt(pos.el, pos.i), w.createPositionAt(pos.el, pos.i + String(novo).length)));
+            });
+            ed.editing.view.focus(); ed.editing.view.scrollToTheSelection();
+            return '';
+        } catch (e) { return 'falha ao editar: ' + (e.message || e); }
+    }
+    const CORR_TOOL = {
+        name: 'correcao', description: 'Devolve as substituições mínimas de texto que corrigem os erros apontados no laudo.',
+        input_schema: { type: 'object', properties: {
+            trocas: { type: 'array', items: { type: 'object', properties: { original: { type: 'string', description: 'cópia LITERAL e contínua do laudo (dentro de um único parágrafo), longa o bastante para ser única' }, novo: { type: 'string' } }, required: ['original', 'novo'] } },
+            observacao: { type: 'string', description: 'curta; o que não foi corrigido e por quê' } }, required: ['trocas'] }
+    };
+    async function corrigirIA(c, modelo, achados, completa, tentativa = 1) {
+        const t0 = performance.now();
+        const lista = achados.map((a, i) => `${i + 1}. [${CAT_NOME[a.categoria] || a.categoria}] ${a.explicacao}${a.trecho ? ` — trecho: “${a.trecho}”` : ''}${a.sugestao ? ` — sugestão: ${a.sugestao}` : ''}`).join('\n');
+        const sys = revSistema(c, `
+TAREFA AGORA: CORRIGIR o laudo (não só apontar). Regras:
+• Altere o MÍNIMO necessário; não reescreva estilo, não acrescente achados, não invente medidas.
+• "original" = cópia LITERAL exata de um trecho contínuo do laudo, dentro de um único parágrafo, com 4–30 palavras, que apareça UMA só vez; "novo" = o mesmo trecho já corrigido.
+• Se a correção depender de informação que o laudo não tem (qual lado é o certo, uma medida que falta), NÃO troque: explique em "observacao".
+• Siga o padrão do serviço quando aplicável.
+${completa ? '• Revisão COMPLETA: corrija também qualquer outro erro de incompatibilidade que encontrar no laudo inteiro (lado, corpo × conclusão, medidas, classificação, padrão do serviço).' : '• Corrija apenas os itens listados.'}
+Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
+        let d;
+        try {
+            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: /opus/.test(modelo) ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+                system: sys, tools: [CORR_TOOL], tool_choice: { type: 'auto' },
+                messages: [{ role: 'user', content: revMensagem(c) + (lista ? '\n\nERROS APONTADOS A CORRIGIR:\n' + lista : '') }] });
+        } catch (e) { if (tentativa < 2) return corrigirIA(c, modelo, achados, completa, tentativa + 1); throw e; }
+        const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'correcao');
+        let inp = blk && blk.input;
+        if (!inp) { const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n'); const m = txt.match(/\{[\s\S]*\}/); if (m) { try { inp = JSON.parse(m[0]); } catch (e) { /* segue */ } } }
+        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return corrigirIA(c, modelo, achados, completa, tentativa + 1); throw new Error('resposta sem as correções'); }
+        const trocas = inp.trocas.filter(x => x && x.original && typeof x.novo === 'string' && x.original !== x.novo).slice(0, 12).map(x => ({ original: String(x.original), novo: String(x.novo) }));
+        return { trocas, obs: String(inp.observacao || '').slice(0, 400), ms: performance.now() - t0, modelo: d.modelo || modelo };
+    }
+    const chaveAchado = a => norm(a.categoria + a.trecho + a.explicacao);
+    async function pedirCorrecao(r, a, completa) {
+        const k = completa ? '__opus__' : chaveAchado(a);
+        const nivel = completa ? 'opus' : nivelCorrecao(a);
+        r.corr = r.corr || {};
+        if (nivel === 'calc') {
+            r.corr[k] = { nivel, trocas: [{ original: a.fix.busca, novo: a.fix.troca, dica: a.trecho }], obs: '' };
+            renderRevisao(); return;
+        }
+        r.corr[k] = { nivel, carregando: true };
+        renderRevisao();
+        try {
+            const c = contextoLaudo() || r.ctx;
+            const lista = completa ? achadosAtuais(r).filter(x => !r.ignorados.has(chaveAchado(x))) : [a];
+            const x = await corrigirIA(c, nivel === 'opus' ? 'claude-opus-5-5' : 'claude-sonnet-5-5', lista, completa);
+            r.corr[k] = { nivel, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nenhuma troca proposta.'), ms: x.ms };
+        } catch (e) { r.corr[k] = { nivel, erro: String(e.message || e).slice(0, 200) }; }
+        if (revAtual === r) renderRevisao();
+    }
+    function htmlCorrecao(cr) {
+        if (!cr) return '';
+        if (cr.carregando) return `<div class="pr-co">⏳ ${NIVEL_NOME[cr.nivel]} preparando a correção…</div>`;
+        if (cr.erro) return `<div class="pr-co err">⚠ ${esc(cr.erro)}</div>`;
+        return `<div class="pr-co">${(cr.trocas || []).map((t, j) => `<div class="pr-tq ${t.feito ? 'ok' : ''}" data-j="${j}"><div class="pr-antes">${esc(t.original)}</div><div class="pr-dep">→ ${esc(t.novo)}</div>${t.feito ? '<div class="pr-ok">✓ aplicado (Ctrl+Z desfaz)</div>' : t.falha ? `<div class="pr-ok err">⚠ ${esc(t.falha)}</div>` : ''}</div>`).join('')}
+${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
+<div class="pr-ac">${(cr.trocas || []).some(t => !t.feito) ? `<button class="pr-b" data-apl>Aplicar${cr.trocas.length > 1 ? ' tudo' : ''}</button>` : ''}<button class="pr-b sec" data-desc>${(cr.trocas || []).every(t => t.feito) && cr.trocas.length ? 'Fechar' : 'Descartar'}</button><span class="pr-niv">${NIVEL_NOME[cr.nivel]}${cr.ms ? ' · ' + fmt(cr.ms / 1000, 1) + ' s' : ''}</span></div></div>`;
+    }
+    function ligarCorrecao(el, r, k) {
+        const cr = r.corr && r.corr[k];
+        if (!cr) return;
+        const ap = el.querySelector(':scope > .pr-co [data-apl]');
+        if (ap) ap.onclick = () => { cr.trocas.forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; } }); renderRevisao(); };
+        const ds = el.querySelector(':scope > .pr-co [data-desc]');
+        if (ds) ds.onclick = () => { delete r.corr[k]; renderRevisao(); };
+    }
+
     // ---------- tela ----------
     let revAtual = null; // { hash, ctx, regras, haiku, gemini, erroH, erroG, carregando, ignorados:Set, depois:fn }
     const hashTxt = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return String(h); };
@@ -2633,13 +2841,14 @@ ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + 
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib" ${r.carregando ? 'disabled' : ''}>Liberar ${graves ? 'mesmo assim' : ''}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
+${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
 <div class="pr-ex">${esc(a.explicacao)}</div>
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
-<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}<button class="pr-b sec" data-ign>Ignorar</button></div></div>`).join('')
+<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>
@@ -2656,7 +2865,11 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
             const a = todos[+el.dataset.i];
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
             el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; renderRevisao(); };
+            const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => pedirCorrecao(r, a, false);
+            ligarCorrecao(el, r, chaveAchado(a));
         });
+        const pf = p.querySelector('#pr-full'); if (pf) pf.onclick = () => pedirCorrecao(r, null, true);
+        const fu = p.querySelector('.pr-full'); if (fu) ligarCorrecao(fu, r, '__opus__');
         const bl = p.querySelector('#pr-lib'); if (bl) bl.onclick = () => { const f = r.depois; r.depois = null; fecharRevisao(); if (f) f(); };
         const bc = p.querySelector('#pr-canc'); if (bc) bc.onclick = () => { r.depois = null; renderRevisao(); };
     }
@@ -2739,6 +2952,32 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         }
         return r;
     }
+    // ---------- Zoom só da folha do laudo (visual; impressão intacta) ----------
+    function zoomLaudoCss() {
+        const z = cfg.zoomLaudo || 100;
+        setCss('pp-zoom-laudo', on('zoomLaudo') && z !== 100 ? `@media screen { .v-dialog__content .document-editor .ck-editor__editable { zoom: ${z / 100}; } }` : '');
+    }
+    function zoomLaudoCtl() {
+        zoomLaudoCss();
+        const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
+        let w = tb && tb.querySelector(':scope > .pp-zoom-laudo');
+        if (!tb || !on('zoomLaudo')) { if (w) w.remove(); return; }
+        if (w) { const v = w.querySelector('.pz-v'); const txt = (cfg.zoomLaudo || 100) + '%'; if (v.textContent !== txt) v.textContent = txt; return; }
+        w = document.createElement('span');
+        w.className = 'pp-zoom-laudo';
+        w.innerHTML = '<button type="button" class="pz-b" data-d="-10" title="Diminuir a folha do laudo">A−</button><button type="button" class="pz-v" title="Voltar a 100%"></button><button type="button" class="pz-b" data-d="10" title="Aumentar a folha do laudo">A+</button>';
+        w.querySelector('.pz-v').textContent = (cfg.zoomLaudo || 100) + '%';
+        w.addEventListener('mousedown', e => e.preventDefault());
+        w.addEventListener('click', e => {
+            const b = e.target.closest('button'); if (!b) return;
+            e.stopPropagation();
+            const z = b.dataset.d ? (cfg.zoomLaudo || 100) + Number(b.dataset.d) : 100;
+            cfg.zoomLaudo = Math.min(160, Math.max(90, z)); saveCfg();
+            w.querySelector('.pz-v').textContent = cfg.zoomLaudo + '%'; zoomLaudoCss();
+        });
+        const rev = tb.querySelector(':scope > .pp-rev-btn') || tb.querySelector(':scope > .pp-calc-laudo');
+        if (rev && rev.nextSibling) tb.insertBefore(w, rev.nextSibling); else tb.appendChild(w);
+    }
     function revBtn() {
         const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
         let b = tb && tb.querySelector(':scope > .pp-rev-btn');
@@ -2748,7 +2987,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
         b.innerHTML = '<span class="v-btn__content">🛡 Revisar</span>';
-        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku / Gemini; Opus como sênior). Nada é alterado no laudo.';
+        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku/Sonnet, Gemini; Opus como sênior). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); if (document.getElementById('pp-rev') && !(revAtual && revAtual.carregando)) { fecharRevisao(); return; } revisar(false); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
