@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.2.1
+// @version      9.3.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -34,6 +34,9 @@
         #agenda-drawer-wrapper.open { right: 0 !important; }
         #agenda-drawer-wrapper.drop-on { outline: 4px dashed #3b82f6 !important; outline-offset: -8px; }
         .obs-cell { font-size: 9.5px; color: #b45309; margin-top: 1px; }
+        .badge-urg { background: #dc2626 !important; color: #fff !important; border: 1px solid #b91c1c !important; cursor: pointer; margin-left: 4px; }
+        .btn-urg { opacity: .35; filter: grayscale(1); }
+        .btn-urg.on { opacity: 1; filter: none; background: #fee2e2 !important; border-color: #dc2626 !important; }
         .badge-saiu { background: #fef3c7 !important; color: #92400e !important; border: 1px solid #f59e0b !important; }
         #agenda-top-bar { background: #0f172a !important; color: #fff !important; padding: 7px 12px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; border-bottom: 1px solid #334155 !important; flex-shrink: 0 !important; gap: 6px; }
         .btn-top-action { border: none !important; border-radius: 5px !important; padding: 4px 8px !important; font-size: 10.5px !important; font-weight: 700 !important; cursor: pointer !important; transition: opacity 0.15s !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; }
@@ -599,7 +602,11 @@
             obs: item.obs || null,
             removido_origem_em: item.removidoOrigemEm || item.removido_origem_em || null,
             // v8.7.2 — nome como veio da planilha/PDF quando a linha passou a usar o nome do PACS
-            nome_origem: item.nomeOrigem || item.nome_origem || null
+            nome_origem: item.nomeOrigem || item.nome_origem || null,
+            // v9.3 — urgência (null = não classificado; o banco aplica a regra do SUS e não deixa null apagar o que já foi marcado)
+            urgente: item.urgente == null ? null : !!item.urgente,
+            urgente_fonte: item.urgente == null ? null : (item.urgenteFonte || null),
+            setor: item.setor || null
         };
     }
 
@@ -714,7 +721,10 @@
             qtdExames: r.qtd_exames || 1,
             obs: r.obs || null,
             removidoOrigemEm: r.removido_origem_em || null,
-            nomeOrigem: r.nome_origem || null
+            nomeOrigem: r.nome_origem || null,
+            urgente: r.urgente == null ? null : !!r.urgente,
+            urgenteFonte: r.urgente_fonte || null,
+            setor: r.setor || null
         };
     }
 
@@ -1009,8 +1019,19 @@
             g.convenioDesc = (g.exames[0].convenio && g.exames[0].convenio.conv_descricao) || '';
             g.examIds = g.exames.map(x => Number(x.exa_codigo));
             g.examDescs = g.exames.map(x => cleanExamDesc(x.tipoexame && x.tipoexame.tpe_descricao));
+            g.urgente = g.exames.some(x => x.exa_idnurgente === true);
+            g.setor = setorDoPacs(g.exames[0]);
             return g;
         }).sort((a, b) => String(a.fichaEm).localeCompare(String(b.fichaEm)));
+    }
+
+    // v9.3 — setor de origem (PS, internado, maternidade…) a partir do exame do PACS; null se o PACS não informar
+    function setorDoPacs(x) {
+        if (!x) return null;
+        const conv = normText(x.convenio && x.convenio.conv_descricao);
+        const m = conv.match(/^SUS\s*-\s*(.+)$/);
+        if (m) return m[1].trim();
+        return null;
     }
 
     function patientKeyOf(item) {
@@ -1041,10 +1062,16 @@
         }
         if (r.status === 'atendido' && !r.atendidoFonte) r.atendidoFonte = 'manual';
         r.tempoEsperaMin = (r.status === 'atendido' && r.chegouEm && r.atendidoEm) ? calcWaitTime(r.chegouEm, r.atendidoEm) : null;
+        // v9.3 — urgência marcada no PACS (exa_idnurgente). Marcação à mão sempre prevalece.
+        if (r.urgenteFonte !== 'manual') {
+            if (g.urgente) { r.urgente = true; r.urgenteFonte = 'pacs'; }
+            else if (r.urgenteFonte === 'pacs') { r.urgente = false; r.urgenteFonte = 'pacs'; }
+        }
+        if (g.setor && !r.setor) r.setor = g.setor;
         return r;
     }
 
-    const PACS_FIELDS = ['paciente', 'nomeOrigem', 'status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem'];
+    const PACS_FIELDS = ['paciente', 'nomeOrigem', 'status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem', 'urgente', 'urgenteFonte', 'setor'];
     function rowChanged(a, b) {
         return PACS_FIELDS.some(f => JSON.stringify(a[f] == null ? null : a[f]) !== JSON.stringify(b[f] == null ? null : b[f]));
     }
@@ -2319,7 +2346,7 @@
                         <span>➕ Encaixe Rápido (SUS / Hospitalar / Convênios)</span>
                         <span style="font-size:9.5px; color:#64748b;">Enter para salvar</span>
                     </div>
-                    <div style="display:grid; grid-template-columns:60px 145px 1.2fr 1.2fr 30px; gap:4px;">
+                    <div style="display:grid; grid-template-columns:60px 145px 1.2fr 1.2fr 46px 30px; gap:4px;">
                         <input type="text" id="encHora" placeholder="11:15" style="padding:3px 5px; border-radius:3px; border:1px solid #cbd5e1; font-size:10.5px; font-weight:700;">
                         <select id="encOrigem" style="padding:3px; border-radius:3px; border:1px solid #cbd5e1; font-size:10px; font-weight:600;">
                             <option value="Prefeitura">Prefeitura</option>
@@ -2333,6 +2360,7 @@
                         </select>
                         <input type="text" id="encPaciente" placeholder="Nome do paciente" style="padding:3px 5px; border-radius:3px; border:1px solid #cbd5e1; font-size:10.5px; text-transform:uppercase;">
                         <input type="text" id="encExame" placeholder="Exame / Procedimento" style="padding:3px 5px; border-radius:3px; border:1px solid #cbd5e1; font-size:10.5px; text-transform:uppercase;">
+                        <label title="Encaixe de urgência (SUS já conta sozinho)" style="display:flex; align-items:center; gap:2px; font-size:10px; font-weight:700; color:#dc2626; cursor:pointer;"><input type="checkbox" id="encUrg" style="margin:0;">🚨</label>
                         <button id="btnSalvarEncaixe" style="background:#10b981; color:#fff; font-weight:bold; border:none; border-radius:3px; cursor:pointer; font-size:11px;">➕</button>
                     </div>
                 </div>
@@ -2448,6 +2476,8 @@
         bodyScroll.addEventListener('click', e => {
             const pacsBadge = e.target.closest('[data-action="unlink"]');
             if (pacsBadge) { unlinkPacs(pacsBadge.dataset.id); return; }
+            const urgBadge = e.target.closest('[data-action="urg"]');
+            if (urgBadge) { markUrgente(urgBadge.dataset.id); return; }
             const fusBadge = e.target.closest('[data-action="fundir"]');
             if (fusBadge) { abrirFusao(fusBadge.dataset.id); return; }
             const btn = e.target.closest('button');
@@ -2458,6 +2488,7 @@
             if (act === 'chegou') markChegou(id);
             else if (act === 'atendido') markAtendido(id);
             else if (act === 'falta') markFalta(id);
+            else if (act === 'urgente') markUrgente(id);
             else if (act === 'delete') deletePatient(id);
         });
         bodyScroll.addEventListener('keydown', e => {
@@ -2509,6 +2540,15 @@
         updateItem(id, i => (i.status === 'faltou')
             ? { ...i, status: 'pendente' }
             : { ...i, status: 'faltou', chegouEm: null, chegadaFonte: null, atendidoEm: null, atendidoFonte: null, tempoEsperaMin: null });
+    }
+
+    // v9.3 — urgência à mão (vale para estatística; não mexe no PACS)
+    // mesma regra do banco: sem classificação, SUS hospitalar conta como urgência
+    const ehSusHosp = i => i.tipo === 'SUS Hospitalar' || /^SUS\b/i.test(String(i.convenio || ''));
+    const urgEfetivo = i => i.urgente != null ? !!i.urgente : ehSusHosp(i);
+    const setorEfetivo = i => i.setor || ((String(i.convenio || '').match(/^SUS\s*-\s*(.+)$/i) || [])[1] || '').trim() || null;
+    function markUrgente(id) {
+        updateItem(id, i => ({ ...i, urgente: !urgEfetivo(i), urgenteFonte: 'manual' }));
     }
 
     function deletePatient(id) {
@@ -2704,6 +2744,7 @@
         }
         if (item.nomeOrigem && normName(item.nomeOrigem) !== normName(item.paciente)) badges += `<span class="badge-base badge-nome" title="Na ${item.origem === 'prefeitura_planilha' ? 'planilha da Prefeitura' : item.origem === 'spdata_pdf' ? 'agenda do SPDATA' : 'origem'} estava: ${escapeHtml(item.nomeOrigem)}">≈</span>`;
         if (item.removidoOrigemEm && item.status !== 'cancelado') badges += `<span class="badge-base badge-saiu" title="Não veio mais na ${item.origem === 'prefeitura_planilha' ? 'planilha da Prefeitura' : 'importação mais recente'} (${fmtBR(String(item.removidoOrigemEm).slice(0, 10))}). Confirme se o paciente foi desmarcado.">⚠ SAIU</span>`;
+        if (urgEfetivo(item)) badges += `<span class="badge-base badge-urg" data-action="urg" data-id="${escapeHtml(item.id)}" title="Exame em caráter de urgência (${escapeHtml({ sus: 'regra: SUS hospitalar', pacs: 'marcado no PACS', manual: 'marcado à mão' }[item.urgenteFonte] || 'regra: SUS hospitalar')}). Clique para retirar.">🚨 URG${setorEfetivo(item) ? ' · ' + escapeHtml(setorEfetivo(item)) : ''}</span>`;
         if (item.pacsPacienteId > 0) badges += `<span class="badge-base badge-pacs" data-action="unlink" data-id="${escapeHtml(item.id)}" title="Vinculado ao PACS — ficha ${fmtHM(item.chegouEm)}${item.imagemEm ? ', imagens ' + fmtHM(item.imagemEm) : ''}. Clique para desfazer o vínculo.">🔗 ${fmtHM(item.chegouEm)}</span>`;
 
         const id = escapeHtml(item.id);
@@ -2718,6 +2759,7 @@
                     <button class="btn-act btn-chegou" data-action="chegou" data-id="${id}" title="Marcar chegada">${item.status === 'esperando' ? 'Em Espera' : 'Chegou'}</button>
                     <button class="btn-act btn-atend" data-action="atendido" data-id="${id}" title="Finalizar atendimento">Atend</button>
                     <button class="btn-act btn-falta" data-action="falta" data-id="${id}" title="Marcar falta">Falta</button>
+                    <button class="btn-act btn-urg${urgEfetivo(item) ? ' on' : ''}" data-action="urgente" data-id="${id}" title="${urgEfetivo(item) ? 'Retirar urgência' : 'Marcar como urgência'}">🚨</button>
                     <button class="btn-del" data-action="delete" data-id="${id}" title="Excluir">🗑️</button>
                 </div>
             </td>`;
@@ -2737,6 +2779,8 @@
         else if (origem.startsWith('SUS -')) { tipo = 'SUS Hospitalar'; convenio = origem; }
 
         const novo = { id: 'l' + Date.now(), hora, tipo, convenio, paciente, exame, status: 'pendente', periodo: periodoFromHora(hora), chegouEm: null, atendidoEm: null, tempoEsperaMin: null, origem: 'encaixe_manual' };
+        const urgEl = document.getElementById('encUrg');
+        if (urgEl && urgEl.checked) { novo.urgente = true; novo.urgenteFonte = 'manual'; urgEl.checked = false; }
         const list = agendaDatabase[selectedDate] || [];
         if (list.some(i => naturalKey(i) === naturalKey(novo))) { alert('Este paciente já está agendado neste horário para este exame.'); return; }
         list.push(novo);
@@ -2856,6 +2900,24 @@
                 requestSupabase('vw_noshow_dia_semana_90d?select=*', 'GET'),
                 requestSupabase(`vw_espera_diaria?select=*&data_agenda=gte.${dataMin}`, 'GET')
             ]);
+            // v9.3 — urgências (exames realizados), últimos 3 meses; se a view não existir, só não mostra
+            const m0 = new Date(); m0.setMonth(m0.getMonth() - 2); m0.setDate(1);
+            const mesMin = `${m0.getFullYear()}-${String(m0.getMonth() + 1).padStart(2, '0')}-01`;
+            const [urgM, urgS] = await Promise.all([
+                requestSupabase(`vw_urgencias_mes?select=*&mes=gte.${mesMin}&order=mes.desc`, 'GET').catch(() => []),
+                requestSupabase(`vw_urgencias_setor?select=*&mes=gte.${mesMin}&order=mes.desc,pacientes.desc`, 'GET').catch(() => [])
+            ]);
+            const MES3 = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+            const fmtMes = iso => { const [y, m] = String(iso).split('-').map(Number); return `${MES3[m - 1]}/${String(y).slice(2)}`; };
+            const FONTE = { sus: 'regra SUS', pacs: 'PACS', manual: 'à mão' };
+            const urgHtml = (urgM || []).length ? `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">🚨 Exames em caráter de urgência (realizados)</div>
+                    <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
+                        <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Mês</th><th style="text-align:right; padding:3px 6px;">Pacientes</th><th style="text-align:right; padding:3px 6px;">Urgências</th><th style="text-align:right; padding:3px 6px;">%</th><th style="text-align:right; padding:3px 6px;">Proc. urgência</th><th style="text-align:left; padding:3px 6px;">Por setor (origem da marcação)</th></tr>
+                        ${urgM.map(r => `<tr><td style="padding:3px 6px; font-weight:700;">${fmtMes(r.mes)}</td><td style="padding:3px 6px; text-align:right;">${r.pacientes}</td><td style="padding:3px 6px; text-align:right; color:#dc2626; font-weight:700;">${r.pacientes_urgencia}</td><td style="padding:3px 6px; text-align:right;">${r.pct_pacientes_urgencia ?? 0}%</td><td style="padding:3px 6px; text-align:right;">${r.procedimentos_urgencia}</td>
+                            <td style="padding:3px 6px; font-size:9.5px;">${(urgS || []).filter(x => x.mes === r.mes).map(x => `${escapeHtml(x.setor)} (${FONTE[x.fonte] || escapeHtml(x.fonte)}): ${x.pacientes}`).join(' · ') || '—'}</td></tr>`).join('')}
+                    </table>
+                    <div style="font-size:9.5px; color:#94a3b8; margin-top:4px;">SUS hospitalar (PS, internado, UTI, maternidade) conta automaticamente; os demais pela marcação de urgência no PACS ou pelo botão 🚨 da agenda. Inclui o mês corrente.</div></div>` : '';
             if (!Array.isArray(conv) || !conv.length) {
                 content.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">Nenhum atendimento ou falta registrado nos últimos 30 dias.</div>`;
                 return;
@@ -2904,7 +2966,8 @@
                     <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
                         <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Tipo</th><th style="text-align:right; padding:3px 6px;">Atendidos</th><th style="text-align:right; padding:3px 6px;">Média</th><th style="text-align:right; padding:3px 6px;">&gt; 60 min</th><th style="text-align:right; padding:3px 6px;">Máximo</th></tr>
                         ${tiposHtml}
-                    </table></div>` : ''}`;
+                    </table></div>` : ''}
+                ${urgHtml}`;
         } catch (err) {
             if (err.status === 404 || err.status === 400) return renderDashboardNuvemFaltasLegado();
             if (err.status !== undefined) reportCloudError(err, 'Analytics', false); // erro HTTP; erro de desenho só aparece aqui

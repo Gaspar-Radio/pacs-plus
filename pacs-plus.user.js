@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.16.0
+// @version      1.17.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -92,7 +92,8 @@
     // Monitor de TC urgente (aba 🚨 Urgências) — cada computador tem a sua configuração
     const URG_PADRAO = {
         tela: false,                 // cartão + som + notificação do sistema neste computador
-        celular: false,              // este computador envia ao celular (ligar em UM só: o do hospital)
+        celular: false,              // este computador envia ao celular (pode ligar em mais de um: só o "líder" envia; os outros ficam de reserva — v1.17)
+        nomePc: '',                  // nome deste computador nos avisos (vazio = Mac/Windows)
         teste: false,                // modo teste: só pacientes TESTE, ignora escala e data
         dias: '1,2,3,4,5',           // 0 = dom … 6 = sáb
         inicio: '07:00', fim: '17:00',
@@ -1075,13 +1076,41 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     window.addEventListener('pagehide', () => {
         try { const l = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); if (l && l.id === URG_TAB) localStorage.removeItem(URG_LIDER_KEY); } catch (x) { /* ok */ }
+        // v1.17 — líder fechando a aba: solta a vez na nuvem para a reserva assumir logo
+        try {
+            const n = typeof sessaoNuvemPlus === 'function' ? sessaoNuvemPlus() : null;
+            if (n && urgPapel === 'lider') fetch(n.url + '/rest/v1/rpc/monitor_assumir', { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok }, body: JSON.stringify({ p_nome: 'tc_urgente', p_pc: urgPcId(), p_pc_nome: urgPcNome(), p_soltar: true }) });
+        } catch (x) { /* ok */ }
     });
+
+    // ---- v1.17: vários computadores — só um envia ao celular (líder, pela nuvem); os outros ficam de reserva ----
+    // Líder = quem renovou por último na tabela monitor_lider (TTL 3 min). Quem tem leitura do PACS falhando
+    // (ex.: sessão expirada após o reinício diário do PC do hospital) solta a vez e a reserva assume em ~1–2 min.
+    // Sem login na nuvem/sem internet com o Supabase: age sozinho (melhor aviso repetido que nenhum).
+    const URG_PC_KEY = 'pp_urg_pc_id_v1', URG_LEASE_TTL = 180, URG_LEASE_CADA = 60000;
+    let urgPapel = 'inicial', urgLiderNome = '', urgLeaseEm = 0, urgLeaseErro = '';
+    function urgPcId() { let id = ''; try { id = localStorage.getItem(URG_PC_KEY) || ''; if (!id) { id = 'pc-' + Math.random().toString(36).slice(2, 10); localStorage.setItem(URG_PC_KEY, id); } } catch (x) { id = 'pc-' + URG_TAB; } return id; }
+    const urgPcNome = () => String(cfg.urg.nomePc || '').trim() || (/Mac/i.test(navigator.platform || navigator.userAgent) ? 'Mac' : 'Windows');
+    const celOn = () => !!cfg.urg.celular && urgPapel !== 'reserva' && urgPapel !== 'inicial';
+    async function urgLease(podeVigiar) {
+        const n = sessaoNuvemPlus();
+        if (!n) { urgLeaseErro = 'sem login na nuvem (📅 Agenda → 🔐 Login)'; return 'sozinho'; }
+        try {
+            const r = await fetch(n.url + '/rest/v1/rpc/monitor_assumir', { method: 'POST', headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok },
+                body: JSON.stringify({ p_nome: 'tc_urgente', p_pc: urgPcId(), p_pc_nome: urgPcNome(), p_ttl: URG_LEASE_TTL, p_soltar: !podeVigiar }) });
+            if (!r.ok) throw new Error('nuvem HTTP ' + r.status);
+            const d = (await r.json() || [])[0] || {};
+            urgLeaseErro = ''; urgLiderNome = d.pc_nome || '';
+            // decisão só pelo servidor (não depende do relógio deste PC)
+            return d.pc === urgPcId() && podeVigiar ? 'lider' : 'reserva';
+        } catch (e) { urgLeaseErro = String(e.message || e); return 'sozinho'; }
+    }
 
     // ---- canais ----
     const ntfyBase = () => String(cfg.urg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
     async function ntfyEnviar(o, forcar) {
         const u = cfg.urg;
-        if ((!u.celular && !forcar) || !u.ntfyTopico) return null;
+        if ((!celOn() && !forcar) || !u.ntfyTopico) return null;
         const p = new URLSearchParams();
         if (o.titulo) p.set('t', o.titulo);
         p.set('p', String(o.prio || 3));
@@ -1103,7 +1132,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const tgTokenOk = t => /^\d{5,}:[\w-]{20,}$/.test(String(t || '').trim());
     async function tgEnviar(texto, forcar) {
         const u = cfg.urg;
-        if ((!u.celular && !forcar) || !tgTokenOk(u.tgToken) || !u.tgChat) return null;
+        if ((!celOn() && !forcar) || !tgTokenOk(u.tgToken) || !u.tgChat) return null;
         try {
             const r = await fetch(`https://api.telegram.org/bot${String(u.tgToken).trim()}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({ chat_id: String(u.tgChat).trim(), text: texto, disable_web_page_preview: 'true' }) });
@@ -1121,7 +1150,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     async function poEnviar(o, forcar) {
         const u = cfg.urg;
-        if ((!u.celular && !forcar) || !u.poUser || !u.poToken) return null;
+        if ((!celOn() && !forcar) || !u.poUser || !u.poToken) return null;
         let prio = o.prio == null ? 0 : o.prio;
         if (prio === 2 && !u.poEmergencia) prio = 1;
         const f = { token: String(u.poToken).trim(), user: String(u.poUser).trim(), title: o.titulo, message: o.msg || o.titulo, priority: String(prio), url: URG_LINK, url_title: 'Abrir PACS' };
@@ -1216,7 +1245,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         urgSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
         const m = urgMsg(g, tipo);
         urgTela(m.titulo, m.tela, m.nivel, gsid(g));
-        if (!cfg.urg.celular) return;
+        if (!celOn()) return;
         const sid = gsid(g) + '-' + tipo;
         if (!(g.agenda && g.agenda[sid])) { // se já está agendado no ntfy, o servidor entrega sozinho
             if (await ntfyEnviar({ sid, titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags })) (g.entregues = g.entregues || []).push(sid);
@@ -1228,7 +1257,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     async function urgAgendar(g) {
         // v1.9.2: só marca como agendado se o celular estiver ligado — assim, ao ligar o celular
         // com um urgente já aberto, os lembretes desse paciente também são agendados no ntfy.
-        if (!cfg.urg.celular || !cfg.urg.ntfyTopico) return;
+        if (!celOn() || !cfg.urg.ntfyTopico) return;
         g.agendaVence = g.vence;
         const base = gsid(g), agora = Date.now(), plano = [];
         lembretesMin().forEach(m => plano.push(['r' + m, g.vence - m * 60000]));
@@ -1255,7 +1284,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         urgSalvar(e);
         const m = urgMsg(g, motivo === 'liberado' ? 'fimLiberado' : 'fimRemovido');
         urgTela(m.titulo, m.tela, 'info', gsid(g));
-        if (!cfg.urg.celular) return;
+        if (!celOn()) return;
         await urgCancelarAgenda(g);
         for (const sid of (g.entregues || [])) await ntfyAcao(sid, 'clear');
         g.entregues = [];
@@ -1409,7 +1438,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     function fimEscalaHoje() { const d = new Date(), f = minutosDoDia(cfg.urg.fim); d.setHours(Math.floor(f / 60), f % 60, 59, 0); return d.getTime(); }
     async function urgVigia(e) {
         const u = cfg.urg;
-        if (!u.celular || !u.ntfyTopico) return;
+        if (!celOn() || !u.ntfyTopico) return;
         const agora = Date.now(), hoje = chaveDia(new Date());
         const dentro = !urgPausado() && naEscalaData(new Date());
         const lendoOk = e.ultLeitura && agora - e.ultLeitura < 3 * 60000; // se a leitura falha, o vigia não é renovado e dispara
@@ -1417,9 +1446,9 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             if (e.diaAtivo !== hoje) {
                 e.diaAtivo = hoje;
                 await ntfyAcao('pp-inicio', 'delete');
-                await ntfyEnviar({ titulo: '✅ Monitor de urgências ativo', msg: `Este computador está vigiando os TC urgentes da escala (${u.inicio}–${u.fim}). Se ele parar, você recebe um aviso.`, prio: 2, tags: 'white_check_mark' });
+                await ntfyEnviar({ titulo: '✅ Monitor de urgências ativo', msg: `O ${urgPcNome()} está vigiando os TC urgentes da escala (${u.inicio}–${u.fim}). Se ele parar, outro computador com o PACS aberto assume; se nenhum estiver, você recebe um aviso.`, prio: 2, tags: 'white_check_mark' });
             } else if (e.vigiaEm && agora - e.vigiaEm > URG_VIGIA_ATRASO) {
-                await ntfyEnviar({ titulo: '✅ Monitor de urgências voltou', msg: 'O computador voltou a vigiar os TC urgentes.', prio: 2, tags: 'white_check_mark' });
+                await ntfyEnviar({ titulo: '✅ Monitor de urgências voltou', msg: `O ${urgPcNome()} voltou a vigiar os TC urgentes.`, prio: 2, tags: 'white_check_mark' });
             }
             if (!e.vigiaEm || agora - e.vigiaEm >= URG_VIGIA_CADA) {
                 const em = Math.min(agora + URG_VIGIA_ATRASO, fimEscalaHoje() + 3 * 60000);
@@ -1433,7 +1462,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const prox = proximoInicioEscala(agora);
             if (prox && prox.getTime() - agora < 3 * 86400000 - 120000) {
                 const ok = await ntfyEnviar({ sid: 'pp-inicio', em: prox.getTime(), titulo: '⚠ Monitor de urgências não iniciou',
-                    msg: `Até ${hm(prox.getTime())} o PACS não foi aberto no computador que vigia os TC urgentes. Abra o PACS no PC do hospital.`, prio: 4, tags: 'warning' });
+                    msg: `Até ${hm(prox.getTime())} nenhum computador com o PACS aberto começou a vigiar os TC urgentes. Abra/faça login no PACS (Mac ou PC do hospital).`, prio: 4, tags: 'warning' });
                 e.inicioAgendado = ok ? chaveDia(prox) : '';
             }
         }
@@ -1452,6 +1481,22 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             e.grupos = e.grupos || {};
             const abertos = Object.values(e.grupos).some(g => g.aberto);
             const ativo = !urgPausado() && (urgModoTeste() || naEscalaData(new Date()) || abertos);
+            // v1.17 — decide quem envia ao celular (só se "enviar ao celular" estiver ligado aqui)
+            if (cfg.urg.celular && Date.now() - urgLeaseEm >= URG_LEASE_CADA - 5000) {
+                urgLeaseEm = Date.now();
+                // solta a vez só se a ÚLTIMA tentativa de leitura falhou (ex.: sessão do PACS expirada)
+                const falhando = ativo && e.ultTentativa && Date.now() - e.ultTentativa < 3 * 60000 && (!e.ultLeitura || e.ultLeitura < e.ultTentativa);
+                const lendoOk = !falhando;
+                const antes = urgPapel;
+                urgPapel = await urgLease(!!lendoOk);
+                if (antes === 'reserva' && urgPapel !== 'reserva') {
+                    // assumiu: reenvia o estado dos urgentes abertos e reagenda os lembretes (mesmos ids no ntfy = substitui)
+                    const abertos = Object.values(e.grupos).filter(g => g.aberto && g.vence);
+                    if (abertos.length || naEscalaData(new Date())) await ntfyEnviar({ titulo: `🔁 ${urgPcNome()} assumiu o monitor de urgências`, msg: abertos.length ? `${abertos.length} TC urgente(s) em aberto — lembretes reagendados.` : 'O outro computador parou de vigiar; este assumiu.', prio: 3, tags: 'repeat' });
+                    for (const g of abertos) { g.agendaVence = null; if (!g.pausado) await urgAgendar(g); }
+                    e.vigiaEm = 0;
+                }
+            } else if (!cfg.urg.celular) urgPapel = 'sozinho';
             if (ativo && Date.now() - (e.ultLeitura || 0) >= URG_POLL_MS - 5000 && Date.now() - (e.ultTentativa || 0) >= URG_POLL_MS - 5000) {
                 e.ultTentativa = Date.now();
                 try {
@@ -1463,7 +1508,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                     if (err && err.code === 'login' && !e.sessaoAvisada) {
                         e.sessaoAvisada = true;
                         urgTela('⚠ Monitor de urgências parado', 'Sessão do PACS expirada — faça login para voltar a vigiar os TC urgentes.', 'aviso', 'pp-sessao');
-                        await ntfyEnviar({ titulo: '⚠ Sessão do PACS expirou', msg: 'O monitor de TC urgentes parou no computador do hospital. Faça login no PACS.', prio: 4, tags: 'warning' });
+                        await ntfyEnviar({ titulo: `⚠ Sessão do PACS expirou (${urgPcNome()})`, msg: `O ${urgPcNome()} parou de vigiar os TC urgentes. Se outro computador estiver com o PACS aberto, ele assume em ~2 min; senão, faça login no PACS.`, prio: 4, tags: 'warning' });
                     }
                 }
             }
@@ -3510,7 +3555,9 @@ ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}<
 ${abertos.length ? abertos.map(g => `<div>🚨 <b>${esc(g.nome)}</b> — ${esc(Object.values(g.exames || {}).map(y => y.d).join(' + '))} · vence <b>${hm(g.vence)}</b>${g.provisorio ? ' (provisório)' : ''}</div>`).join('') : '<div class="pp-muted">Nenhum TC urgente aberto agora.</div>'}
 ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-tela" ${u.tela ? 'checked' : ''}><span>Alerta na tela deste computador<small>Cartão no canto da tela, som e notificação do sistema.</small></span></label>
-<label class="pp-tog"><input type="checkbox" id="pp-u-cel" ${u.celular ? 'checked' : ''}><span>Enviar avisos ao celular a partir deste computador<small>Ligue em UM computador só: o do hospital, que fica com o PACS aberto na escala.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-u-cel" ${u.celular ? 'checked' : ''}><span>Enviar avisos ao celular a partir deste computador<small>Pode ligar em mais de um (ex.: Mac de casa sempre ligado + PC do hospital). Só um envia por vez; se ele parar ou a sessão do PACS expirar, o outro assume em ~2 min. Precisa do login da Agenda (🔐) nos dois e do MESMO tópico do ntfy.</small></span></label>
+${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' ? '📡 <b>Este computador (' + esc(urgPcNome()) + ') está enviando ao celular.</b>' : urgPapel === 'inicial' ? '⏳ verificando qual computador envia…' : urgPapel === 'reserva' ? '🛟 <b>Reserva</b> — quem envia agora: <b>' + esc(urgLiderNome || 'outro computador') + '</b>. Este assume se ele parar.' : '📡 Enviando sozinho' + (urgLeaseErro ? ' <span class="pp-warn">(' + esc(urgLeaseErro) + ' — se outro PC também enviar, os avisos chegam repetidos)</span>' : '')}</div>` : ''}
+<div class="pp-grid2"><label>Nome deste computador (aparece nos avisos)<input id="pp-u-nomepc" value="${esc(u.nomePc)}" placeholder="${esc(urgPcNome())}"></label><span></span></div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-teste" ${urgModoTeste() ? 'checked' : ''}><span>Modo teste (desliga sozinho em 2 h)<small>Além dos urgentes reais, vigia os pacientes TESTE de qualquer data, mesmo fora da escala. Marque um TC do paciente TESTE como urgente para testar.</small></span></label>
 <div class="pp-h">Sua escala — TC urgente fora dela é telelaudo (sem aviso, sem prazo)</div>
 <div class="pp-checks">${DIAS_SEM.map((n, i) => `<label><input type="checkbox" data-udia="${i}" ${dias.includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
@@ -3530,7 +3577,7 @@ ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</d
 <label class="pp-tog"><input type="checkbox" id="pp-u-poemerg" ${u.poEmergencia ? 'checked' : ''}><span>Emergência a partir de 15 min do prazo<small>Repete a cada 1 min até você confirmar no celular; para sozinho quando o laudo é liberado.</small></span></label>
 <div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-u-testar">Enviar teste</button></span><button class="pp-btn" id="pp-u-salvar">Salvar</button></div>
 <div class="pp-res" id="pp-u-res" style="display:none;"></div>
-<div class="pp-muted" style="margin-top:8px;">No PC do hospital: Chrome → Configurações → Desempenho → <b>Economia de memória</b> → “Sempre manter estes sites ativos” → adicione <b>pacs.ladi.org.br</b>; e não deixe o Windows hibernar no horário da escala. Nome de paciente nunca vai para o celular. Tópico e tokens ficam só neste computador.</div>`;
+<div class="pp-muted" style="margin-top:8px;">Em cada computador que vigia: Chrome → Configurações → Desempenho → <b>Economia de memória</b> → “Sempre manter estes sites ativos” → adicione <b>pacs.ladi.org.br</b>; não deixe o computador dormir/hibernar no horário da escala (Mac: Ajustes → Bateria/Energia → “Impedir repouso automático com a tela desligada”). Nome de paciente nunca vai para o celular. Tópico e tokens ficam só neste computador.</div>`;
         const $ = id => body.querySelector(id);
         const res = txt => { const r = $('#pp-u-res'); r.style.display = 'block'; r.innerHTML = txt; };
         const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
@@ -3551,7 +3598,7 @@ ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</d
             recarregarCfg();
             const antes = Object.assign({}, cfg.urg);
             const n = {
-                tela: $('#pp-u-tela').checked, celular: $('#pp-u-cel').checked, teste: $('#pp-u-teste').checked,
+                tela: $('#pp-u-tela').checked, celular: $('#pp-u-cel').checked, teste: $('#pp-u-teste').checked, nomePc: $('#pp-u-nomepc').value.trim().slice(0, 30),
                 testeAte: $('#pp-u-teste').checked ? (urgModoTeste() ? cfg.urg.testeAte : Date.now() + 2 * 3600000) : 0,
                 dias: [...body.querySelectorAll('[data-udia]')].filter(c => c.checked).map(c => c.dataset.udia).join(','),
                 inicio: hora($('#pp-u-ini').value, URG_PADRAO.inicio), fim: hora($('#pp-u-fim').value, URG_PADRAO.fim),

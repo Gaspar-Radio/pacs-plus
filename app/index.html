@@ -43,7 +43,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 .obs{font-size:12px;color:var(--mut);margin-top:3px;font-style:italic}
 .tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
 .tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:7px;background:var(--chip)}
-.tag.pref{background:#dbeafe;color:#1e40af}.tag.part{background:#fae8ff;color:#86198f}.tag.sus{background:#fee2e2;color:#991b1b}.tag.enc{background:#fef3c7;color:#92400e}
+.tag.urg{background:#dc2626;color:#fff}.tag.pref{background:#dbeafe;color:#1e40af}.tag.part{background:#fae8ff;color:#86198f}.tag.sus{background:#fee2e2;color:#991b1b}.tag.enc{background:#fef3c7;color:#92400e}
 @media (prefers-color-scheme:dark){.tag.pref{background:#1e3a8a;color:#bfdbfe}.tag.part{background:#581c87;color:#f5d0fe}.tag.sus{background:#7f1d1d;color:#fecaca}.tag.enc{background:#78350f;color:#fde68a}}
 .st{font-size:12px;font-weight:700;padding:3px 8px;border-radius:8px;white-space:nowrap;background:var(--chip)}
 .st.s30{background:#fef08a;color:#713f12}.st.s45{background:#fed7aa;color:#7c2d12}.st.s60{background:#fecaca;color:#7f1d1d}
@@ -74,6 +74,9 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 .tbl th{font-size:11px;text-transform:uppercase;color:var(--mut)}
 .tbl tr.hoje td{font-weight:700}
 .num{text-align:right!important}
+.chip.pdf{background:var(--pri);color:#fff;border-color:var(--pri)}
+.chk{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:15px}.chk input{width:22px;height:22px}
+.btnu{width:100%;padding:12px;border-radius:12px;background:#dc2626;color:#fff;font-weight:700;margin-top:8px}
 .kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .kpi{background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:10px}
 .kpi b{display:block;font-size:22px}.kpi span{font-size:12px;color:var(--mut)}
@@ -102,7 +105,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.0.0';
+const VERSAO = '1.1.0';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -276,6 +279,7 @@ function acaoAtend(id) { aplicar(id, r => {
 function acaoFalta(id) { aplicar(id, r => r.status === 'faltou'
     ? { status: 'pendente' }
     : { status: 'faltou', chegou_em: null, chegada_fonte: null, atendido_em: null, atendido_fonte: null, tempo_espera_min: null }); }
+function acaoUrgente(id) { aplicar(id, r => ({ urgente: !r.urgente, urgente_fonte: 'manual' })); }
 async function remover(id) {
     if (!confirm('Remover este paciente da agenda deste dia?')) return;
     S.linhas = S.linhas.filter(x => x.id !== id); fecharSheet(); pintarAgenda();
@@ -287,6 +291,7 @@ async function salvarEncaixe(f) {
     let tipo = 'Hospital/Convênio', convenio = origem.toUpperCase();
     if (origem === 'Prefeitura') { tipo = 'Prefeitura'; convenio = 'PREFEITURA'; } else if (origem.startsWith('SUS -')) { tipo = 'SUS Hospitalar'; convenio = origem; }
     const linha = { data_agenda: S.dia, hora, tipo, convenio: normConvenio(convenio), paciente, exame, status: 'pendente', origem: 'encaixe_manual', qtd_exames: Math.max(1, exame.split(' + ').length) };
+    if (f.urg && f.urg.checked) { linha.urgente = true; linha.urgente_fonte = 'manual'; }
     if (S.linhas.some(r => normTime(r.hora) === hora && normText(r.paciente) === paciente && normText(r.exame) === exame)) { toast('Já está agendado neste horário para este exame.'); return; }
     fecharSheet();
     try {
@@ -298,6 +303,117 @@ async function salvarEncaixe(f) {
         if (e.rede) { enfileirar({ t: 'insert', linha }); S.linhas.push(Object.assign({ id: -Date.now() }, linha)); pintarAgenda(); toast('Sem conexão: encaixe guardado, vai quando a internet voltar.'); }
         else toast(e.status === 409 ? 'Já existe esse paciente nesse horário/exame.' : 'Erro: ' + e.message, 4000);
     }
+}
+
+// ---------------------------------------------------------------- PDF (agenda do dia e números) — gerado no aparelho
+// jsPDF carregado sob demanda da CDN, com versão fixa e verificação de integridade (SRI).
+const PDF_LIBS = [
+    ['https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js', 'sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/'],
+    ['https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js', 'sha384-Xl/CUCfJbzsngMp0CFxkmF0VW/8C160IsGujqeQlIhaGxKz2+JsIGORFqtCPeldF']
+];
+let pdfLibP = null;
+function carregarPdfLib() {
+    if (window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API.autoTable) return Promise.resolve();
+    if (pdfLibP) return pdfLibP;
+    pdfLibP = PDF_LIBS.reduce((p, [src, sri]) => p.then(() => new Promise((ok, er) => {
+        const sc = document.createElement('script'); sc.src = src; sc.integrity = sri; sc.crossOrigin = 'anonymous';
+        sc.onload = ok; sc.onerror = () => er(new Error('sem internet para gerar o PDF')); document.head.appendChild(sc);
+    })), Promise.resolve()).catch(e => { pdfLibP = null; throw e; });
+    return pdfLibP;
+}
+const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+const DIAS_EXT = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+const fmtMes = iso => { const [y, m] = String(iso).split('-').map(Number); return `${MESES[m - 1].slice(0, 3)}/${String(y).slice(2)}`; };
+const diaExt = iso => { const [y, m, d] = iso.split('-').map(Number); const dt = new Date(y, m - 1, d); return `${DIAS_EXT[dt.getDay()]}, ${d} de ${MESES[m - 1]} de ${y}`; };
+const agoraTxt = () => { const d = new Date(); return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function pdfNovo(titulo, sub) {
+    const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4' });
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.text(titulo, 14, 16);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(90); doc.text(sub, 14, 22); doc.setTextColor(0);
+    return doc;
+}
+function pdfRodape(doc, aviso) {
+    const n = doc.getNumberOfPages();
+    for (let i = 1; i <= n; i++) {
+        doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120);
+        doc.text(`${aviso} · gerado em ${agoraTxt()} · Agenda US`, 14, 290);
+        doc.text(`${i}/${n}`, 196, 290, { align: 'right' }); doc.setTextColor(0);
+    }
+}
+async function pdfCompartilhar(doc, nome, titulo) {
+    const blob = doc.output('blob');
+    const file = new File([blob], nome, { type: 'application/pdf' });
+    const tentar = async () => { await navigator.share({ files: [file], title: titulo }); };
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await tentar(); return; } catch (e) {
+            if (e && e.name === 'AbortError') return;
+            // o iPhone exige um toque "fresco" para abrir o compartilhar: oferece o botão
+            abrirSheet(`<h3>PDF pronto</h3><div class="tl">${esc(nome)}</div><button class="btnp" id="shr">Compartilhar (WhatsApp, e-mail…)</button><button class="btns" id="fec">Fechar</button>`);
+            $('#shr').onclick = async () => { try { await tentar(); fecharSheet(); } catch (x) { if (!x || x.name !== 'AbortError') toast('Não deu para compartilhar: ' + (x && x.message || x)); } };
+            $('#fec').onclick = fecharSheet; return;
+        }
+    }
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+const SIT = { pendente: '', esperando: 'Em espera', atendido: 'Atendido', faltou: 'Faltou' };
+async function pdfAgenda() {
+    try { await carregarPdfLib(); } catch (e) { toast(e.message, 3500); return; }
+    const dia = S.dia, ativos = S.linhas.filter(r => r.status !== 'cancelado');
+    if (!ativos.length) { toast('Nenhum paciente neste dia.'); return; }
+    const comSit = dia <= hojeIso();
+    const npac = new Set(ativos.map(chavePac)).size, nproc = ativos.reduce((a, r) => a + proc(r), 0);
+    const doc = pdfNovo('Agenda de Ultrassom', `${diaExt(dia)}  ·  ${npac} pacientes · ${nproc} procedimentos`);
+    const linha = r => {
+        const ex = r.exame + (proc(r) > 1 ? ` (${proc(r)} proc.)` : '') + (r.obs ? `\nObs.: ${r.obs}` : '');
+        const conv = String(r.convenio || '') + (r.urgente ? `\nURGÊNCIA${r.setor && !String(r.convenio || '').toUpperCase().includes(String(r.setor).toUpperCase()) ? ' · ' + r.setor : ''}` : '');
+        const base = [normTime(r.hora), r.paciente, ex, conv];
+        if (comSit) base.push(SIT[r.status || 'pendente'] || '');
+        return base;
+    };
+    const head = [['Hora', 'Paciente', 'Exame', 'Convênio / setor'].concat(comSit ? ['Situação'] : [])];
+    let y = 28;
+    for (const [tit, arr] of [['Manhã', ativos.filter(r => normTime(r.hora) < '12:00')], ['Tarde', ativos.filter(r => normTime(r.hora) >= '12:00')]]) {
+        if (!arr.length) continue;
+        const np = new Set(arr.map(chavePac)).size, nq = arr.reduce((a, r) => a + proc(r), 0);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text(`${tit} — ${np} pacientes · ${nq} procedimentos`, 14, y + 4);
+        doc.autoTable({
+            startY: y + 6, head, body: arr.map(linha), theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 8.6, cellPadding: 1.6, valign: 'middle', lineColor: [205, 210, 218], lineWidth: 0.15 },
+            headStyles: { fillColor: [30, 41, 59], textColor: 255, fontSize: 8.4 },
+            columnStyles: comSit ? { 0: { cellWidth: 13, fontStyle: 'bold' }, 1: { cellWidth: 52 }, 3: { cellWidth: 34 }, 4: { cellWidth: 19 } } : { 0: { cellWidth: 13, fontStyle: 'bold' }, 1: { cellWidth: 58 }, 3: { cellWidth: 38 } },
+            didParseCell: d => { if (d.section === 'body' && d.column.index === 3 && /URGÊNCIA/.test(String(d.cell.raw))) d.cell.styles.textColor = [185, 28, 28]; },
+            margin: { left: 14, right: 14 }
+        });
+        y = doc.lastAutoTable.finalY + 6;
+        if (y > 260) { doc.addPage(); y = 14; }
+    }
+    pdfRodape(doc, 'Documento interno com dados de pacientes — não repassar');
+    await pdfCompartilhar(doc, `Agenda US ${dia.split('-').reverse().join('-')}.pdf`, `Agenda de Ultrassom — ${fmtDia(dia)}`);
+}
+async function pdfAnalytics() {
+    const a = S.an; if (!a) { toast('Aguarde carregar os números.'); return; }
+    try { await carregarPdfLib(); } catch (e) { toast(e.message, 3500); return; }
+    const doc = pdfNovo('Faltas, espera e urgências — Ultrassom', `Situação em ${agoraTxt()} · dias encerrados (até ontem)`);
+    const tab = (titulo, head, body, y) => {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text(titulo, 14, y + 4);
+        doc.autoTable({ startY: y + 6, head: [head], body, theme: 'striped', styles: { fontSize: 9, cellPadding: 1.6 }, headStyles: { fillColor: [30, 41, 59] }, margin: { left: 14, right: 14 },
+            columnStyles: Object.fromEntries(head.map((h, i) => [i, i ? { halign: 'right' } : {}])) });
+        return doc.lastAutoTable.finalY + 6;
+    };
+    let y = 28;
+    y = tab('Resumo (30 dias)', ['Indicador', 'Valor'], [
+        ['Pacientes com desfecho', String(a.pac)], ['Faltas', `${a.fal} (${a.pac ? Math.round(a.fal / a.pac * 100) : 0}%)`],
+        ['Procedimentos perdidos', String(a.perd)], ['Espera média', fmtMin(a.media)], ['Esperas acima de 60 min', String(a.acima60)]], y);
+    y = tab('Faltas por convênio (30 dias)', ['Convênio', 'Faltas', 'Pacientes', '%'], (a.conv || []).map(r => [r.convenio, r.faltas, r.pacientes, `${r.taxa_noshow_pct ?? 0}%`]), y);
+    y = tab('Faltas por faixa horária (30 dias)', ['Faixa', 'Faltas', 'Agendados', '%'], (a.hora || []).map(r => [`${String(r.faixa || '').slice(0, 2)}h · ${r.periodo || ''}`, r.faltas, r.agendados, `${r.taxa_noshow_pct ?? 0}%`]), y);
+    y = tab('Faltas por dia da semana (90 dias)', ['Dia', 'Faltas', 'Agendados', '%'], (a.dia || []).map(r => [r.dia, r.faltas, r.agendados, `${r.taxa_noshow_pct ?? 0}%`]), y);
+    if ((a.urgM || []).length) {
+        y = tab('Urgências — exames realizados', ['Mês', 'Pacientes', 'Urgências', '% urgência', 'Proc. urgência'], a.urgM.map(r => [fmtMes(r.mes), r.pacientes, r.pacientes_urgencia, `${r.pct_pacientes_urgencia ?? 0}%`, r.procedimentos_urgencia]), y);
+        if ((a.urgS || []).length) y = tab('Urgências por setor', ['Mês · setor', 'Origem', 'Pacientes', 'Proc.'], a.urgS.map(r => [`${fmtMes(r.mes)} · ${r.setor}`, { sus: 'regra SUS', pacs: 'PACS', manual: 'manual' }[r.fonte] || r.fonte, r.pacientes, r.procedimentos]), y);
+    }
+    pdfRodape(doc, 'Números agregados, sem identificação de pacientes');
+    await pdfCompartilhar(doc, `Faltas e urgencias US ${hojeIso().split('-').reverse().join('-')}.pdf`, 'Faltas, espera e urgências — Ultrassom');
 }
 
 // ---------------------------------------------------------------- tempo real (Supabase Realtime)
@@ -387,6 +503,7 @@ function cardHtml(r, nProc) {
     if (r.origem === 'encaixe_pacs' || r.origem === 'encaixe_manual') tags.push('<span class="tag enc">ENCAIXE</span>');
     if (r.pacs_paciente_id > 0) tags.push(`<span class="tag">🔗 ${r.chegou_em ? hm(r.chegou_em) : 'PACS'}</span>`);
     if (r.removido_origem_em && s !== 'cancelado') tags.push('<span class="tag sus">⚠ SAIU</span>');
+    if (r.urgente) tags.unshift(`<span class="tag urg">🚨 URGÊNCIA${r.setor ? ' · ' + esc(r.setor) : ''}</span>`);
     return `<div class="card ${s}" data-id="${r.id}">
 <div class="row1" data-det="${r.id}"><div class="hora">${esc(normTime(r.hora))}</div><div class="who"><div class="pac">${esc(r.paciente)}</div><div class="ex">${esc(r.exame)}</div>${r.obs ? `<div class="obs">📝 ${esc(r.obs)}</div>` : ''}<div class="tags">${tags.join('')}</div></div>${statusHtml(r)}</div>
 ${s === 'cancelado' ? `<div class="acts"><button class="b" data-a="chegou" data-id="${r.id}">Chegou</button><span></span><span></span></div>` : `<div class="acts">
@@ -402,14 +519,16 @@ function pintarAgenda() {
     const m = L.filter(r => normTime(r.hora) < '12:00'), t = L.filter(r => normTime(r.hora) >= '12:00');
     const st = arr => { const a = arr.filter(r => r.status !== 'cancelado'); return `${new Set(a.map(chavePac)).size} pac · ${a.reduce((x, r) => x + proc(r), 0)} proc`; };
     const esp = L.filter(r => r.status === 'esperando').map(r => minutos(r.chegou_em) || 0);
-    tela.innerHTML = `<div class="chips">
+    tela.innerHTML = `<div class="chips">${L.length ? '<button class="chip pdf" id="pdfdia">📄 PDF</button>' : ''}
 <span class="chip">👤 ${new Set(ativos.map(chavePac)).size}</span><span class="chip">🧾 ${ativos.reduce((a, r) => a + proc(r), 0)}</span>
-<span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${cnt('cancelado') ? `<span class="chip">⊘ ${cnt('cancelado')}</span>` : ''}</div>
+<span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${cnt('cancelado') ? `<span class="chip">⊘ ${cnt('cancelado')}</span>` : ''}${ativos.some(r => r.urgente) ? `<span class="chip">🚨 ${new Set(ativos.filter(r => r.urgente).map(chavePac)).size}</span>` : ''}</div>
 <main>${!L.length ? `<div class="vazio">${S.carregando ? 'Carregando…' : 'Nenhum paciente neste dia.'}</div>` : `
 ${m.length ? `<h2><span>Manhã</span><span>${st(m)}</span></h2>${m.map(r => cardHtml(r, porPac[chavePac(r)])).join('')}` : ''}
 ${t.length ? `<h2><span>Tarde</span><span>${st(t)}</span></h2>${t.map(r => cardHtml(r, porPac[chavePac(r)])).join('')}` : ''}`}</main>`;
     tela.querySelectorAll('[data-a]').forEach(b => { b.onclick = e => { e.stopPropagation(); const id = Number(b.dataset.id); ({ chegou: acaoChegou, atend: acaoAtend, falta: acaoFalta })[b.dataset.a](id); }; });
     tela.querySelectorAll('[data-det]').forEach(d => { d.onclick = () => abrirDetalhe(Number(d.dataset.det)); });
+    const bp = $('#pdfdia'); if (bp) bp.onclick = () => pdfAgenda();
+    if (L.length) carregarPdfLib().catch(() => {}); // deixa pronto para o toque no PDF
 }
 function abrirSheet(html) { const s = $('#sheet'); s.innerHTML = html; $('#sheetbg').style.display = 'block'; requestAnimationFrame(() => s.classList.add('open')); }
 function fecharSheet() { $('#sheet').classList.remove('open'); $('#sheetbg').style.display = 'none'; }
@@ -425,8 +544,11 @@ ${r.obs ? `<div class="tl"><span>Obs.:</span> ${esc(r.obs)}</div>` : ''}
 <div class="tl"><span>Chegada:</span> ${hm(r.chegou_em)} ${r.chegou_em ? `(${r.chegada_fonte === 'pacs' ? 'ficha PACS' : 'clique'})` : ''}</div>
 <div class="tl"><span>Imagens no PACS:</span> ${hm(r.imagem_em)}</div>
 <div class="tl"><span>Atendido:</span> ${hm(r.atendido_em)} ${r.atendido_em ? `(${r.atendido_fonte === 'imagem' ? 'pela imagem' : 'clique'})` : ''}${r.tempo_espera_min != null ? ` · espera ${fmtMin(r.tempo_espera_min)}` : ''}</div>
+<div class="tl"><span>Urgência:</span> ${r.urgente ? `<b style="color:#dc2626">sim</b> (${esc({ sus: 'SUS hospitalar', pacs: 'marcado no PACS', manual: 'marcado à mão' }[r.urgente_fonte] || r.urgente_fonte || '—')})` : 'não'}${r.setor ? ` · setor: ${esc(r.setor)}` : ''}</div>
+<button class="${r.urgente ? 'btns' : 'btnu'}" id="urg">${r.urgente ? 'Retirar urgência' : '🚨 Marcar como urgência'}</button>
 <button class="btnd" id="rem">Remover da agenda</button><button class="btns" id="fec">Fechar</button>`);
     $('#rem').onclick = () => remover(id); $('#fec').onclick = fecharSheet;
+    $('#urg').onclick = () => { fecharSheet(); acaoUrgente(id); };
 }
 function abrirEncaixe() {
     const d = new Date(); const h = `${pad(d.getHours())}:${pad(Math.floor(d.getMinutes() / 5) * 5)}`;
@@ -435,6 +557,8 @@ function abrirEncaixe() {
 <label>Origem</label><select name="origem">${['Prefeitura', 'SUS - Pronto Socorro', 'SUS - UTI', 'SUS - Internado', 'SUS - Maternidade', 'Convênio', 'Particular', 'Social'].map(o => `<option>${o}</option>`).join('')}</select>
 <label>Paciente</label><input name="paciente" autocomplete="off" autocapitalize="characters" required>
 <label>Exame</label><input name="exame" autocomplete="off" autocapitalize="characters" placeholder="ex.: USG ABDOME TOTAL + USG PROSTATA">
+<label class="chk"><input type="checkbox" name="urg"> 🚨 Encaixe de urgência</label>
+<div class="note">SUS (PS, internado, UTI, maternidade) já conta como urgência automaticamente.</div>
 <button class="btnp" type="submit">Lançar encaixe</button><button class="btns" type="button" id="fec">Cancelar</button></form>`);
     $('#fec').onclick = fecharSheet;
     $('#fenc').onsubmit = e => { e.preventDefault(); salvarEncaixe(e.target); };
@@ -455,17 +579,25 @@ async function telaAnalytics() {
     const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
     try {
         const d0 = somaDias(hojeIso(), -30);
-        const [conv, hora, dia, espera] = await Promise.all([api('vw_noshow_convenio_30d?select=*'), api('vw_noshow_horario_30d?select=*'), api('vw_noshow_dia_semana_90d?select=*'), api(`vw_espera_diaria?select=*&data_agenda=gte.${d0}`)]);
+        const m0 = somaDias(hojeIso(), -95).slice(0, 8) + '01';
+        const [conv, hora, dia, espera, urgM, urgS] = await Promise.all([api('vw_noshow_convenio_30d?select=*'), api('vw_noshow_horario_30d?select=*'), api('vw_noshow_dia_semana_90d?select=*'), api(`vw_espera_diaria?select=*&data_agenda=gte.${d0}`),
+            api(`vw_urgencias_mes?select=*&mes=gte.${m0}&order=mes.desc`).catch(() => []), api(`vw_urgencias_setor?select=*&mes=gte.${m0}&order=mes.desc,pacientes.desc`).catch(() => [])]);
         if (S.tab !== 'analytics') return;
         const soma = (a, c) => (a || []).reduce((x, r) => x + (Number(r[c]) || 0), 0);
         const pac = soma(conv, 'pacientes'), fal = soma(conv, 'faltas'), perd = soma(conv, 'procedimentos_perdidos');
         const nEsp = soma(espera, 'atendidos_com_tempo'), media = nEsp ? Math.round((espera || []).reduce((x, r) => x + (Number(r.atendidos_com_tempo) || 0) * (Number(r.espera_media_min) || 0), 0) / nEsp) : null;
         const barras = (rows, tit) => `<h2><span>${tit}</span></h2><div class="card">${rows.map(r => `<div style="margin:6px 0"><div style="display:flex;justify-content:space-between;font-size:14px"><span>${esc(r.k)}</span><span><b>${r.f}</b>/${r.t} · ${r.p ?? 0}%</span></div><div class="bar"><i style="width:${Math.min(100, Number(r.p) || 0)}%"></i></div></div>`).join('') || '<div class="vazio">Sem dados</div>'}</div>`;
-        tela.innerHTML = `<main><div class="kpis"><div class="kpi"><b>${pac}</b><span>Pacientes com desfecho (30 d)</span></div><div class="kpi"><b style="color:var(--er)">${fal} (${pac ? Math.round(fal / pac * 100) : 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${perd}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(media)}</b><span>Espera média (${soma(espera, 'acima_60min')} acima de 60 min)</span></div></div>
+        S.an = { conv, hora, dia, espera, urgM, urgS, pac, fal, perd, media, acima60: soma(espera, 'acima_60min') };
+        carregarPdfLib().catch(() => {});
+        const urgHtml = (urgM || []).length ? `<h2><span>Urgências (exames realizados)</span></h2><table class="tbl"><tr><th>Mês</th><th class="num">Pac.</th><th class="num">Urg.</th><th class="num">%</th><th class="num">Proc. urg.</th></tr>${urgM.map(r => `<tr><td>${fmtMes(r.mes)}</td><td class="num">${r.pacientes}</td><td class="num">${r.pacientes_urgencia}</td><td class="num">${r.pct_pacientes_urgencia ?? 0}%</td><td class="num">${r.procedimentos_urgencia}</td></tr>`).join('')}</table>
+<div class="card" style="margin-top:8px">${(urgS || []).filter(r => r.mes === (urgM[0] || {}).mes).map(r => `<div class="tl">${esc(r.setor)} <span>· ${esc({ sus: 'regra SUS', pacs: 'PACS', manual: 'manual' }[r.fonte] || r.fonte)}</span> — <b>${r.pacientes}</b> pac. / ${r.procedimentos} proc.</div>`).join('') || '<div class="vazio">Nenhuma urgência no mês</div>'}</div>` : '';
+        tela.innerHTML = `<main><button class="btnp" id="pdfan" style="margin:4px 0 10px">📄 Gerar PDF para compartilhar</button><div class="kpis"><div class="kpi"><b>${pac}</b><span>Pacientes com desfecho (30 d)</span></div><div class="kpi"><b style="color:var(--er)">${fal} (${pac ? Math.round(fal / pac * 100) : 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${perd}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(media)}</b><span>Espera média (${soma(espera, 'acima_60min')} acima de 60 min)</span></div></div>
 ${barras((conv || []).map(r => ({ k: r.convenio, f: r.faltas, t: r.pacientes, p: r.taxa_noshow_pct })), 'Faltas por convênio (30 d)')}
 ${barras((hora || []).map(r => ({ k: `${String(r.faixa || '').slice(0, 2)}h · ${r.periodo || ''}`, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por faixa horária (30 d)')}
 ${barras((dia || []).map(r => ({ k: r.dia, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por dia da semana (90 d)')}
-<div class="note">Dias encerrados (até ontem). Mesmo cálculo da aba Analytics dos PCs (views do banco).</div></main>`;
+${urgHtml}
+<div class="note">Faltas: dias encerrados (até ontem). Urgências: exames realizados; SUS hospitalar conta automaticamente, os demais pelo PACS ou marcados à mão. Mesmo cálculo dos PCs (views do banco).</div></main>`;
+        $('#pdfan').onclick = () => pdfAnalytics();
     } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
 }
 async function telaConsulta() {
