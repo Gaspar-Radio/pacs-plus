@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.14.0
+// @version      1.14.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2369,7 +2369,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (/sem contraste/.test(ex)) { const i = tl.search(/apos (a )?(injecao|administracao)|contraste (iodado )?(endovenoso|intravenoso)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|realce (pelo|ao|apos o) (meio de )?contraste/); if (i >= 0) add('exame_texto', 'grave', i, 'Exame SEM contraste, mas o texto descreve uso de contraste/fases.', 'Conferir técnica e matriz.'); }
         if (/com contraste/.test(ex)) { const i = tl.search(/sem (a )?(injecao|uso|administracao) (de|do) (meio de )?contraste|\bsem contraste\b/); if (i >= 0) add('exame_texto', 'atencao', i, 'Exame COM contraste, mas o texto diz “sem contraste”.', 'Conferir técnica.'); }
         // unidades implausíveis
-        const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)\b(?!\s*\/\s*s)/gi; let u;
+        const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![³²0-9a-z])(?!\s*\/\s*s)/gi; // não pega cm³/cm²/cm3/cm/s let u;
         while ((u = reU.exec(t))) { const v = numBR(u[1]), un = u[2].toLowerCase(); if ((un === 'cm' && v > 40) || (un === 'mm' && v > 300)) { add('medidas', 'atencao', u.index, `Medida implausível: ${u[0]}.`, 'Conferir a unidade (mm × cm).'); break; } }
         // volume × dimensões
         const reV = /(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*(cm|mm)\b[^.\n]{0,90}?(\d+(?:[.,]\d+)?)\s*(cm³|cm3|ml|cc)/gi; let v;
