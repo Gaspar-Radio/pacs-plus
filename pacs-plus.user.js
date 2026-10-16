@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.15.0
+// @version      1.16.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2372,6 +2372,89 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         return texto.slice(ini, fim).trim().slice(0, 160);
     }
     const CRITICOS = ['pneumoperitonio', 'pneumotorax hipertensivo', 'disseccao', 'tromboembolismo pulmonar', 'embolia pulmonar', 'hemorragia subaracnoide', 'hemorragia intraparenquimatosa', 'hematoma subdural', 'hematoma extradural', 'hematoma epidural', 'hemorragia intracraniana', 'torcao testicular', 'torcao ovariana', 'torcao anexial', 'gestacao ectopica', 'gravidez ectopica', 'aneurisma roto', 'ruptura de aneurisma', 'isquemia mesenterica', 'trombose venosa profunda', 'apendicite perfurada', 'herniacao', 'desvio da linha media'];
+    // ---------- Referências do serviço (tabela Bersch validada + ESUR-SPIWG 2024 para testículo) ----------
+    // Regra: só confere a medida que está escrita; se a medida não foi informada, não diz nada.
+    // Aponta (atenção) quando o valor está fora da referência e a alteração não aparece na frase nem na impressão,
+    // ou quando o laudo afirma uma alteração que a própria medida não sustenta (campo "inv").
+    const MED_RE = /(\d+(?:[.,]\d+)?(?:\s*[x×]\s*\d+(?:[.,]\d+)?){0,2})\s*(cm³|cm3|ml|mL|cc|mm²|mm2|cm²|cm2|cm|mm)(?![a-z0-9²³])/i;
+    const BLOQ_REF = /cist|n[óo]dul|c[áa]lcul|les[ãa]o|imagem|forma[çc][ãa]o|massa|cole[çc][ãa]o|par[êe]nquima|cortical|cortex|c[óo]rtex|pelve|pielo|espessura|parede|ectasi|dilata|abscess|linfonod|hemangiom|calcifica|fluxo|velocidade|[íi]ndice/i;
+    const ehEx = (c, re) => re.test(norm(c.exame));
+    const REFS_SERVICO = [
+        { nome: 'Rim', org: '\\brim (?:direito|esquerdo)\\b', tipo: 'lin', pega: 'max', un: 'cm', min: 9, max: 13, ref: '9–13 cm', gap: 220,
+          alt: /aumentad|reduzid|nefromegalia|atr[óo]fic|redu[çc][ãa]o (?:volum|dimens)|dimens[õo]es (?:aumentadas|reduzidas)|assim[ée]tric|pequeno|transplant|rim [úu]nico|vic[áa]ri|hipertrofia compensat/i },
+        { nome: 'Baço', org: '\\bba[çc]o\\b', tipo: 'lin', pega: 'max', un: 'cm', max: 12, ref: 'até 12 cm (longitudinal)', gap: 160, alt: /esplenomegalia|aumentad|limite superior/i },
+        { nome: 'Lobo hepático direito', org: '\\blobo (?:hep[áa]tico )?direito\\b', tipo: 'lin', pega: 'first', un: 'cm', max: 15, ref: '≤ 15 cm', ex: /abdom|figado|hepat|superior/, nex: /tireo|tiroi|pulm|torax/, alt: /hepatomegalia|aumentad|limite superior/i },
+        { nome: 'Lobo hepático esquerdo', org: '\\blobo (?:hep[áa]tico )?esquerdo\\b', tipo: 'lin', pega: 'first', un: 'cm', max: 10, ref: '≤ 10 cm', ex: /abdom|figado|hepat|superior/, nex: /tireo|tiroi|pulm|torax/, alt: /hepatomegalia|aumentad|limite superior/i },
+        { nome: 'Hepatocolédoco', org: '\\b(?:hepatocol[ée]doco|col[ée]doco|via biliar principal)\\b', tipo: 'lin', pega: 'first', un: 'mm', maxFn: c => (c.idade > 60 ? Math.min(10, 6 + Math.floor((c.idade - 60) / 10)) : 6), ref: '≤ 6 mm (+1 mm/década após 60 anos, máx. 10)', bloq: /cist|n[óo]dul|c[áa]lcul|les[ãa]o|imagem|massa/i,
+          alt: /dilata|ectasi|aumentad|colecistectom|coledocolit|obstru/i, inv: /dilata[çc][ãa]o (?:das vias biliares|do (?:hepato)?col[ée]doco)|col[ée]doco dilatado|hepatocol[ée]doco dilatado/i },
+        { nome: 'Veia porta', org: '\\bve(?:ia)? porta\\b', tipo: 'lin', pega: 'first', un: 'mm', max: 12, ref: '≤ 12 mm', bloq: /trombo|velocidade|fluxo/i, alt: /hipertens[ãa]o portal|dilata|ectasi|aumentad/i },
+        { nome: 'Parede da vesícula', org: '\\bparedes? (?:da )?(?:ves[íi]cula|vesicular)\\b|\\bves[íi]cula biliar[^.;\\n]{0,60}?paredes?', tipo: 'lin', pega: 'first', un: 'mm', max: 3, ref: '≤ 3 mm', bloq: /c[áa]lcul|p[óo]lip|les[ãa]o|imagem/i, alt: /espessad|colecistite|edema|contra[íi]da|colabad|p[óo]s-?prandial|jejum/i },
+        { nome: 'Wirsung', org: '\\b(?:wirsung|ducto pancre[áa]tico(?: principal)?)\\b', tipo: 'lin', pega: 'first', un: 'mm', max: 2, ref: '≤ 2 mm', alt: /dilata|ectasi|proeminente|aumentad/i },
+        { nome: 'Aorta abdominal', org: '\\baorta(?: abdominal)?\\b', tipo: 'lin', pega: 'max', un: 'mm', max: 30, ref: 'aneurisma > 30 mm', grupo: 'aorta', ex: /abdom|aort|retroperit|doppler/, alt: /aneurism/i, inv: /aneurisma (?:da )?aorta|aneurisma fusiforme|aneurisma sacular/i },
+        { nome: 'Aorta abdominal', org: '\\baorta(?: abdominal)?\\b', tipo: 'lin', pega: 'max', un: 'mm', max: 24, ref: 'ectasia 24–30 mm', grupo: 'aorta', ex: /abdom|aort|retroperit|doppler/, alt: /ect[áa]si|aneurism|dilata/i },
+        { nome: 'Próstata (volume)', org: '\\bpr[óo]stata\\b', tipo: 'vol', pega: 'first', un: 'cm³', max: 30, ref: '< 30 cm³', gap: 220, alt: /aumentad|hiperplasia|hpb|prostatomegalia|volume aumentado/i },
+        { nome: 'Tireoide (volume total)', org: '\\bvolume (?:total|glandular|tireoidiano)|\\bvolume (?:da )?(?:gl[âa]ndula|tire[óo]ide)', tipo: 'vol', pega: 'first', un: 'cm³', min: 6, max: 15, ref: '6–15 cm³ (adulto)', adulto: true, ex: /tireo|tiroi|cervical|pescoc/, alt: /b[óo]cio|aumentad|reduzid|atr[óo]fi|redu[çc][ãa]o volum/i },
+        { nome: 'Apêndice', org: '\\bap[êe]ndice(?: cecal| vermiforme)?\\b', tipo: 'lin', pega: 'first', un: 'mm', max: 6, ref: '≤ 6 mm', bloq: /apendicol|c[áa]lcul|les[ãa]o|cole[çc]/i, alt: /apendicite|espessad|aumentad|distendid|inflama/i },
+        { nome: 'Nervo mediano (área)', org: '\\bnervo mediano\\b', tipo: 'area', pega: 'first', un: 'mm²', max: 10, maxBifido: 12, ref: '≤ 10 mm² (12 mm² se bífido)', gap: 220, bloq: /^$/, alt: /neuropatia|t[úu]nel do carpo|espessad|aumentad|edema|compress/i },
+        { nome: 'Nervo ulnar (área)', org: '\\bnervo ulnar\\b', tipo: 'area', pega: 'first', un: 'mm²', max: 9, ref: '≤ 9 mm² (cotovelo)', gap: 220, bloq: /^$/, alt: /neuropatia|t[úu]nel cubital|espessad|aumentad|edema|compress|subluxa/i },
+        { nome: 'Testículo (volume)', org: '\\btest[íi]culo (?:direito|esquerdo)\\b', tipo: 'vol', pega: 'first', un: 'cm³', minLado: { direito: 12, esquerdo: 11 }, ref: 'hipotrofia: direito < 12 mL, esquerdo < 11 mL (ESUR-SPIWG 2024, elipsoide 0,52)', adulto: true, gap: 220, alt: /hipotrof|atr[óo]fi|reduzid|pequen|hipoplas|redu[çc][ãa]o volum/i },
+        { nome: 'ILA', org: '\\b(?:ila|[íi]ndice de l[íi]quido amni[óo]tico)\\b', tipo: 'lin', pega: 'first', un: 'cm', min: 5, max: 24, ref: '5–24 cm', ex: /obst|gesta|morfol|perfil biof/, bloq: /^$/, alt: /oligo[âa]mni|oligodr|polidr|poli-?h?idr|reduzid|aumentad/i },
+        { nome: 'Maior bolsão vertical', org: '\\bmaior bols[ãa]o(?: vertical)?\\b', tipo: 'lin', pega: 'first', un: 'cm', min: 2, max: 8, ref: '2–8 cm', ex: /obst|gesta|morfol|perfil biof/, bloq: /^$/, alt: /oligo[âa]mni|oligodr|polidr|poli-?h?idr|reduzid|aumentad/i },
+        { nome: 'Colo uterino (cervicometria)', org: '\\b(?:colo uterino|comprimento (?:do colo|cervical)|cervicometria)\\b', tipo: 'lin', pega: 'first', un: 'mm', min: 25, ref: '≥ 25 mm', ex: /obst|gesta|morfol|cervicom/, bloq: /^$/, alt: /curto|encurt|incompet|afunil|risco (?:aumentado )?de (?:parto )?prematur/i }
+    ];
+    function refsServico(c, t, imp) {
+        const out = [], grupos = new Set();
+        const ex = norm(c.exame);
+        REFS_SERVICO.forEach(r => {
+            if (r.ex && !r.ex.test(ex)) return;
+            if (r.nex && r.nex.test(ex)) return;
+            if (r.adulto && !(c.idade >= 18)) return;
+            if (r.grupo && grupos.has(r.grupo)) return;
+            const reO = new RegExp(r.org, 'gi'); let m;
+            while ((m = reO.exec(t))) {
+                const ini = m.index + m[0].length;
+                let resto = t.slice(ini, ini + (r.gap || 120));
+                const fim = resto.search(/\.(?:\s|$)|;|\n/); if (fim >= 0) resto = resto.slice(0, fim);
+                // acha a primeira medida do TIPO certo (linear/área/volume) depois do órgão
+                let mm = null, base = 0;
+                while (base < resto.length) {
+                    const x = MED_RE.exec(resto.slice(base)); if (!x) break;
+                    const u = x[2].toLowerCase(), tp = /³|3|ml|cc/.test(u) ? 'vol' : /²|2/.test(u) ? 'area' : 'lin';
+                    if (tp === r.tipo) { mm = { m: x, idx: base + x.index, u }; break; }
+                    if (r.tipo === 'lin') break; // linear: a primeira medida tem de ser a do órgão
+                    base += x.index + x[0].length;
+                }
+                if (!mm) continue;
+                const antes = resto.slice(0, mm.idx);
+                if ((r.bloq || BLOQ_REF).test(antes)) continue;
+                const nums = mm.m[1].split(/\s*[x×]\s*/).map(numBR).filter(Number.isFinite);
+                if (!nums.length) continue;
+                let v = r.pega === 'max' ? Math.max(...nums) : nums[0];
+                const u = mm.u;
+                if (r.tipo === 'lin') { if (r.un === 'cm' && u === 'mm') v /= 10; if (r.un === 'mm' && u === 'cm') v *= 10; }
+                if (r.tipo === 'area') { if (r.un === 'mm²' && /cm/.test(u)) v *= 100; }
+                const frase = t.slice(Math.max(0, t.lastIndexOf('\n', m.index), t.lastIndexOf('. ', m.index) + 1), ini + resto.length);
+                let max = r.maxFn ? r.maxFn(c) : r.max, min = r.min;
+                if (r.maxBifido && /b[íi]fido/i.test(frase)) max = r.maxBifido;
+                if (r.minLado) { const lado = /direito/i.test(m[0]) ? 'direito' : 'esquerdo'; min = r.minLado[lado]; }
+                const acima = max != null && v > max + 1e-9, abaixo = min != null && v < min - 1e-9;
+                const citado = r.alt.test(frase) || r.alt.test(imp);
+                const val = `${String(mm.m[1]).trim()} ${mm.m[2]}`;
+                if ((acima || abaixo) && !citado) {
+                    out.push({ cat: 'medidas', idx: m.index, msg: `${r.nome}: ${val} está ${acima ? 'acima' : 'abaixo'} da referência do serviço — ${r.ref} — e a alteração não aparece descrita nem na impressão.`, sug: 'Conferir a medida ou citar a alteração.' });
+                    if (r.grupo) grupos.add(r.grupo);
+                    break;
+                }
+                if (!acima && !abaixo && r.inv && (r.inv.test(frase) || r.inv.test(imp))) {
+                    out.push({ cat: 'corpo_conclusao', idx: m.index, msg: `${r.nome}: o laudo descreve alteração, mas a medida informada (${val}) está dentro da referência — ${r.ref}.`, sug: 'Conferir a medida ou o termo usado.' });
+                    if (r.grupo) grupos.add(r.grupo);
+                    break;
+                }
+                if (r.grupo && (acima || abaixo)) { grupos.add(r.grupo); break; }
+            }
+        });
+        return out;
+    }
     function regrasLaudo(c) {
         const t = c.texto, tn = norm(t), ex = norm(c.exame), out = [];
         const add = (categoria, gravidade, idx, explicacao, sugestao) => { const it = { categoria, gravidade, trecho: idx >= 0 ? frase(t, idx) : '', explicacao, sugestao: sugestao || '', fontes: ['regra'] }; out.push(it); return it; };
@@ -2462,6 +2545,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         let gr;
         if ((gr = /esteatose[^.\n]{0,60}?(?:grau\s*(?:ii|iii|2|3)\b|moderad|acentuad)|grau\s*(?:ii|iii|2|3)\b[^.\n]{0,40}?esteatose/.exec(tlx)) && !/atenua/.test(tlx))
             add('padrao', 'atencao', gr.index, 'Esteatose graduada como moderada/acentuada sem descrição de atenuação posterior do feixe.', 'Grau II/III exige atenuação e redução da visualização das estruturas profundas (padrão do serviço).');
+        // ---- Referências do serviço (aprovadas 15/10/2026): confere só medida INFORMADA; nunca cobra medida ausente ----
+        refsServico(c, t, iImp >= 0 ? imp : '').forEach(x => add(x.cat, 'atencao', x.idx, x.msg, x.sug));
         if (!c.critico) {
             for (const k of CRITICOS) {
                 const i = tl.indexOf(k); if (i < 0) continue;
@@ -2484,7 +2569,7 @@ Procure:
 6. texto de outra região/exame (matriz errada) ou técnica incompatível com o nome do exame;
 7. contradição interna (“sem X” e depois “X presente”), frase truncada ou palavra trocada pelo ditado que muda o sentido;
 8. campos de matriz não preenchidos (XX, ___).
-Regras: aponte só o que está no texto; NÃO invente achados; "trecho" deve ser cópia LITERAL e curta (até 120 caracteres) do laudo, para localizar; se estiver coerente, devolva lista vazia. Gravidade: "grave" = erro factual ou que pode mudar conduta (lado, sexo, medida, achado omitido na conclusão, técnica errada); "atencao" = provável erro menor ou ambíguo. No máximo 8 itens, mais importantes primeiro. Explicação e sugestão curtas (no máximo 25 palavras cada).`;
+Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medida ausente ou não informada (o médico não mede tudo) — só confira as medidas escritas; "trecho" deve ser cópia LITERAL e curta (até 120 caracteres) do laudo, para localizar; se estiver coerente, devolva lista vazia. Gravidade: "grave" = erro factual ou que pode mudar conduta (lado, sexo, medida, achado omitido na conclusão, técnica errada); "atencao" = provável erro menor ou ambíguo. No máximo 8 itens, mais importantes primeiro. Explicação e sugestão curtas (no máximo 25 palavras cada).`;
     const REV_ESP = {
         US: `Contexto: ULTRASSONOGRAFIA. Atenção especial: órgãos descritos coerentes com a região do exame; Doppler — lado, vasos/segmentos, refluxo/trombose/estenose coerentes com a conclusão, IR/IP e velocidades plausíveis; carótidas — grau de estenose coerente com VPS/VDF/razão (consenso SRU); tireoide — TI-RADS de cada nódulo coerente com composição/ecogenicidade/forma/margens/focos e tamanho; volumes (tireoide, próstata, ovário, útero, bexiga/resíduo) coerentes com as medidas; obstétrico — biometria, idade gestacional e peso coerentes; mama — BI-RADS coerente.`,
         TC: `Contexto: TOMOGRAFIA COMPUTADORIZADA. Atenção especial: técnica (sem/com contraste, fases) coerente com o nome do exame; achados agudos (hemorragia, pneumoperitônio, dissecção, TEP, isquemia, fratura, obstrução) obrigatoriamente na conclusão; níveis vertebrais e segmentos coerentes entre corpo e conclusão; nódulos — medida e conduta (Fleischner/Lung-RADS) coerentes; Bosniak/LI-RADS coerentes; lateralidade de lesões; incidental relevante sem menção na conclusão.`,
@@ -2498,8 +2583,22 @@ Regras: aponte só o que está no texto; NÃO invente achados; "trecho" deve ser
 • Não conseguiu urinar: "Estudo pós-miccional não realizado" — nunca classificar como incompleto.
 • IMPRESSÃO sem números/percentuais do resíduo: "Resíduo vesical pós-miccional <categoria>, com esvaziamento vesical satisfatório/incompleto."
 • Fígado: aumento da ecogenicidade = "doença de depósito, mais comumente relacionada à esteatose hepática"; Grau I/II/III só com os descritores correspondentes (ecogenicidade; atenuação posterior; visualização dos vasos e do diafragma); NÃO chamar hepatopatia crônica/cirrose/fibrose só pela ecogenicidade (exige contornos/superfície irregular, hipertrofia do caudado, sinais de hipertensão portal etc.); hepatomegalia em linha separada; "limite superior da normalidade" não é hepatomegalia.`;
+    // Referências aprovadas pelo usuário (15/10/2026) — vão só no exame correspondente (economia de tokens/latência)
+    const REV_REFS = [
+        { ex: /tireo|tiroi/, txt: `ACR TI-RADS 2017 (conduta do serviço = ACR): pontos — composição (cístico/espongiforme 0, misto 1, sólido 2), ecogenicidade (anecoico 0, hiper/iso 1, hipo 2, muito hipo 3), forma (mais alto que largo 3), margens (lisa/mal definida 0, lobulada/irregular 2, extensão extratireoidiana 3), focos (macro 1, periféricos 2, puntiformes 3). TR1 0 · TR2 2 · TR3 3 · TR4 4–6 · TR5 ≥ 7. PAAF: TR3 ≥ 2,5 cm; TR4 ≥ 1,5 cm; TR5 ≥ 1,0 cm. Seguimento: TR3 ≥ 1,5; TR4 ≥ 1,0; TR5 ≥ 0,5 cm. Aponte categoria incoerente com os descritores e conduta incoerente com categoria/tamanho. Volume tireoidiano adulto 6–15 cm³ (elipsoide 0,52).` },
+        { ex: /mama|mamar/, txt: `BI-RADS 5ª ed.: 0 incompleto · 1 negativo · 2 benigno · 3 provavelmente benigno (≤ 2%, seguimento curto) · 4A/4B/4C suspeito (biópsia) · 5 altamente sugestivo (≥ 95%) · 6 malignidade comprovada. Descritores de suspeição (forma irregular, orientação não paralela, margem não circunscrita: indistinta, angulada, microlobulada, espiculada) com categoria 2/3 = incoerente.` },
+        { ex: /pelv|transvag|endovag|anex|ovari|ginec|utero/, txt: `O-RADS US v2022: 1 normal (folículo ≤ 3 cm, corpo lúteo) · 2 quase certamente benigno (cisto simples/unilocular liso < 10 cm; hemorrágico, dermoide, endometrioma típicos < 10 cm) · 3 baixo risco (unilocular/bilocular liso ≥ 10 cm; multilocular liso < 10 cm sem fluxo/fluxo leve; sólido liso) · 4 intermediário (multilocular irregular ou fluxo moderado; unilocular com componente sólido/1–3 papilas) · 5 alto risco (≥ 4 papilas; sólido irregular; ascite/nódulos peritoneais). Volume ovariano menacme 3–10 cm³, menopausa 1–5; endométrio menopausa < 4 mm.` },
+        { ex: /rim|rins|renal|urotom|abdom|urinar/, tipo: 'TC', txt: `Bosniak 2019 (TC/RM): I parede fina lisa sem septo/calcificação/realce, −9 a 20 UH · II até 3 septos finos, calcificação, hiperatenuante ≥ 70 UH sem contraste · IIF parede/septo minimamente espessado (3 mm) liso com realce ou ≥ 4 septos finos · III parede/septo ≥ 4 mm ou irregular com realce · IV nódulo com realce. Aponte categoria incoerente com a descrição.` },
+        { ex: /torax|pulm|tórax/, tipo: 'TC', txt: `Fleischner 2017 (nódulo incidental, ≥ 35 anos): sólido único < 6 mm nada (alto risco: TC 12 m opcional); 6–8 mm TC 6–12 m; > 8 mm TC 3 m, PET-CT ou biópsia. Múltiplos ≥ 6 mm TC 3–6 m. Vidro fosco ≥ 6 mm TC 6–12 m e depois a cada 2 anos até 5 anos; parte sólida ≥ 6 mm TC 3–6 m. Aponte conduta incoerente com tamanho/tipo.` },
+        { ex: /carot|vertebr|cervical.*doppler|doppler.*cervical/, txt: `Carótidas (DIC 2015/SRU): ACI < 50%: VPS < 140, VDF < 40, ACI/ACC < 2,0 · 50–69%: VPS 140–230, VDF 40–100, razão 2,0–4,0 · ≥ 70%: VPS > 230, VDF > 100, razão > 4,0. Placa: EMI > 1,5 mm ou protrusão > 0,5 mm. Vertebral: < 50% VPS ≥ 85; 50–69% ≥ 140; > 70% ≥ 210 cm/s. Aponte grau de estenose incoerente com as velocidades.` },
+        { ex: /abdom|rins|renal|figado|hepat|vias urin|prostat|pelv|aort|retroperit/, tipo: 'US', txt: `Referências do serviço (só confira medidas INFORMADAS): rim 9–13 cm; baço até 12 cm; lobo hepático D ≤ 15 cm, E ≤ 10 cm; hepatocolédoco ≤ 6 mm (+1 mm/década após 60, máx. 10); v. porta ≤ 12 mm; parede da vesícula ≤ 3 mm; Wirsung ≤ 2 mm; aorta ≤ 24 mm (ectasia 24–30, aneurisma > 30); a. ilíaca ≤ 12 mm (ectasia 12–15, aneurisma > 15); próstata < 30 cm³; apêndice ≤ 6 mm; hidronefrose Grignon I < 10 mm · II 10–15 · III > 15 ou pequena dilatação calicinal · IV moderada (córtex > 2 mm) · V grande (córtex < 2 mm).` },
+        { ex: /escrot|testic|bolsa/, txt: `Testículo: volume pelo elipsoide 0,52 (ESUR-SPIWG 2024); hipotrofia no adulto: direito < 12 mL, esquerdo < 11 mL. Varicocele: veias > 2 mm com refluxo > 1 s à Valsalva.` },
+        { ex: /obst|gesta|morfol/, txt: `Obstetrícia: ILA 5–24 cm; maior bolsão vertical 2–8 cm; colo ≥ 25 mm; gestação inviável: DMSG ≥ 25 mm sem embrião ou CCN ≥ 7 mm sem BCF.` },
+        { ex: /punho|cotovel|nervo|carpo|cubital|membro superior/, txt: `Nervos (área em mm²): mediano ≤ 10 mm² (12 se bífido); ulnar no cotovelo ≤ 9 mm². Área com unidade linear ou de volume é erro.` }
+    ];
+    const refsDoExame = c => { const e = norm(c.exame); return REV_REFS.filter(r => r.ex.test(e) && (!r.tipo || r.tipo === c.tipo)).map(r => r.txt).join('\n'); };
     const ehUro = c => /abdom|rins|renal|vias urin|aparelho urin|bexig|prostat|pelv|retroperit|figado|hepat/.test(norm(c.exame));
-    const revSistema = (c, extra) => REV_BASE + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (extra || '');
+    const revSistema = (c, extra) => { const rf = refsDoExame(c); return REV_BASE + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS APROVADAS PELO SERVIÇO (use para conferir; não cobre o que não foi medido):\n' + rf : '') + (extra || ''); };
     const REV_CATS = ['lateralidade', 'sexo_anatomia', 'corpo_conclusao', 'medidas', 'classificacao', 'exame_texto', 'redacao_sentido', 'campo_vazio', 'padrao', 'outro'];
     const REV_TOOL = {
         name: 'revisao', description: 'Registra os possíveis erros de incompatibilidade encontrados no laudo (lista vazia se coerente).',
