@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.3.0
+// @version      9.3.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1026,11 +1026,20 @@
     }
 
     // v9.3 — setor de origem (PS, internado, maternidade…) a partir do exame do PACS; null se o PACS não informar
+    // Campos do HIS no PACS (conferido 16/10/2026): exa_tipo 'I' = internado / 'E' = externo;
+    // exa_his_adicional.patientBloco = ala ("G - MATERNIDADE", "L - UTI ADULTO"…);
+    // patientOrigemsolicatacaoExame = 'P.E.P' (pedido do prontuário: PS/internação) ou 'S.A.D.T' (guia ambulatorial).
     function setorDoPacs(x) {
         if (!x) return null;
         const conv = normText(x.convenio && x.convenio.conv_descricao);
         const m = conv.match(/^SUS\s*-\s*(.+)$/);
         if (m) return m[1].trim();
+        const a = x.exa_his_adicional || {};
+        const tit = t => String(t).toLowerCase().replace(/(^|\s)\S/g, c => c.toUpperCase()).replace(/\b(E|De|Da|Do)\b/g, w => w.toLowerCase()).replace(/\bUti\b/g, 'UTI');
+        if (x.exa_tipo === 'I') { const b = String(a.patientBloco || '').replace(/^\s*[A-Z]\s*-\s*/i, '').trim(); return b ? 'Internado · ' + tit(b) : 'Internado'; }
+        const o = String(a.patientOrigemsolicatacaoExame || '').toUpperCase();
+        if (x.exa_tipo === 'E' && o.startsWith('P.E.P')) return 'Pronto Socorro';
+        if (o.startsWith('S.A.D.T')) return 'Ambulatório';
         return null;
     }
 
