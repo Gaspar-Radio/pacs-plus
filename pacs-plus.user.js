@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.17.0
+// @version      1.17.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3848,5 +3848,40 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     }
     start();
     // gancho só para testes automatizados (não faz nada no uso normal)
+
+    // ---- Aviso de versão nova (16/10/2026): se este computador ficou para trás, mostra um aviso com o botão Atualizar.
+    // Lê só o cabeçalho do arquivo publicado (raw.githubusercontent permite CORS); não instala nada sozinho.
+    (function avisoVersaoNova(nome, url) {
+        if (window.top !== window || /^\/viewer/.test(location.pathname)) return;
+        const local = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '';
+        if (!local) return;
+        const cmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 4; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+        const id = 'ladi-upd-' + nome.replace(/\W/g, '');
+        function mostrar(v) {
+            if (!document.body || document.getElementById(id)) return;
+            try { if (sessionStorage.getItem(id) === v) return; } catch (e) { /* ok */ }
+            let box = document.getElementById('ladi-upd-box');
+            if (!box) { box = document.createElement('div'); box.id = 'ladi-upd-box'; box.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483000;display:flex;flex-direction:column;gap:6px;font:12px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif'; document.body.appendChild(box); }
+            const d = document.createElement('div'); d.id = id;
+            d.style.cssText = 'background:#1e3a8a;color:#fff;border:1px solid #93c5fd;border-radius:8px;padding:6px 10px;box-shadow:0 6px 16px rgba(0,0,0,.35);display:flex;gap:10px;align-items:center';
+            const t = document.createElement('span'); t.textContent = `🔄 ${nome} ${v} disponível (este computador: ${local})`;
+            const a = document.createElement('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Atualizar'; a.title = 'Abre a tela do Tampermonkey: clique em Atualizar e depois recarregue o PACS';
+            a.style.cssText = 'color:#fde047;font-weight:700;text-decoration:underline';
+            const x = document.createElement('button'); x.textContent = '×'; x.title = 'Lembrar depois'; x.style.cssText = 'background:none;border:0;color:#fff;cursor:pointer;font-size:15px;padding:0 2px';
+            x.onclick = () => { try { sessionStorage.setItem(id, v); } catch (e) { /* ok */ } d.remove(); };
+            d.append(t, a, x); box.appendChild(d);
+        }
+        async function checar() {
+            try {
+                const r = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+                if (!r.ok) return;
+                const m = (await r.text()).slice(0, 4000).match(/@version\s+([\d.]+)/);
+                if (m && cmp(m[1], local) > 0) mostrar(m[1]);
+            } catch (e) { /* sem internet: tenta na próxima */ }
+        }
+        setTimeout(checar, 20000);
+        setInterval(checar, 6 * 3600000);
+    })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
+
     if (window.__PP_TEST__) window.__PP_TEST__.api = { chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
