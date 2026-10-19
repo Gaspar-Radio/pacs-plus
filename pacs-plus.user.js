@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.17.1
+// @version      1.18.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -75,6 +75,8 @@
         ['slaUteis', 'Prazo (SLA) eletivo (TC e US) em dias úteis', 'Recalcula o cronômetro da coluna Prazo pelos dias úteis (sem fim de semana e feriados de Santa Rita). O SLA de urgência não é alterado. Regras na aba ⏱ Prazos'],
     ];
 
+    // v1.18 — botões da barra do CKEditor ocultados (início do nome que aparece ao passar o mouse; um por linha)
+    const CK_OCULTAR_PADRAO = 'Titulo\nSelecionar tudo\nLinha horizontal\nQuebra de página';
     const DEFAULT_OFF = ['ocultarRelatorios', 'ocultarSelecao', 'viewerRecolherTodos']; // começam desligados
     const LARGURA_COMPACTA = 1400; // modo automático: janela mais estreita que isto => compacto (ex.: meia tela)
 
@@ -135,6 +137,10 @@
         if (c.master === undefined) c.master = true;
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
+        // v1.18: ocultar linhas da lista sem mexer no filtro do PACS; botões do CKEditor que não usa
+        c.ocultarLista = Object.assign({ lib: false, mods: [] }, c.ocultarLista || {});
+        if (!Array.isArray(c.ocultarLista.mods)) c.ocultarLista.mods = [];
+        if (typeof c.ckOcultar !== 'string') c.ckOcultar = CK_OCULTAR_PADRAO;
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
         c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
         c.cheg = Object.assign({}, CHEG_PADRAO, c.cheg || {});
@@ -253,7 +259,13 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-dock .ppd-chip.ok { color: #34d399; } #pp-dock .ppd-chip.warn { color: #fbbf24; } #pp-dock .ppd-chip.err { color: #f87171; border-color: #7f1d1d; }
 #pp-dock .ppd-chip.urg { color: #fff; background: #b91c1c; border-color: #ef4444; cursor: pointer; }
 #pp-dock .ppd-chip.urg.azul { background: #1d4ed8; border-color: #3b82f6; } #pp-dock .ppd-chip.urg.laranja { background: #c2410c; border-color: #f97316; }
-#pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; }`,
+#pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; }
+#pp-dock .ppd-oc { display: inline-flex; align-items: center; gap: 3px; }
+#pp-dock .ppd-oc[hidden] { display: none; }
+#pp-dock .ppd-oc .ppd-chip { cursor: pointer; padding: 0 7px; }
+#pp-dock .ppd-oc .ppd-chip.on { background: #7f1d1d; border-color: #ef4444; color: #fecaca; text-decoration: line-through; }
+#pp-dock .ppd-oc .ppd-n { color: #fbbf24; font-size: 11px; font-weight: 700; min-width: 0; }
+.v-data-table tbody > tr[data-pp-oc] { display: none !important; }`,
         laudoBotoes: `
 .v-dialog__content button[title="Gravar Áudio"] { display: none !important; }
 .v-dialog__content .v-input:has(> .v-input__control input[value="UNICA"]) { display: none !important; }
@@ -271,12 +283,13 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) .v-input { margin: 0 6px !important; }
 .v-dialog__content .row.align-content-center:has(input[value="PADRAO"]) > [class*="col-"]:first-child { padding-right: 14px !important; }`,
         zoomLaudo: `
-.document-editor__toolbar > .pp-zoom-laudo { display: inline-flex; align-items: center; gap: 2px; margin: 0 6px; padding: 0 4px; border: 1px solid rgba(148,163,184,.35); border-radius: 6px; height: 28px; align-self: center; }
-.pp-zoom-laudo button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 2px 6px; border-radius: 4px; }
+.document-editor__toolbar > .pp-zoom-laudo { display: inline-flex; align-items: center; gap: 0; margin: 0 3px; padding: 0 1px; border: 1px solid rgba(148,163,184,.35); border-radius: 6px; height: 28px; align-self: center; }
+.pp-zoom-laudo button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 2px 4px; border-radius: 4px; }
 .pp-zoom-laudo button:hover { background: rgba(148,163,184,.2); }
-.pp-zoom-laudo .pz-v { min-width: 44px; color: #93c5fd; }`,
+.pp-zoom-laudo .pz-v { min-width: 36px; color: #93c5fd; }`,
         revisaoIA: `
 .document-editor__toolbar > .v-btn.pp-rev-btn { color: #fbbf24 !important; font-weight: 700 !important; }
+.document-editor__toolbar > .v-btn.pp-calc-laudo, .document-editor__toolbar > .v-btn.pp-rev-btn { padding: 0 5px !important; min-width: 0 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 #pp-rev .pr-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; z-index: 1; }
 #pp-rev .pr-top { flex-wrap: wrap; }
@@ -453,7 +466,7 @@ header.v-app-bar.v-toolbar--dense .v-toolbar__content .v-btn { height: 40px !imp
 .ck.ck-toolbar .ck-heading-dropdown .ck-dropdown__button .ck-button__label { max-width: 70px !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
 .ck.ck-toolbar .ck-button { padding-left: 3px !important; padding-right: 3px !important; }
 .ck.ck-toolbar > .ck-toolbar__items > * { margin: 0 !important; }
-.ck-toolbar__items { flex-wrap: nowrap !important; }
+.ck-toolbar__items { flex-wrap: wrap !important; } /* v1.18: se não couber, quebra dentro da barra (não vaza para fora) */
 .ck.ck-toolbar { padding: 0 2px !important; }
 .document-editor__toolbar { display: flex !important; flex-wrap: nowrap !important; align-items: center !important; flex-direction: row !important; padding: 0 !important; min-height: 0 !important; }
 .document-editor__toolbar > .v-btn { height: 28px !important; font-size: 13px !important; padding: 0 8px !important; min-width: 0 !important; }
@@ -793,7 +806,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         } catch (e) { console.warn('[PACS Plus] ajuste dinâmico falhou', e); }
     }
 
-    function applyAll() { applyStatic(); applyDynamic(); }
+    function applyAll() { applyStatic(); applyDynamic(); try { ckOcultarCss(); } catch (e) { /* ok */ } }
 
     // Reaplica quando a página se redesenha (lista recarregada, diálogo aberto etc.)
     let pend = false;
@@ -2243,9 +2256,16 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!d) {
             d = document.createElement('div');
             d.id = 'pp-dock';
-            d.innerHTML = '<span class="ppd-sep"></span><span class="ppd-chip" id="ppd-nuvem" hidden></span><span class="ppd-chip urg" id="ppd-urg" hidden title="TC urgente na sua escala — clique para ver os cartões"></span><span class="ppd-chip ppd-papel" id="ppd-papel" hidden title="Cor do papel do laudo (só na tela)"></span>';
+            d.innerHTML = '<span class="ppd-sep"></span><span class="ppd-chip" id="ppd-nuvem" hidden></span><span class="ppd-chip urg" id="ppd-urg" hidden title="TC urgente na sua escala — clique para ver os cartões"></span><span class="ppd-chip ppd-papel" id="ppd-papel" hidden title="Cor do papel do laudo (só na tela)"></span><span class="ppd-oc" id="ppd-oc" hidden title="Ocultar na lista (não mexe no filtro do PACS)">👁 ' + OCUL_GRUPOS.map(([k, r, t]) => `<span class="ppd-chip" data-oc="${k}" title="Ocultar/mostrar: ${t}">${r}</span>`).join('') + '<span class="ppd-n"></span></span>';
             document.body.appendChild(d);
             d.querySelector('#ppd-urg').onclick = () => { const ui = urgUi(); ui.ocultar = {}; urgUiSalvar(ui); urgBanner(); };
+            d.querySelector('#ppd-oc').onclick = ev => {
+                const c = ev.target.closest('[data-oc]'); if (!c) return;
+                recarregarCfg();
+                const o = cfg.ocultarLista, k = c.dataset.oc;
+                if (k === 'lib') o.lib = !o.lib; else o.mods = o.mods.includes(k) ? o.mods.filter(x => x !== k) : o.mods.concat(k);
+                saveCfg(); ocultarLinhasLista(); dockTick();
+            };
             d.querySelector('#ppd-papel').onclick = () => {
                 const i = PAPEIS.findIndex(x => x[0] === (cfg.papel || 'suave'));
                 cfg.papel = PAPEIS[(i + 1) % PAPEIS.length][0]; saveCfg(); dockTick();
@@ -2285,6 +2305,15 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const ucl = 'ppd-chip urg' + (cor ? ' ' + cor : '');
         if (ug.className !== ucl) ug.className = ucl;
         ug.hidden = !txt;
+        // v1.18 — ocultar linhas (só na lista de exames)
+        const oc = d.querySelector('#ppd-oc'), o = cfg.ocultarLista || { lib: false, mods: [] };
+        oc.hidden = !findListTable();
+        if (!oc.hidden) {
+            oc.querySelectorAll('[data-oc]').forEach(c => { const ativo = c.dataset.oc === 'lib' ? o.lib : o.mods.includes(c.dataset.oc); c.classList.toggle('on', !!ativo); });
+            const nt = oculStat.n ? `−${oculStat.n}` : '';
+            const nel = oc.querySelector('.ppd-n'); if (nel.textContent !== nt) nel.textContent = nt;
+            nel.title = oculStat.n ? `${oculStat.n} de ${oculStat.total} exames desta página ocultos` : '';
+        }
         // papel
         const pp = d.querySelector('#ppd-papel');
         pp.hidden = !on('temaGrafite');
@@ -2333,7 +2362,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         b = document.createElement('button');
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-calc-laudo';
-        b.innerHTML = '<span class="v-btn__content">🧮 Calc.</span>';
+        b.innerHTML = '<span class="v-btn__content">🧮</span>';
         b.title = 'Calculadoras do PACS Plus (o resultado vai para o cursor do laudo)';
         b.addEventListener('mousedown', e => e.preventDefault()); // não tira o cursor do laudo
         b.onclick = e => {
@@ -3097,6 +3126,37 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         return r;
     }
     // ---------- Zoom só da folha do laudo (visual; impressão intacta) ----------
+    // v1.18 — oculta botões do CKEditor pelo nome (dropdown inteiro, não só o botão)
+    function ckOcultarCss() {
+        const nomes = String(cfg.ckOcultar || '').split('\n').map(x => x.trim()).filter(Boolean).map(x => x.replace(/["\\]/g, ''));
+        setCss('pp-ck-ocultar', cfg.master && on('editor') && nomes.length ? nomes.map(n => `.document-editor .ck.ck-toolbar .ck-toolbar__items > :is([data-cke-tooltip-text^="${n}"], :has(> [data-cke-tooltip-text^="${n}"]))`).join(',\n') + ' { display: none !important; }' : '');
+    }
+    // v1.18 — ocultar linhas da lista (liberados / modalidades) sem mexer no filtro do PACS.
+    // A linha i da tabela é o exame i do componente da lista (conferido 19/10/2026: 50/50).
+    const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom'], ['RX', 'RX', 'Raio-X (CR/DX)'], ['OUT', 'Outros', 'Demais modalidades (MR, MG, ECG, OT…)']];
+    const grupoMod = sig => { sig = String(sig || '').toUpperCase(); return sig === 'CT' || sig === 'US' ? sig : (sig === 'CR' || sig === 'DX') ? 'RX' : 'OUT'; };
+    let oculStat = { n: 0, total: 0 };
+    function ocultarLinhasLista() {
+        const f = findListTable(), comp = f && componenteLista();
+        const o = cfg.ocultarLista || { lib: false, mods: [] };
+        let n = 0, total = 0;
+        if (f && comp) {
+            const linhas = [...f.t.querySelectorAll('tbody > tr')];
+            const ok = linhas.length === comp.exames.length;
+            linhas.forEach((tr, i) => {
+                const ex = ok ? comp.exames[i] : null;
+                if (ex) total++;
+                const sit = String(ex && ex.exa_situacao || '').toUpperCase();
+                const mod = ex && ex.tipoexame && ex.tipoexame.modalidade && ex.tipoexame.modalidade.mod_sigla;
+                const esconder = !!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || o.mods.includes(grupoMod(mod)));
+                if (esconder) { n++; if (!tr.hasAttribute('data-pp-oc')) tr.setAttribute('data-pp-oc', ''); }
+                else if (tr.hasAttribute('data-pp-oc')) tr.removeAttribute('data-pp-oc');
+            });
+        }
+        oculStat = { n, total };
+    }
+    setInterval(ocultarLinhasLista, 700);
+
     function zoomLaudoCss() {
         const z = cfg.zoomLaudo || 100;
         setCss('pp-zoom-laudo', on('zoomLaudo') && z !== 100 ? `@media screen { .v-dialog__content .document-editor .ck-editor__editable { zoom: ${z / 100}; } }` : '');
@@ -3130,7 +3190,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         b = document.createElement('button');
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
-        b.innerHTML = '<span class="v-btn__content">🛡 Revisar</span>';
+        b.innerHTML = '<span class="v-btn__content">🛡 Rev.</span>';
         b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku/Sonnet, Gemini; Opus como sênior). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); if (document.getElementById('pp-rev') && !(revAtual && revAtual.carregando)) { fecharRevisao(); return; } revisar(false); };
@@ -3739,6 +3799,9 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
 <label style="margin-top:6px;">Papel do laudo (tema grafite — só a tela; impressão não muda)<select id="pp-papel">${PAPEIS.map(([v, n]) => `<option value="${v}" ${(cfg.papel || 'suave') === v ? 'selected' : ''}>${esc(n.replace('◐ ', ''))}</option>`).join('')}</select></label>
 <div class="pp-h">Ajustes (cada um liga/desliga na hora)</div>
 ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b="${k}" ${cfg.blocks[k] ? 'checked' : ''} ${cfg.master ? '' : 'disabled'}><span>${esc(n)}${d ? `<small>${esc(d)}</small>` : ''}</span></label>`).join('')}
+<div class="pp-h">Barra do laudo — botões ocultos (início do nome que aparece ao passar o mouse; um por linha)</div>
+<textarea id="pp-ckoc" rows="4">${esc(cfg.ckOcultar)}</textarea>
+<div class="pp-muted">Disponíveis: Desfazer, Refazer, Remover Formatação, Selecionar tudo, Titulo, Fonte, Tamanho da fonte, Cor da Fonte, Cor de Fundo, Itálico, Negrito, Sublinhado, Tachado, Espaçamento entre linhas, Alinhar à esquerda, Alinhar à direita, Centralizar, Justificar, Lista com marcadores, Inserir tabela, Inserir imagem, Linha horizontal, Quebra de página, Maiúscula / Minúscula. Vale com “Editor de laudo em uma linha” ligado.</div>
 <div class="pp-h">Sites de pesquisa — “Nome | URL com %s”</div>
 <textarea id="pp-sites" rows="5">${esc(cfg.sites)}</textarea>
 <div class="pp-h">Links rápidos — “Nome | URL”</div>
@@ -3749,7 +3812,7 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         body.querySelector('#pp-dens').onchange = e => { cfg.densidade = e.target.value; saveCfg(); applyAll(); renderPanel(); };
         body.querySelector('#pp-papel').onchange = e => { cfg.papel = e.target.value; saveCfg(); dockTick(); };
         body.querySelectorAll('[data-b]').forEach(cb => { cb.onchange = () => { cfg.blocks[cb.dataset.b] = cb.checked; saveCfg(); applyAll(); dockTick(); if (cb.dataset.b === 'slaUteis') recalcularLista(); }; });
-        body.querySelector('#pp-save').onclick = () => { cfg.sites = body.querySelector('#pp-sites').value; cfg.links = body.querySelector('#pp-links').value; saveCfg(); const b = body.querySelector('#pp-save'); b.textContent = '✓ Salvo'; setTimeout(() => { b.textContent = 'Salvar listas'; }, 1200); };
+        body.querySelector('#pp-save').onclick = () => { cfg.sites = body.querySelector('#pp-sites').value; cfg.links = body.querySelector('#pp-links').value; cfg.ckOcultar = body.querySelector('#pp-ckoc').value; saveCfg(); ckOcultarCss(); const b = body.querySelector('#pp-save'); b.textContent = '✓ Salvo'; setTimeout(() => { b.textContent = 'Salvar listas'; }, 1200); };
         body.querySelector('#pp-reset').onclick = () => { if (!confirm('Restaurar todos os ajustes e listas para o padrão?')) return; localStorage.removeItem(CFG_KEY); recarregarCfg(); applyAll(); renderPanel(); };
     }
 
