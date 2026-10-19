@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.18.0
+// @version      1.18.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -76,7 +76,7 @@
     ];
 
     // v1.18 — botões da barra do CKEditor ocultados (início do nome que aparece ao passar o mouse; um por linha)
-    const CK_OCULTAR_PADRAO = 'Titulo\nSelecionar tudo\nLinha horizontal\nQuebra de página';
+    const CK_OCULTAR_PADRAO = 'Titulo\nSelecionar tudo\nLinha horizontal'; // 1.18.1: Quebra de página voltou (o usuário usa)
     const DEFAULT_OFF = ['ocultarRelatorios', 'ocultarSelecao', 'viewerRecolherTodos']; // começam desligados
     const LARGURA_COMPACTA = 1400; // modo automático: janela mais estreita que isto => compacto (ex.: meia tela)
 
@@ -141,6 +141,7 @@
         c.ocultarLista = Object.assign({ lib: false, mods: [] }, c.ocultarLista || {});
         if (!Array.isArray(c.ocultarLista.mods)) c.ocultarLista.mods = [];
         if (typeof c.ckOcultar !== 'string') c.ckOcultar = CK_OCULTAR_PADRAO;
+        if (!c.ckMig1181) { c.ckOcultar = c.ckOcultar.split('\n').filter(x => x.trim() !== 'Quebra de página').join('\n'); c.ckMig1181 = true; }
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
         c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
         c.cheg = Object.assign({}, CHEG_PADRAO, c.cheg || {});
