@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.18.1
+// @version      1.19.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -43,6 +43,7 @@
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
         ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Haiku 5.5 + Gemini, e Opus 5.5 como sênior, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas/unidades, contraste, padrão do serviço…). ✍ Corrigir propõe antes → depois (conta: o Plus; frase/lado: Sonnet; diagnóstico: Opus) e só altera ao clicar Aplicar. Usa o login da Agenda'],
         ['rodapeCompacto', 'Rodapé da lista compacto', 'Linha “Linhas por página / 1-50 de …” com 30 px de altura (antes ~60 px)'],
+        ['zoomPdf', 'Laudo impresso (PDF) já abre com zoom', 'Ao clicar em Imprimir, a aba do PDF abre no zoom escolhido em ⚙️ Ajustes (padrão 110%) em vez de 100%. Só a visualização: o papel impresso não muda'],
         ['zoomLaudo', 'Laudo: zoom só da folha (A− 120% A+)', 'Controle na barra do editor: aumenta ou diminui só o texto da folha do laudo (90–160%), salvo neste computador. Só a tela: a impressão não muda'],
         ['calcLaudo', 'Calculadoras na tela do laudo', 'Botão 🧮 na barra do editor: abre as calculadoras ao lado do laudo, com “Inserir no laudo” (vai para onde está o cursor)'],
         ['buscaCompacta', 'Buscar Matriz / Buscar Frase compactos', 'Janela baixa e lista com um item por linha (sigla + descrição), ocupando a altura da tela: rolagem só se não couber'],
@@ -133,6 +134,7 @@
         BLOCKS.forEach(([k]) => { if (c.blocks[k] === undefined) c.blocks[k] = !DEFAULT_OFF.includes(k); });
         if (!['auto', 'normal', 'compacta'].includes(c.densidade)) c.densidade = 'auto';
         if (!['normal', 'suave', 'escuro'].includes(c.papel)) c.papel = 'suave';
+        if (!['100', '110', '125', '150', 'largura', 'pagina'].includes(String(c.zoomPdf))) c.zoomPdf = '110';
         c.zoomLaudo = Math.min(160, Math.max(90, Math.round((Number(c.zoomLaudo) || 100) / 10) * 10));
         if (c.master === undefined) c.master = true;
         if (!c.sites) c.sites = DEFAULT_SITES;
@@ -3127,6 +3129,31 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         return r;
     }
     // ---------- Zoom só da folha do laudo (visual; impressão intacta) ----------
+    // v1.19 — PDF do laudo (blob: aberto em outra aba no leitor do Chrome) já abre no zoom escolhido.
+    // O leitor de PDF do Chrome aceita parâmetros no fim do endereço: #zoom=110 / #view=FitH / #view=Fit.
+    function urlPdfComZoom(u) {
+        try {
+            const s = String(u || '');
+            if (!cfg.master || !on('zoomPdf') || !/^blob:/i.test(s) || s.includes('#')) return u;
+            const z = String(cfg.zoomPdf || '110');
+            const frag = z === 'largura' ? '#view=FitH' : z === 'pagina' ? '#view=Fit' : z === '100' ? '' : '#zoom=' + z;
+            return frag ? s + frag : u;
+        } catch (e) { return u; }
+    }
+    (function ganchoPdf() {
+        const abrir = window.open;
+        window.open = function (u, ...resto) { return abrir.call(this, urlPdfComZoom(u), ...resto); };
+        const clicar = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+            if (!this.hasAttribute('download') && /^blob:/i.test(this.href || '')) { const n = urlPdfComZoom(this.href); if (n !== this.href) this.href = n; }
+            return clicar.call(this);
+        };
+        document.addEventListener('click', e => {
+            const a = e.target && e.target.closest && e.target.closest('a[href^="blob:"]');
+            if (a && !a.hasAttribute('download')) { const n = urlPdfComZoom(a.href); if (n !== a.href) a.href = n; }
+        }, true);
+    })();
+
     // v1.18 — oculta botões do CKEditor pelo nome (dropdown inteiro, não só o botão)
     function ckOcultarCss() {
         const nomes = String(cfg.ckOcultar || '').split('\n').map(x => x.trim()).filter(Boolean).map(x => x.replace(/["\\]/g, ''));
@@ -3797,6 +3824,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
 <option value="auto" ${cfg.densidade === 'auto' ? 'selected' : ''}>Automática — compacta quando a janela tiver menos de ${LARGURA_COMPACTA}px (agora: ${densidadeAtual()})</option>
 <option value="normal" ${cfg.densidade === 'normal' ? 'selected' : ''}>Normal (fonte 13 px — tela cheia)</option>
 <option value="compacta" ${cfg.densidade === 'compacta' ? 'selected' : ''}>Compacta (fonte 11 px — meia tela)</option></select></label>
+<label style="margin-top:6px;">Zoom do laudo impresso (PDF que abre ao clicar em Imprimir)<select id="pp-zpdf">${[['100', '100%'], ['110', '110% (padrão)'], ['125', '125%'], ['150', '150%'], ['largura', 'Ajustar à largura da tela'], ['pagina', 'Página inteira']].map(([v, n]) => `<option value="${v}" ${String(cfg.zoomPdf) === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
 <label style="margin-top:6px;">Papel do laudo (tema grafite — só a tela; impressão não muda)<select id="pp-papel">${PAPEIS.map(([v, n]) => `<option value="${v}" ${(cfg.papel || 'suave') === v ? 'selected' : ''}>${esc(n.replace('◐ ', ''))}</option>`).join('')}</select></label>
 <div class="pp-h">Ajustes (cada um liga/desliga na hora)</div>
 ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b="${k}" ${cfg.blocks[k] ? 'checked' : ''} ${cfg.master ? '' : 'disabled'}><span>${esc(n)}${d ? `<small>${esc(d)}</small>` : ''}</span></label>`).join('')}
@@ -3812,6 +3840,7 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         body.querySelector('#pp-master').onchange = e => { cfg.master = e.target.checked; saveCfg(); applyAll(); renderPanel(); };
         body.querySelector('#pp-dens').onchange = e => { cfg.densidade = e.target.value; saveCfg(); applyAll(); renderPanel(); };
         body.querySelector('#pp-papel').onchange = e => { cfg.papel = e.target.value; saveCfg(); dockTick(); };
+        body.querySelector('#pp-zpdf').onchange = e => { cfg.zoomPdf = e.target.value; saveCfg(); };
         body.querySelectorAll('[data-b]').forEach(cb => { cb.onchange = () => { cfg.blocks[cb.dataset.b] = cb.checked; saveCfg(); applyAll(); dockTick(); if (cb.dataset.b === 'slaUteis') recalcularLista(); }; });
         body.querySelector('#pp-save').onclick = () => { cfg.sites = body.querySelector('#pp-sites').value; cfg.links = body.querySelector('#pp-links').value; cfg.ckOcultar = body.querySelector('#pp-ckoc').value; saveCfg(); ckOcultarCss(); const b = body.querySelector('#pp-save'); b.textContent = '✓ Salvo'; setTimeout(() => { b.textContent = 'Salvar listas'; }, 1200); };
         body.querySelector('#pp-reset').onclick = () => { if (!confirm('Restaurar todos os ajustes e listas para o padrão?')) return; localStorage.removeItem(CFG_KEY); recarregarCfg(); applyAll(); renderPanel(); };
