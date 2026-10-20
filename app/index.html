@@ -105,7 +105,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.1.0';
+const VERSAO = '1.1.1';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -603,11 +603,11 @@ ${urgHtml}
 async function telaConsulta() {
     const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
     try {
-        const d = await api('agenda_documentos?ativo=eq.true&select=id,categoria,titulo,mes,drive_id,pdf_drive_id,ordem&order=categoria.asc,mes.desc.nullslast,ordem.asc');
+        const d = await api('agenda_documentos?ativo=eq.true&select=id,categoria,titulo,mes,drive_id,pdf_drive_id,ordem&order=categoria.asc,mes.asc.nullslast,ordem.asc');
         if (S.tab !== 'consulta') return;
         const CAT = { escala_us: '🩻 Escalas — Ultrassom', escala_tc: '🚨 Escalas — TC urgência', pop: '📋 POPs', manual: '📘 Manuais e guias' };
         const grupos = {}; (d || []).forEach(x => { (grupos[x.categoria] = grupos[x.categoria] || []).push(x); });
-        tela.innerHTML = `<main>${Object.keys(CAT).filter(k => grupos[k]).map(k => `<h2><span>${CAT[k]}</span></h2>${grupos[k].map(x => `<a class="doc" href="https://drive.google.com/file/d/${encodeURIComponent(x.drive_id)}/view" target="_blank" rel="noopener"><div style="font-size:22px">📄</div><div><b>${esc(x.titulo)}</b><small>${x.mes ? esc(x.mes) : ''}${x.pdf_drive_id ? ' · tem PDF' : ''}</small></div></a>`).join('')}`).join('') || '<div class="vazio">Nada cadastrado.</div>'}
+        tela.innerHTML = `<main>${Object.keys(CAT).filter(k => grupos[k]).map(k => `<h2><span>${CAT[k]}</span></h2>${grupos[k].map(x => `<a class="doc" href="https://drive.google.com/file/d/${encodeURIComponent(x.drive_id)}/view" target="_blank" rel="noopener"><div style="font-size:22px">📄</div><div><b>${esc(x.titulo)}</b><small>${x.mes ? esc(MESES[Number(x.mes.slice(5, 7)) - 1] + ' ' + x.mes.slice(0, 4)) : ''}${x.pdf_drive_id ? ' · tem PDF' : ''}</small></div></a>`).join('')}`).join('') || '<div class="vazio">Nada cadastrado.</div>'}
 <div class="note">Abre no app do Google Drive (conta dona dos arquivos). O cadastro continua pelos PCs (📚 Consulta → Gerenciar).</div></main>`;
     } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
 }

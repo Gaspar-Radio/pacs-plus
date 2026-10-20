@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.3.2
+// @version      9.3.3
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1981,7 +1981,7 @@
         docsRender();
         if (!getSupabaseConfig()) { docsAviso('Configure a nuvem em ⚙️ API para carregar os documentos.'); return; }
         try {
-            const rows = await requestSupabase('agenda_documentos?select=*&ativo=eq.true&order=categoria.asc,mes.desc.nullslast,ordem.asc,id.asc', 'GET');
+            const rows = await requestSupabase('agenda_documentos?select=*&ativo=eq.true&order=categoria.asc,mes.asc.nullslast,ordem.asc,id.asc', 'GET');
             docsLista = Array.isArray(rows) ? rows : [];
             try { localStorage.setItem(DOCS_CACHE_KEY, JSON.stringify(docsLista)); } catch (e) { /* cheio */ }
             docsAviso('');
