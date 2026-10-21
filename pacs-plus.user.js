@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.19.0
+// @version      1.20.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -305,6 +305,18 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-full > b { font-size: 12px; color: #c4b5fd; }
 #pp-rev .pr-co { margin-top: 6px; padding: 6px 8px; border: 1px solid #4c1d95; border-radius: 6px; background: #1e1b4b; }
 #pp-rev .pr-co.err, #pp-rev .pr-ok.err { color: #fca5a5; }
+#pp-rev.min { width: auto; overflow: visible; border-color: #f59e0b; }
+#pp-rev .pr-mini { padding: 6px 12px; cursor: pointer; font-weight: 700; white-space: nowrap; }
+#pp-rev .pr-mini .pr-g { color: #f87171; } #pp-rev .pr-mini .pr-exp { color: #94a3b8; margin-left: 6px; }
+#pp-rev .pr-alt { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: #422006; border: 1px solid #b45309; color: #fde68a; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
+#pp-rev .pr-ped { padding: 8px 10px 2px; }
+#pp-rev .pr-ped textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 54px; background: #1e293b; color: #f1f5f9; border: 1px solid #475569; border-radius: 6px; padding: 6px 8px; font: inherit; }
+#pp-rev .pr-ped textarea:focus { outline: none; border-color: #7c3aed; }
+#pp-rev .pr-pedb { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
+#pp-rev .pr-pedb label { display: flex; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11.5px; }
+#pp-rev .pr-pd { margin-top: 6px; }
+#pp-rev .pr-pq { color: #c4b5fd; font-style: italic; font-size: 11.5px; white-space: pre-wrap; }
+#pp-rev .pr-dep, #pp-rev .pr-antes, #pp-rev .pr-obs { white-space: pre-wrap; }
 #pp-rev .pr-tq { padding: 4px 0; border-bottom: 1px dashed #312e81; }
 #pp-rev .pr-tq:last-of-type { border-bottom: 0; }
 #pp-rev .pr-antes { color: #fca5a5; text-decoration: line-through; text-decoration-color: rgba(252,165,165,.5); }
@@ -2915,8 +2927,17 @@ ${c.texto}`;
                 const no = p0.textNode || p0.nodeAfter;
                 const attrs = no && no.getAttributes ? new Map(no.getAttributes()) : new Map(); // mantém negrito/fonte do 1º caractere
                 w.remove(w.createRange(p0, p1));
-                w.insertText(String(novo), attrs, w.createPositionAt(pos.el, pos.i));
-                w.setSelection(w.createRange(w.createPositionAt(pos.el, pos.i), w.createPositionAt(pos.el, pos.i + String(novo).length)));
+                // v1.20: "\n" no texto novo = parágrafo novo (inserções pedidas ao Opus)
+                const partes = String(novo).replace(/\r/g, '').split(/\n+/);
+                w.insertText(partes[0], attrs, w.createPositionAt(pos.el, pos.i));
+                let el = pos.el, fim = pos.i + partes[0].length;
+                for (let k = 1; k < partes.length; k++) {
+                    const sp = w.split(w.createPositionAt(el, fim));
+                    el = sp.position.nodeAfter;
+                    w.insertText(partes[k], attrs, w.createPositionAt(el, 0));
+                    fim = partes[k].length;
+                }
+                w.setSelection(w.createRange(w.createPositionAt(pos.el, pos.i), w.createPositionAt(el, fim)));
             });
             ed.editing.view.focus(); ed.editing.view.scrollToTheSelection();
             return '';
@@ -2971,21 +2992,70 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
         } catch (e) { r.corr[k] = { nivel, erro: String(e.message || e).slice(0, 200) }; }
         if (revAtual === r) renderRevisao();
     }
+    // ---------- 💬 Pedido livre ao Opus (v1.20): texto digitado ou ditado pelo médico ----------
+    const PEDIDO_SIS = `Você é o ASSISTENTE DE EDIÇÃO de laudos radiológicos do médico, em português do Brasil. O médico escreve (ou dita) um PEDIDO sobre o laudo aberto: revisar um trecho, inserir uma frase, ajustar a redação, reorganizar a impressão, padronizar a forma etc.
+Regras:
+• Faça exatamente o que foi pedido; não altere o resto do laudo. Não invente achados, medidas nem lado que o laudo/pedido não traga; se faltar informação, diga em "observacao" o que falta.
+• Entregue a edição como substituições: "original" = cópia LITERAL exata de um trecho contínuo do laudo, DENTRO DE UM ÚNICO PARÁGRAFO, que apareça uma só vez (pode ser o parágrafo inteiro); "novo" = o mesmo trecho já editado.
+• Para INSERIR: use como "original" o fim literal do parágrafo de referência e em "novo" repita esse trecho seguido do texto novo; use "\\n" em "novo" para começar parágrafo novo.
+• Para reescrever vários parágrafos, uma troca por parágrafo. No máximo 20 trocas.
+• Mantenha o estilo, a terminologia e a formatação do laudo (caixa alta onde já houver).
+• Se o pedido for uma PERGUNTA ou revisão sem mudança necessária, devolva trocas vazias e responda em "observacao" (curta, objetiva).
+Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
+    async function pedidoOpus(c, pedido, tentativa = 1) {
+        const t0 = performance.now();
+        const rf = refsDoExame(c);
+        const sys = PEDIDO_SIS + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS DO SERVIÇO:\n' + rf : '');
+        let d;
+        try {
+            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-opus-5-5', max_tokens: 14000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+                system: sys, tools: [CORR_TOOL], tool_choice: { type: 'auto' },
+                messages: [{ role: 'user', content: revMensagem(c) + '\n\nPEDIDO DO MÉDICO:\n' + pedido }] });
+        } catch (e) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1); throw e; }
+        const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'correcao');
+        let inp = blk && blk.input;
+        const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+        if (!inp) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { inp = JSON.parse(m[0]); } catch (e) { /* segue */ } } }
+        if (!inp && txt) inp = { trocas: [], observacao: txt };
+        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1); throw new Error('resposta sem as edições'); }
+        const trocas = inp.trocas.filter(x => x && x.original && typeof x.novo === 'string' && x.original !== x.novo).slice(0, 20).map(x => ({ original: String(x.original), novo: String(x.novo) }));
+        return { trocas, obs: String(inp.observacao || '').slice(0, 1500), ms: performance.now() - t0 };
+    }
+    async function enviarPedido(r, texto) {
+        texto = String(texto || '').trim();
+        if (!texto) return;
+        r.pedidos = r.pedidos || [];
+        const k = '__ped' + Date.now();
+        r.corr = r.corr || {};
+        r.corr[k] = { nivel: 'opus', carregando: true, pedido: texto };
+        r.pedidos.push(k); r.rascunho = '';
+        renderRevisao();
+        try {
+            const c = contextoLaudo() || r.ctx;
+            const x = await pedidoOpus(c, texto);
+            r.corr[k] = { nivel: 'opus', pedido: texto, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nada a alterar.'), ms: x.ms };
+            if (revCfg().pedidoDireto && x.trocas.length) aplicarTrocas(r.corr[k]);
+        } catch (e) { r.corr[k] = { nivel: 'opus', pedido: texto, erro: String(e.message || e).slice(0, 200) }; }
+        if (revAtual === r) renderRevisao();
+    }
+    function aplicarTrocas(cr) {
+        (cr.trocas || []).forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; } });
+    }
     function htmlCorrecao(cr) {
         if (!cr) return '';
-        if (cr.carregando) return `<div class="pr-co">⏳ ${NIVEL_NOME[cr.nivel]} preparando a correção…</div>`;
+        if (cr.carregando) return `<div class="pr-co">⏳ ${cr.pedido ? 'Opus trabalhando no pedido…' : NIVEL_NOME[cr.nivel] + ' preparando a correção…'}</div>`;
         if (cr.erro) return `<div class="pr-co err">⚠ ${esc(cr.erro)}</div>`;
         return `<div class="pr-co">${(cr.trocas || []).map((t, j) => `<div class="pr-tq ${t.feito ? 'ok' : ''}" data-j="${j}"><div class="pr-antes">${esc(t.original)}</div><div class="pr-dep">→ ${esc(t.novo)}</div>${t.feito ? '<div class="pr-ok">✓ aplicado (Ctrl+Z desfaz)</div>' : t.falha ? `<div class="pr-ok err">⚠ ${esc(t.falha)}</div>` : ''}</div>`).join('')}
 ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
-<div class="pr-ac">${(cr.trocas || []).some(t => !t.feito) ? `<button class="pr-b" data-apl>Aplicar${cr.trocas.length > 1 ? ' tudo' : ''}</button>` : ''}<button class="pr-b sec" data-desc>${(cr.trocas || []).every(t => t.feito) && cr.trocas.length ? 'Fechar' : 'Descartar'}</button><span class="pr-niv">${NIVEL_NOME[cr.nivel]}${cr.ms ? ' · ' + fmt(cr.ms / 1000, 1) + ' s' : ''}</span></div></div>`;
+<div class="pr-ac">${(cr.trocas || []).some(t => !t.feito) ? `<button class="pr-b" data-apl>Aplicar${cr.trocas.length > 1 ? ' tudo' : ''}</button>` : ''}<button class="pr-b sec" data-desc>${(cr.trocas || []).every(t => t.feito) && cr.trocas.length || (cr.pedido && !(cr.trocas || []).length) ? 'Fechar' : 'Descartar'}</button><span class="pr-niv">${NIVEL_NOME[cr.nivel]}${cr.ms ? ' · ' + fmt(cr.ms / 1000, 1) + ' s' : ''}</span></div></div>`;
     }
     function ligarCorrecao(el, r, k) {
         const cr = r.corr && r.corr[k];
         if (!cr) return;
         const ap = el.querySelector(':scope > .pr-co [data-apl]');
-        if (ap) ap.onclick = () => { cr.trocas.forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; } }); renderRevisao(); };
+        if (ap) ap.onclick = () => { aplicarTrocas(cr); renderRevisao(); };
         const ds = el.querySelector(':scope > .pr-co [data-desc]');
-        if (ds) ds.onclick = () => { delete r.corr[k]; renderRevisao(); };
+        if (ds) ds.onclick = () => { delete r.corr[k]; if (r.pedidos) r.pedidos = r.pedidos.filter(x => x !== k); renderRevisao(); };
     }
 
     // ---------- tela ----------
@@ -2996,6 +3066,19 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         if (!p) { p = document.createElement('div'); p.id = 'pp-rev'; document.body.appendChild(p); }
         return p;
     }
+    // v1.20: 🛡 não revisa de novo sozinho — reabre o resultado do mesmo exame; revisar de novo só pelo botão
+    function abrirRevisao() {
+        const aberto = document.getElementById('pp-rev');
+        if (aberto && revAtual && !revAtual.min) { fecharRevisao(); return; }
+        const c = contextoLaudo();
+        if (!c) return;
+        if (revAtual && revAtual.exa === c.exa) {
+            revAtual.min = false;
+            revAtual.alterado = hashTxt(c.texto + '|' + c.exame + '|' + c.critico) !== revAtual.hash;
+            renderRevisao(); return;
+        }
+        revisar(false);
+    }
     function fecharRevisao() { const p = document.getElementById('pp-rev'); if (p) p.remove(); if (revAtual) revAtual.depois = null; }
     function renderRevisao() {
         if (!revAtual) return;
@@ -3004,15 +3087,30 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         p.style.top = Math.round(Math.max(48, Math.min(tb ? tb.getBoundingClientRect().bottom + 8 : 96, window.innerHeight - 320))) + 'px';
         const todos = achadosAtuais(r).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
         const graves = todos.filter(a => a.gravidade === 'grave').length;
-        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x ? x.modelo + ' · ' + x.tin + '+' + x.tout + ' tokens' : ''))}">${MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${fmt(x.ms / 1000, 1)} s · ${x.achados.length}` : '⏳'}</span>`; };
+        // v1.20: preserva o que está sendo digitado no pedido (o painel é redesenhado quando cada IA responde)
+        const ta0 = p.querySelector('#pr-ped'), foco = ta0 && document.activeElement === ta0 ? [ta0.selectionStart, ta0.selectionEnd] : null;
+        if (ta0) r.rascunho = ta0.value;
+        const pedCarregando = (r.pedidos || []).some(k => r.corr[k] && r.corr[k].carregando);
+        // v1.20: minimizado = só uma barrinha; clique expande
+        p.classList.toggle('min', !!r.min);
+        if (r.min) {
+            p.innerHTML = `<div class="pr-mini" title="Expandir a revisão">🛡 Revisão · ${r.carregando || pedCarregando ? '⏳' : todos.length ? `${todos.length} achado(s)${graves ? ` · <span class="pr-g">${graves} grave(s)</span>` : ''}` : '✓ sem achados'} <span class="pr-exp">▲</span></div>`;
+            p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
+            return;
+        }
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || '')}">${MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
         const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
 <div class="pr-top"><b>🛡 Revisão · ${r.ctx.tipo === 'GERAL' ? esc(r.ctx.mod) : r.ctx.tipo}</b>
 <select id="pr-modo" title="Motores">${Object.entries(REV_MODOS).map(([k, v]) => `<option value="${k}" ${rc.modo === k ? 'selected' : ''}>${v.nome}</option>`).join('')}</select>
 <select id="pr-revisor" title="Qual Claude revisa">${Object.entries(REVISORES).map(([k, v]) => `<option value="${k}" ${(rc.revisor || 'auto') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
-<button class="pr-x" title="Fechar (Esc)">✕</button></div>
+<button class="pr-x pr-min" title="Minimizar">▁</button><button class="pr-x" title="Fechar (Esc) — o resultado fica guardado; 🛡 reabre sem revisar de novo">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
+${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}
+<div class="pr-ped"><textarea id="pr-ped" rows="3" placeholder="💬 Pedido ao Opus — digite ou cole o ditado. Ex.: “revise a impressão”, “insira que a vesícula não foi visualizada por jejum inadequado”, “deixe a conclusão em tópicos”."></textarea>
+<div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button></div>
+${(r.pedidos || []).slice().reverse().map(k => r.corr[k] ? `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k])}</div>` : '').join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
@@ -3028,9 +3126,19 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>
-<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">↻ De novo</button></span>
-<div class="pr-log">${esc(revResumoLog())}</div><div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
-        p.querySelector('.pr-x').onclick = fecharRevisao;
+<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
+<div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
+        p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
+        p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
+        const ar = p.querySelector('#pr-alt-rev'); if (ar) ar.onclick = () => revisar(true);
+        const ta = p.querySelector('#pr-ped');
+        ta.value = r.rascunho || '';
+        ta.oninput = () => { r.rascunho = ta.value; };
+        ta.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); enviarPedido(r, ta.value); } };
+        if (foco) { ta.focus(); try { ta.setSelectionRange(foco[0], foco[1]); } catch (e) { /* ok */ } }
+        p.querySelector('#pr-ped-env').onclick = () => enviarPedido(r, ta.value);
+        p.querySelector('#pr-ped-dir').onchange = e => { cfg.rev = Object.assign(revCfg(), { pedidoDireto: e.target.checked }); saveCfg(); };
+        p.querySelectorAll('.pr-pd').forEach(el => ligarCorrecao(el, r, el.dataset.k));
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
@@ -3100,9 +3208,10 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         const rc = revCfg();
         const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
         if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && revAtual.revisor === revisorDe(rc, c) && !revAtual.carregando) {
-            revAtual.depois = depois || null; renderRevisao(); return revAtual;
+            revAtual.depois = depois || null; revAtual.alterado = false; revAtual.min = false; renderRevisao(); return revAtual;
         }
-        const r = revAtual = { hash, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
+        const rasc = revAtual && revAtual.exa === c.exa ? (document.getElementById('pr-ped') || {}).value || revAtual.rascunho || '' : '';
+        const r = revAtual = { rascunho: rasc, hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
         renderRevisao();
         if (c.texto.length >= 30) {
             r.revisor = revisorDe(rc, c);
@@ -3221,7 +3330,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         b.innerHTML = '<span class="v-btn__content">🛡 Rev.</span>';
         b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku/Sonnet, Gemini; Opus como sênior). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
-        b.onclick = e => { e.stopPropagation(); if (document.getElementById('pp-rev') && !(revAtual && revAtual.carregando)) { fecharRevisao(); return; } revisar(false); };
+        b.onclick = e => { e.stopPropagation(); abrirRevisao(); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
         if (calc && calc.nextSibling) tb.insertBefore(b, calc.nextSibling); else tb.insertBefore(b, tb.firstChild);
     }
