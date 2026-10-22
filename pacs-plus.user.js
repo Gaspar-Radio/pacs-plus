@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.21.0
+// @version      1.21.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1060,7 +1060,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     // =====================================================================
     const URG_ESTADO_KEY = 'pp_urg_estado_v1', URG_LIDER_KEY = 'pp_urg_lider_v1', URG_UI_KEY = 'pp_urg_ui_v1', URG_SOM_KEY = 'pp_urg_som_v1';
     const URG_POLL_MS = 60000, URG_TICK_MS = 20000, URG_LIDER_TTL = 150000;
-    const URG_VIGIA_CADA = 6 * 60000, URG_VIGIA_ATRASO = 20 * 60000;
+    const URG_VIGIA_CADA = 15 * 60000, URG_VIGIA_ATRASO = 25 * 60000; // v1.21.1: 15 min (antes 6) — economiza a cota diária do ntfy.sh
     const URG_TAB = Math.random().toString(36).slice(2, 10);
     const URG_LINK = location.origin + '/exames';
     const urgLigado = () => !!(cfg.urg.tela || cfg.urg.celular);
@@ -1138,9 +1138,21 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
 
     // ---- canais ----
     const ntfyBase = () => String(cfg.urg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
+    // v1.21.1 — cota diária do ntfy.sh (plano grátis, por endereço de internet; Mac e PC da mesma casa somam).
+    // Ao receber 429, para de tentar até a virada do dia em UTC (21h de Brasília) e mostra o aviso.
+    const NTFY_COTA_KEY = 'pp_ntfy_cota_v1';
+    function ntfyCotaAte() { try { const c = JSON.parse(localStorage.getItem(NTFY_COTA_KEY)); return c && c.ate > Date.now() ? c.ate : 0; } catch (e) { return 0; } }
+    function ntfyMarcarCota(r) {
+        if (!r || r.status !== 429) return;
+        const d = new Date(); const ate = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 2);
+        const ja = ntfyCotaAte();
+        try { localStorage.setItem(NTFY_COTA_KEY, JSON.stringify({ ate, em: Date.now() })); } catch (e) { /* ok */ }
+        if (!ja) { console.warn('[PACS Plus] ntfy: cota diária esgotada (429)'); try { urgTela('⚠ Avisos no celular parados', `Cota diária grátis do ntfy.sh esgotada nesta internet. Volta às ${hm(ate)}. Avisos na tela continuam.`, 'aviso', 'pp-cota'); } catch (e) { /* ok */ } }
+    }
     async function ntfyEnviar(o, forcar) {
         const u = cfg.urg;
         if ((!celOn() && !forcar) || !u.ntfyTopico) return null;
+        if (!forcar && ntfyCotaAte()) return false;
         const p = new URLSearchParams();
         if (o.titulo) p.set('t', o.titulo);
         p.set('p', String(o.prio || 3));
@@ -1150,6 +1162,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
         try {
             const r = await fetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            ntfyMarcarCota(r);
+            if (r.ok && forcar) { try { localStorage.removeItem(NTFY_COTA_KEY); } catch (e) { /* ok */ } }
             return r.ok;
         } catch (e) { console.warn('[PACS Plus] ntfy falhou', e); return false; }
     }
@@ -1157,7 +1171,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     async function ntfyAcao(sid, acao, topico) {
         const t = topico || cfg.urg.ntfyTopico;
         if (!t || !sid) return false;
-        try { const r = await fetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); return r.ok; } catch (e) { return false; }
+        if (ntfyCotaAte()) return false;
+        try { const r = await fetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); ntfyMarcarCota(r); return r.ok; } catch (e) { return false; }
     }
     const tgTokenOk = t => /^\d{5,}:[\w-]{20,}$/.test(String(t || '').trim());
     async function tgEnviar(texto, forcar) {
@@ -1491,7 +1506,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             } else if (e.vigiaEm && agora - e.vigiaEm > URG_VIGIA_ATRASO) {
                 await ntfyEnviar({ titulo: '✅ Monitor de urgências voltou', msg: `O ${urgPcNome()} voltou a vigiar os TC urgentes.`, prio: 2, tags: 'white_check_mark' });
             }
-            if (!e.vigiaEm || agora - e.vigiaEm >= URG_VIGIA_CADA) {
+            if ((!e.vigiaEm || agora - e.vigiaEm >= URG_VIGIA_CADA) && agora - (e.vigiaTentEm || 0) >= 5 * 60000) {
+                e.vigiaTentEm = agora; // falhou? tenta de novo só em 5 min (antes: a cada 20 s)
                 const em = Math.min(agora + URG_VIGIA_ATRASO, fimEscalaHoje() + 3 * 60000);
                 const ok = await ntfyEnviar({ sid: 'pp-vigia', em, titulo: '⚠ Monitor de urgências PAROU',
                     msg: 'Sem sinal do computador que vigia os TC urgentes (desligado/hibernando, Chrome ou PACS fechado, sem internet ou sessão expirada). Urgências NÃO estão sendo vigiadas — abra o PACS.', prio: 4, tags: 'warning' });
@@ -1527,7 +1543,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                 urgLeaseEm = Date.now();
                 // solta a vez só se a ÚLTIMA tentativa de leitura falhou (ex.: sessão do PACS expirada)
                 const falhando = ativo && e.ultTentativa && Date.now() - e.ultTentativa < 3 * 60000 && (!e.ultLeitura || e.ultLeitura < e.ultTentativa);
-                const lendoOk = !falhando;
+                const lendoOk = !falhando && !ntfyCotaAte(); // v1.21.1: cota do ntfy esgotada aqui → outro PC (outra internet) assume
                 const antes = urgPapel;
                 urgPapel = await urgLease(!!lendoOk);
                 if (antes === 'reserva' && urgPapel !== 'reserva') {
@@ -1655,7 +1671,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             urgTela('🧪 Teste do PACS Plus', 'Alerta na tela funcionando.', 'aviso', 'pp-teste');
             out.push(`Tela: cartão/som disparados · notificação do sistema: ${perm === 'granted' ? 'permitida' : perm === 'denied' ? 'BLOQUEADA no navegador' : 'clique em “Permitir notificações”'}`);
         } else out.push('Tela: desligado neste computador');
-        if (cfg.urg.ntfyTopico) out.push('ntfy (celular): ' + ((await ntfyEnviar({ sid: 'pp-teste', titulo: '🧪 Teste PACS Plus', msg: 'Se você recebeu isto, os avisos de TC urgente vão chegar neste celular.', prio: 4, tags: 'test_tube' }, true)) ? '✅ enviado' : '❌ falhou'));
+        if (cfg.urg.ntfyTopico) { const ok = await ntfyEnviar({ sid: 'pp-teste', titulo: '🧪 Teste PACS Plus', msg: 'Se você recebeu isto, os avisos de TC urgente vão chegar neste celular.', prio: 4, tags: 'test_tube' }, true); const c = ntfyCotaAte(); out.push('ntfy (celular): ' + (ok ? '✅ enviado' : c ? `❌ cota diária grátis do ntfy.sh esgotada nesta internet (erro 429) — volta às ${hm(c)}` : '❌ falhou (sem internet ou servidor fora)')); }
         else out.push('ntfy: sem tópico');
         if (tgTokenOk(cfg.urg.tgToken) && cfg.urg.tgChat) out.push('Telegram: ' + ((await tgEnviar('🧪 Teste PACS Plus — avisos de TC urgente funcionando.', true)) ? '✅ enviado' : '❌ falhou'));
         if (cfg.urg.poUser && cfg.urg.poToken) out.push('Pushover: ' + ((await poEnviar({ titulo: '🧪 Teste PACS Plus', msg: 'Avisos de TC urgente funcionando.', prio: 0 }, true)) ? '✅ enviado' : '❌ falhou'));
@@ -1775,6 +1791,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
         try {
             const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(t)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            ntfyMarcarCota(r);
             return r.ok;
         } catch (e) { console.warn('[PACS Plus] ntfy (chegada) falhou', e); return false; }
     }
