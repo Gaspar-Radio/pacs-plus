@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.3.3
+// @version      9.3.4
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2553,6 +2553,7 @@
 
     // v9.3 — urgência à mão (vale para estatística; não mexe no PACS)
     // mesma regra do banco: sem classificação, SUS hospitalar conta como urgência
+    const ESPERA_MAX_VALIDA = 720; // > 12 h = erro de registro (fora das médias, igual ao banco)
     const ehSusHosp = i => i.tipo === 'SUS Hospitalar' || /^SUS\b/i.test(String(i.convenio || ''));
     const urgEfetivo = i => i.urgente != null ? !!i.urgente : ehSusHosp(i);
     const setorEfetivo = i => i.setor || ((String(i.convenio || '').match(/^SUS\s*-\s*(.+)$/i) || [])[1] || '').trim() || null;
@@ -2722,7 +2723,7 @@
         if (item.status === 'esperando') {
             const w = calcWaitTime(item.chegouEm, null);
             label = `⏳ ${formatMinutes(w)}`;
-            sla = getSLAClass(w);
+            sla = urgEfetivo(item) ? 'sla-normal' : getSLAClass(w); // urgência: sem SLA (feita quando o quadro permite)
         } else if (item.status === 'atendido') {
             const w = (item.tempoEsperaMin !== undefined && item.tempoEsperaMin !== null) ? item.tempoEsperaMin : (item.chegouEm ? calcWaitTime(item.chegouEm, item.atendidoEm) : null);
             label = w !== null ? `✓ ${formatMinutes(w)}` : '✓ Atendido';
@@ -2827,12 +2828,17 @@
         const atend = list.filter(i => i.status === 'atendido');
         const faltas = list.filter(i => i.status === 'faltou');
         const taxa = tot ? Math.round(faltas.length / tot * 100) : 0;
-        const comTempo = atend.filter(i => i.tempoEsperaMin !== null && i.tempoEsperaMin !== undefined && !isNaN(i.tempoEsperaMin));
+        // v9.3.4 — urgência (internado/PS) é feita quando o quadro permite: não entra no tempo de espera nem no SLA
+        const tempoOk = i => i.tempoEsperaMin !== null && i.tempoEsperaMin !== undefined && !isNaN(i.tempoEsperaMin) && i.tempoEsperaMin >= 0 && i.tempoEsperaMin <= ESPERA_MAX_VALIDA;
+        const comTempo = atend.filter(i => !urgEfetivo(i) && tempoOk(i));
         const avg = comTempo.length ? Math.round(comTempo.reduce((a, i) => a + i.tempoEsperaMin, 0) / comTempo.length) : null;
-        const waits = list.filter(i => i.status === 'esperando').map(i => calcWaitTime(i.chegouEm, null) || 0);
+        const urgAtend = atend.filter(i => urgEfetivo(i) && tempoOk(i)).map(i => i.tempoEsperaMin).sort((x, y) => x - y);
+        const urgMed = urgAtend.length ? urgAtend[Math.floor((urgAtend.length - 1) / 2)] : null;
+        const urgEspera = list.filter(i => i.status === 'esperando' && urgEfetivo(i)).length;
+        const waits = list.filter(i => i.status === 'esperando' && !urgEfetivo(i)).map(i => calcWaitTime(i.chegouEm, null) || 0);
         const a = waits.filter(w => w >= 30 && w < 45).length, l = waits.filter(w => w >= 45 && w < 60).length, v = waits.filter(w => w >= 60).length;
         const stDia = dayStats(list), stReal = dayStats(atend);
-        const fichaImg = list.filter(i => i.chegadaFonte === 'pacs' && i.chegouEm && i.imagemEm).map(i => calcWaitTime(i.chegouEm, i.imagemEm));
+        const fichaImg = list.filter(i => !urgEfetivo(i) && i.chegadaFonte === 'pacs' && i.chegouEm && i.imagemEm).map(i => calcWaitTime(i.chegouEm, i.imagemEm));
         const avgFI = fichaImg.length ? Math.round(fichaImg.reduce((x, y) => x + y, 0) / fichaImg.length) : null;
         const encPacs = list.filter(i => i.origem === 'encaixe_pacs').length;
 
@@ -2841,12 +2847,12 @@
                 ${box(tot, 'Linhas na agenda', isDarkMode ? '#f1f5f9' : '#0f172a')}
                 ${box(atend.length, 'Atendidos', '#059669')}
                 ${box(`${faltas.length} (${taxa}%)`, 'Faltas (No-Show)', '#e11d48')}
-                ${box(formatMinutes(avg), 'Tempo Médio Espera', '#2563eb')}
+                ${box(formatMinutes(avg), `Espera média — eletivos (n=${comTempo.length})`, '#2563eb')}
             </div>
             <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px;">
                 ${box(`${stDia.pacientes} / ${stDia.procedimentos}`, 'Pacientes / Procedimentos (dia)', isDarkMode ? '#f1f5f9' : '#0f172a')}
                 ${box(`${stReal.pacientes} / ${stReal.procedimentos}`, 'Realizados (pac. / proc.)', '#059669')}
-                ${box(formatMinutes(avgFI), `Ficha → imagem (média, n=${fichaImg.length})`, '#0891b2')}
+                ${box(formatMinutes(avgFI), `Ficha → imagem, eletivos (n=${fichaImg.length})`, '#0891b2')}
                 ${box(encPacs, 'Encaixes vindos do PACS', '#7c3aed')}
             </div>
             <div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px;">
@@ -2856,6 +2862,7 @@
                     <div class="sla-laranja" style="flex:1; padding:5px 8px; border-radius:5px;"><strong>${l}</strong> atenção (≥ 45 min)</div>
                     <div class="sla-vermelho" style="flex:1; padding:5px 8px; border-radius:5px; animation:none;"><strong>${v}</strong> crítico (≥ 60 min)</div>
                 </div>
+                <div style="font-size:10px; color:#64748b; margin-top:6px;">🚨 Urgências fora do SLA e da média: ${urgEspera} aguardando · ${urgAtend.length} realizada(s)${urgMed != null ? ` · ficha → exame (mediana) ${formatMinutes(urgMed)}` : ''}.</div>
             </div>`;
     }
 
@@ -2912,9 +2919,10 @@
             // v9.3 — urgências (exames realizados), últimos 3 meses; se a view não existir, só não mostra
             const m0 = new Date(); m0.setMonth(m0.getMonth() - 2); m0.setDate(1);
             const mesMin = `${m0.getFullYear()}-${String(m0.getMonth() + 1).padStart(2, '0')}-01`;
-            const [urgM, urgS] = await Promise.all([
+            const [urgM, urgS, urgT] = await Promise.all([
                 requestSupabase(`vw_urgencias_mes?select=*&mes=gte.${mesMin}&order=mes.desc`, 'GET').catch(() => []),
-                requestSupabase(`vw_urgencias_setor?select=*&mes=gte.${mesMin}&order=mes.desc,pacientes.desc`, 'GET').catch(() => [])
+                requestSupabase(`vw_urgencias_setor?select=*&mes=gte.${mesMin}&order=mes.desc,pacientes.desc`, 'GET').catch(() => []),
+                requestSupabase(`vw_espera_urgencia_mes?select=*&mes=gte.${mesMin}&order=mes.desc`, 'GET').catch(() => [])
             ]);
             const MES3 = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
             const fmtMes = iso => { const [y, m] = String(iso).split('-').map(Number); return `${MES3[m - 1]}/${String(y).slice(2)}`; };
@@ -2926,6 +2934,7 @@
                         ${urgM.map(r => `<tr><td style="padding:3px 6px; font-weight:700;">${fmtMes(r.mes)}</td><td style="padding:3px 6px; text-align:right;">${r.pacientes}</td><td style="padding:3px 6px; text-align:right; color:#dc2626; font-weight:700;">${r.pacientes_urgencia}</td><td style="padding:3px 6px; text-align:right;">${r.pct_pacientes_urgencia ?? 0}%</td><td style="padding:3px 6px; text-align:right;">${r.procedimentos_urgencia}</td>
                             <td style="padding:3px 6px; font-size:9.5px;">${(urgS || []).filter(x => x.mes === r.mes).map(x => `${escapeHtml(x.setor)} (${FONTE[x.fonte] || escapeHtml(x.fonte)}): ${x.pacientes}`).join(' · ') || '—'}</td></tr>`).join('')}
                     </table>
+                    ${(urgT || []).length ? `<div style="font-size:10px; margin-top:6px;">⏱ Ficha → exame nas urgências (informativo, fora da média de espera): ${urgT.map(t => `${fmtMes(t.mes)} mediana ${formatMinutes(t.ficha_exame_mediana_min)} (n=${t.com_tempo}, ${t.ate_60min} em até 60 min)`).join(' · ')}</div>` : ''}
                     <div style="font-size:9.5px; color:#94a3b8; margin-top:4px;">SUS hospitalar (PS, internado, UTI, maternidade) conta automaticamente; os demais pela marcação de urgência no PACS ou pelo botão 🚨 da agenda. Inclui o mês corrente.</div></div>` : '';
             if (!Array.isArray(conv) || !conv.length) {
                 content.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">Nenhum atendimento ou falta registrado nos últimos 30 dias.</div>`;
@@ -2964,14 +2973,15 @@
                     ${box(pacientes, 'Pacientes com desfecho (30d)', isDarkMode ? '#f1f5f9' : '#0f172a')}
                     ${box(`${faltas} (${taxa}%)`, 'Faltas (No-Show)', '#e11d48')}
                     ${box(perdidos, 'Procedimentos perdidos', '#f59e0b')}
-                    ${box(formatMinutes(mediaEsp), `Espera média (${acimaEsp} > 60 min)`, '#2563eb')}
+                    ${box(formatMinutes(mediaEsp), `Espera média eletivos (${acimaEsp} > 60 min)`, '#2563eb')}
                 </div>
                 <div style="font-size:10px; color:#94a3b8; margin-bottom:10px;">Últimos 30 dias encerrados (até ontem). Falta contada por paciente/dia; cancelados e quem saiu da planilha não entram. Calculado no banco — mesmo resultado nos 3 computadores.</div>
                 ${barrasHtml(rowsConv, '📊 No-Show por Convênio / Setor', 'Nomes de convênio padronizados (ex.: variações de SERPRAM somadas). Cinza = menos de 5 pacientes.')}
                 ${barrasHtml(rowsHora, '🕒 No-Show por Faixa Horária (30 dias, por exame)')}
                 ${barrasHtml(rowsDia, '📅 No-Show por Dia da Semana (90 dias, por exame)')}
                 ${tiposHtml ? `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
-                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">⏱ Tempo de espera (chegada → atendimento, 30 dias)</div>
+                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">⏱ Tempo de espera — eletivos (chegada → atendimento, 30 dias)</div>
+                    <div style="font-size:9.5px; color:#94a3b8; margin-bottom:4px;">Urgências (internado/PS, SUS hospitalar, marcadas no PACS ou no 🚨) não entram: são feitas quando o quadro permite. Tempos acima de 12 h são tratados como erro de registro.</div>
                     <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
                         <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Tipo</th><th style="text-align:right; padding:3px 6px;">Atendidos</th><th style="text-align:right; padding:3px 6px;">Média</th><th style="text-align:right; padding:3px 6px;">&gt; 60 min</th><th style="text-align:right; padding:3px 6px;">Máximo</th></tr>
                         ${tiposHtml}

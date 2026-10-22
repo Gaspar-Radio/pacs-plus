@@ -105,7 +105,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.1.1';
+const VERSAO = '1.1.2';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -404,7 +404,7 @@ async function pdfAnalytics() {
     let y = 28;
     y = tab('Resumo (30 dias)', ['Indicador', 'Valor'], [
         ['Pacientes com desfecho', String(a.pac)], ['Faltas', `${a.fal} (${a.pac ? Math.round(a.fal / a.pac * 100) : 0}%)`],
-        ['Procedimentos perdidos', String(a.perd)], ['Espera média', fmtMin(a.media)], ['Esperas acima de 60 min', String(a.acima60)]], y);
+        ['Procedimentos perdidos', String(a.perd)], ['Espera média (eletivos)', fmtMin(a.media)], ['Esperas acima de 60 min', String(a.acima60)]], y);
     y = tab('Faltas por convênio (30 dias)', ['Convênio', 'Faltas', 'Pacientes', '%'], (a.conv || []).map(r => [r.convenio, r.faltas, r.pacientes, `${r.taxa_noshow_pct ?? 0}%`]), y);
     y = tab('Faltas por faixa horária (30 dias)', ['Faixa', 'Faltas', 'Agendados', '%'], (a.hora || []).map(r => [`${String(r.faixa || '').slice(0, 2)}h · ${r.periodo || ''}`, r.faltas, r.agendados, `${r.taxa_noshow_pct ?? 0}%`]), y);
     y = tab('Faltas por dia da semana (90 dias)', ['Dia', 'Faltas', 'Agendados', '%'], (a.dia || []).map(r => [r.dia, r.faltas, r.agendados, `${r.taxa_noshow_pct ?? 0}%`]), y);
@@ -490,7 +490,7 @@ function tagConv(r) {
     return `<span class="tag ${cls}">${esc(c || '—')}</span>`;
 }
 function statusHtml(r) {
-    if (r.status === 'esperando') { const w = minutos(r.chegou_em); return `<span class="st ${slaCls(w)}">⏳ ${fmtMin(w)}</span>`; }
+    if (r.status === 'esperando') { const w = minutos(r.chegou_em); return `<span class="st ${r.urgente ? '' : slaCls(w)}">⏳ ${fmtMin(w)}</span>`; } // urgência: sem SLA
     if (r.status === 'atendido') { const w = r.tempo_espera_min != null ? r.tempo_espera_min : (r.chegou_em ? minutos(r.chegou_em, r.atendido_em) : null); return `<span class="st ok">✓ ${w != null ? fmtMin(w) : ''}${r.atendido_fonte === 'imagem' ? ' 🩻' : ''}</span>`; }
     if (r.status === 'faltou') return '<span class="st fal">FALTOU</span>';
     if (r.status === 'cancelado') return '<span class="st">CANCELADO</span>';
@@ -518,7 +518,7 @@ function pintarAgenda() {
     const cnt = st => L.filter(r => (r.status || 'pendente') === st).length;
     const m = L.filter(r => normTime(r.hora) < '12:00'), t = L.filter(r => normTime(r.hora) >= '12:00');
     const st = arr => { const a = arr.filter(r => r.status !== 'cancelado'); return `${new Set(a.map(chavePac)).size} pac · ${a.reduce((x, r) => x + proc(r), 0)} proc`; };
-    const esp = L.filter(r => r.status === 'esperando').map(r => minutos(r.chegou_em) || 0);
+    const esp = L.filter(r => r.status === 'esperando' && !r.urgente).map(r => minutos(r.chegou_em) || 0);
     tela.innerHTML = `<div class="chips">${L.length ? '<button class="chip pdf" id="pdfdia">📄 PDF</button>' : ''}
 <span class="chip">👤 ${new Set(ativos.map(chavePac)).size}</span><span class="chip">🧾 ${ativos.reduce((a, r) => a + proc(r), 0)}</span>
 <span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${cnt('cancelado') ? `<span class="chip">⊘ ${cnt('cancelado')}</span>` : ''}${ativos.some(r => r.urgente) ? `<span class="chip">🚨 ${new Set(ativos.filter(r => r.urgente).map(chavePac)).size}</span>` : ''}</div>
@@ -591,12 +591,12 @@ async function telaAnalytics() {
         carregarPdfLib().catch(() => {});
         const urgHtml = (urgM || []).length ? `<h2><span>Urgências (exames realizados)</span></h2><table class="tbl"><tr><th>Mês</th><th class="num">Pac.</th><th class="num">Urg.</th><th class="num">%</th><th class="num">Proc. urg.</th></tr>${urgM.map(r => `<tr><td>${fmtMes(r.mes)}</td><td class="num">${r.pacientes}</td><td class="num">${r.pacientes_urgencia}</td><td class="num">${r.pct_pacientes_urgencia ?? 0}%</td><td class="num">${r.procedimentos_urgencia}</td></tr>`).join('')}</table>
 <div class="card" style="margin-top:8px">${(urgS || []).filter(r => r.mes === (urgM[0] || {}).mes).map(r => `<div class="tl">${esc(r.setor)} <span>· ${esc({ sus: 'regra SUS', pacs: 'PACS', manual: 'manual' }[r.fonte] || r.fonte)}</span> — <b>${r.pacientes}</b> pac. / ${r.procedimentos} proc.</div>`).join('') || '<div class="vazio">Nenhuma urgência no mês</div>'}</div>` : '';
-        tela.innerHTML = `<main><button class="btnp" id="pdfan" style="margin:4px 0 10px">📄 Gerar PDF para compartilhar</button><div class="kpis"><div class="kpi"><b>${pac}</b><span>Pacientes com desfecho (30 d)</span></div><div class="kpi"><b style="color:var(--er)">${fal} (${pac ? Math.round(fal / pac * 100) : 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${perd}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(media)}</b><span>Espera média (${soma(espera, 'acima_60min')} acima de 60 min)</span></div></div>
+        tela.innerHTML = `<main><button class="btnp" id="pdfan" style="margin:4px 0 10px">📄 Gerar PDF para compartilhar</button><div class="kpis"><div class="kpi"><b>${pac}</b><span>Pacientes com desfecho (30 d)</span></div><div class="kpi"><b style="color:var(--er)">${fal} (${pac ? Math.round(fal / pac * 100) : 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${perd}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(media)}</b><span>Espera média eletivos (${soma(espera, 'acima_60min')} acima de 60 min)</span></div></div>
 ${barras((conv || []).map(r => ({ k: r.convenio, f: r.faltas, t: r.pacientes, p: r.taxa_noshow_pct })), 'Faltas por convênio (30 d)')}
 ${barras((hora || []).map(r => ({ k: `${String(r.faixa || '').slice(0, 2)}h · ${r.periodo || ''}`, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por faixa horária (30 d)')}
 ${barras((dia || []).map(r => ({ k: r.dia, f: r.faltas, t: r.agendados, p: r.taxa_noshow_pct })), 'Por dia da semana (90 d)')}
 ${urgHtml}
-<div class="note">Faltas: dias encerrados (até ontem). Urgências: exames realizados; SUS hospitalar conta automaticamente, os demais pelo PACS ou marcados à mão. Mesmo cálculo dos PCs (views do banco).</div></main>`;
+<div class="note">Faltas: dias encerrados (até ontem). Urgências: exames realizados; SUS hospitalar conta automaticamente, os demais pelo PACS ou marcados à mão. Espera = só eletivos (urgência não entra na média nem no SLA). Mesmo cálculo dos PCs (views do banco).</div></main>`;
         $('#pdfan').onclick = () => pdfAnalytics();
     } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
 }
