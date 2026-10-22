@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.20.0
+// @version      1.21.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -104,7 +104,8 @@
         lembretes: '60,30,15',       // minutos antes do prazo
         repetirVencido: 15, repetirVezes: 4,
         horas: 2,                    // prazo da urgência (teto, e base do prazo provisório)
-        semConfirmacao: 15,          // avisa se o urgente não for confirmado em X min
+        semConfirmacao: 15,          // avisa se o urgente não for confirmado em X min (repete até 4x)
+        provisorio: false,           // v1.21: false = cronômetro só começa na confirmação dos técnicos; true = prazo provisório desde a marcação (antigo)
         encerra: 'LIBERADO',         // situações que encerram o acompanhamento
         som: true, notifWindows: true,
         ntfyServidor: 'https://ntfy.sh', ntfyTopico: '',
@@ -1045,9 +1046,10 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     // ---------------------------------------------------------------------
     // A cada 60 s lê pela API do PACS (mesma sessão) os TC URGENTES de hoje com
     // ficha dentro da escala (seg–sex 07–17, sem feriados). Fora da escala é
-    // telelaudo: ignorado. Prazo = SLA de urgência do PACS quando os técnicos
-    // CONFIRMAM; sem confirmação usa prazo PROVISÓRIO (2 h a partir de quando o
-    // urgente apareceu) — o mais seguro — e avisa que falta confirmar.
+    // telelaudo: ignorado. Prazo = SLA de urgência do PACS, contado a partir da
+    // CONFIRMAÇÃO dos técnicos. v1.21: antes da confirmação NÃO há cronômetro
+    // (só o aviso "marcado, aguardando confirmação" e o lembrete de que falta
+    // confirmar). Opção "provisorio" volta ao modo antigo (2 h desde a marcação).
     // Avisos: tela (cartão + som + notificação do sistema) e celular (ntfy;
     // opcional Telegram e Pushover). No ntfy os lembretes (60/30/15 min, vencido,
     // repetições) ficam AGENDADOS NO SERVIDOR: chegam mesmo se o PC desligar e são
@@ -1251,8 +1253,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const ign = '\n(se já liberou, ignore)';
         let r;
         if (tipo === 'novo') r = ['🚨 TC URGENTE — vence ' + v, `${info}\nConfirmado ${g.confirmadoEm ? hm(g.confirmadoEm) : ''} · faltam ${faltaTxt(falta)}`, 5, 'rotating_light', 'urgente', 1];
-        else if (tipo === 'novoSemConf') r = ['🚨 TC URGENTE — aguardando confirmação', `${info}\nPrazo provisório ${v} (${+cfg.urg.horas || 2} h a partir de agora). O prazo oficial começa quando os técnicos confirmarem.`, 5, 'rotating_light', 'urgente', 1];
-        else if (tipo === 'semConf') r = ['⚠ TC urgente ainda sem confirmação', `${info}\nHá ${faltaTxt(agora - g.detectadoEm)} sem confirmar. Prazo provisório ${v}.`, 4, 'warning', 'aviso', 1];
+        else if (tipo === 'novoSemConf') r = ['🚨 TC URGENTE marcado — aguardando confirmação', g.vence ? `${info}\nPrazo provisório ${v} (${+cfg.urg.horas || 2} h a partir de agora). O prazo oficial começa quando os técnicos confirmarem.` : `${info}\nCronômetro ainda NÃO iniciado: o prazo de ${+cfg.urg.horas || 2} h começa quando os técnicos confirmarem o exame.`, 5, 'rotating_light', 'urgente', 1];
+        else if (tipo === 'semConf') r = ['⚠ TC urgente ainda sem confirmação', `${info}\nMarcado há ${faltaTxt(agora - g.detectadoEm)} e os técnicos ainda não confirmaram.${g.vence ? ' Prazo provisório ' + v + '.' : ' Cronômetro parado até a confirmação.'}`, 4, 'warning', 'aviso', 1];
         else if (tipo === 'conf') r = ['⏱ TC urgente confirmado — vence ' + v, `${info}\nConfirmado ${g.confirmadoEm ? hm(g.confirmadoEm) : ''} · faltam ${faltaTxt(falta)}`, 4, 'stopwatch', 'aviso', 1];
         else if (tipo === 'r0') r = ['❌ PRAZO VENCIDO — TC urgente (' + v + ')', info + prov + ign, 5, 'x', 'urgente', 2];
         else if (/^r\d+$/.test(tipo)) {
@@ -1260,6 +1262,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const t = m >= 60 && m % 60 === 0 ? `⏰ Falta${m > 60 ? 'm' : ''} ${m / 60} h` : `${forte ? '🚨' : '⏰'} Faltam ${m} min`;
             r = [t + ' — TC urgente (vence ' + v + ')', info + prov + ign, forte ? 5 : 4, forte ? 'rotating_light' : 'alarm_clock', forte ? 'urgente' : 'aviso', forte ? 2 : 1];
         } else if (/^v\d+$/.test(tipo)) r = [`❌ Vencido há ${faltaTxt(agora - g.vence)} — TC urgente`, `Venceu às ${v} · ${info}${ign}`, 5, 'x', 'urgente', 2];
+        else if (tipo === 'fimLiberado' && !g.vence) r = ['✅ TC urgente liberado', `${info}\nLiberado ${hm(g.encerradoEm || agora)} (antes da confirmação dos técnicos)`, 2, 'white_check_mark', 'info', 0];
         else if (tipo === 'fimLiberado') {
             const d = g.vence - (g.encerradoEm || agora);
             r = [d >= 0 ? `✅ TC urgente liberado — ${faltaTxt(d)} antes do prazo` : `✅ TC urgente liberado — ${faltaTxt(-d)} após o prazo`, `${info}\nPrazo ${v} · liberado ${hm(g.encerradoEm || agora)}`, 2, 'white_check_mark', 'info', 0];
@@ -1285,7 +1288,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     async function urgAgendar(g) {
         // v1.9.2: só marca como agendado se o celular estiver ligado — assim, ao ligar o celular
         // com um urgente já aberto, os lembretes desse paciente também são agendados no ntfy.
-        if (!celOn() || !cfg.urg.ntfyTopico) return;
+        if (!celOn() || !cfg.urg.ntfyTopico || !g.vence) return;
         g.agendaVence = g.vence;
         const base = gsid(g), agora = Date.now(), plano = [];
         lembretesMin().forEach(m => plano.push(['r' + m, g.vence - m * 60000]));
@@ -1393,7 +1396,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                 if (todosEncerrados) { e.grupos[k] = { key: k, dia: e.dia, ciclo: 0, aberto: false, motivo: 'jaLiberado', cods: Object.fromEntries(xs.map(x => [x.exa_codigo, 1])) }; continue; }
                 g = e.grupos[k] = { key: k, dia: e.dia, ciclo: 0, detectadoEm: agora, enviados: {}, aberto: true, cods: {} };
             }
-            const novo = !g.vence;
+            const novo = !g.avisoNovo && !g.vence;
             g.miss = 0;
             const x0 = xs[0];
             g.nome = String((x0.paciente && x0.paciente.pac_nome) || '');
@@ -1417,11 +1420,15 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                 g.confirmadoEm = cs.length ? Math.min(...cs) : (g.confirmadoEm || agora);
                 vence = Math.min(vence, g.confirmadoEm + horasCfg * 3600000); // SLA eletivo num exame urgente não estica o prazo
                 g.provisorio = false;
-            } else { vence = g.detectadoEm + horas * 3600000; g.provisorio = true; g.confirmadoEm = null; }
-            if (g.vence !== vence) { g.vence = vence; urgResetLembretes(g, agora); }
-            if (novo) await urgEvento(g, g.provisorio ? 'novoSemConf' : 'novo', e);
+            } else {
+                // v1.21: sem confirmação o cronômetro NÃO corre (exame marcado pode nem ter imagem ainda)
+                vence = cfg.urg.provisorio ? g.detectadoEm + horas * 3600000 : null;
+                g.provisorio = true; g.confirmadoEm = null;
+            }
+            if (g.vence !== vence) { g.vence = vence; if (vence) urgResetLembretes(g, agora); }
+            if (novo) { g.avisoNovo = true; await urgEvento(g, g.provisorio ? 'novoSemConf' : 'novo', e); }
             else if (eraProv && !g.provisorio && !g.enviados.conf) await urgEvento(g, 'conf', e);
-            if (g.pausado) { if (Object.keys(g.agenda || {}).length) await urgCancelarAgenda(g); }
+            if (g.pausado || !g.vence) { if (Object.keys(g.agenda || {}).length) await urgCancelarAgenda(g); }
             else if (g.agendaVence !== g.vence) await urgAgendar(g);
         }
         // grupos que sumiram (urgência retirada ou exame cancelado): 2 leituras seguidas
@@ -1437,8 +1444,14 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const agora = Date.now(), L = lembretesMin();
         const rep = +cfg.urg.repetirVencido || 0, vezes = Math.min(12, +cfg.urg.repetirVezes || 0);
         for (const g of Object.values(e.grupos || {})) {
-            if (!g.aberto || g.pausado || !g.vence) continue;
-            if (g.provisorio && !g.enviados.semConf && agora - g.detectadoEm >= (+cfg.urg.semConfirmacao || 15) * 60000) await urgEvento(g, 'semConf', e);
+            if (!g.aberto || g.pausado) continue;
+            // falta confirmar: avisa após X min e repete a cada X min (até 4 vezes)
+            if (g.provisorio && g.detectadoEm) {
+                const n = Math.floor((agora - g.detectadoEm) / ((+cfg.urg.semConfirmacao || 15) * 60000));
+                const ja = g.semConfN || (g.enviados.semConf ? 1 : 0);
+                if (n >= 1 && n > ja && ja < 4) { g.semConfN = n; await urgEvento(g, 'semConf', e); }
+            }
+            if (!g.vence) continue;
             const dev = L.filter(m => !g.enviados['r' + m] && agora >= g.vence - m * 60000 && agora < g.vence);
             if (dev.length) { const m = Math.min(...dev); dev.forEach(x => { if (x !== m) g.enviados['r' + x] = 'pulado'; }); await urgEvento(g, 'r' + m, e); }
             if (!g.enviados.r0 && agora >= g.vence) { L.forEach(m => { if (!g.enviados['r' + m]) g.enviados['r' + m] = 'pulado'; }); await urgEvento(g, 'r0', e); }
@@ -1519,7 +1532,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                 urgPapel = await urgLease(!!lendoOk);
                 if (antes === 'reserva' && urgPapel !== 'reserva') {
                     // assumiu: reenvia o estado dos urgentes abertos e reagenda os lembretes (mesmos ids no ntfy = substitui)
-                    const abertos = Object.values(e.grupos).filter(g => g.aberto && g.vence);
+                    const abertos = Object.values(e.grupos).filter(g => g.aberto);
                     if (abertos.length || naEscalaData(new Date())) await ntfyEnviar({ titulo: `🔁 ${urgPcNome()} assumiu o monitor de urgências`, msg: abertos.length ? `${abertos.length} TC urgente(s) em aberto — lembretes reagendados.` : 'O outro computador parou de vigiar; este assumiu.', prio: 3, tags: 'repeat' });
                     for (const g of abertos) { g.agendaVence = null; if (!g.pausado) await urgAgendar(g); }
                     e.vigiaEm = 0;
@@ -1578,14 +1591,21 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         let box = document.getElementById('pp-urg');
         if (!document.body || !cfg.urg.tela || !urgLigado()) { if (box) box.remove(); return; }
         const e = urgEstado(), agora = Date.now();
-        const grupos = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+        const grupos = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto).sort((a, b) => (a.vence || 9e15) - (b.vence || 9e15));
         const ocultos = urgUi().ocultar || {};
         let html = '';
         if (e.erro && naEscalaData(new Date()) && !urgPausado() && agora - (e.ultLeitura || 0) > 3 * 60000) {
             html += `<div class="pp-uc erro"><div class="pp-ut"><span>⚠ Monitor de TC urgente sem leitura</span></div><div class="pp-us">${esc(e.erro)} · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}</div></div>`;
         }
-        const visiveis = grupos.filter(g => !(ocultos[g.key] > agora && g.vence - agora > 15 * 60000));
+        const visiveis = grupos.filter(g => !(ocultos[g.key] > agora && (!g.vence || g.vence - agora > 15 * 60000)));
         html += visiveis.map(g => {
+            if (!g.vence) {
+                const exs0 = Object.values(g.exames || {}).map(y => y.d).join(' + ');
+                return `<div class="pp-uc azul"><div class="pp-ut"><span>🚨 TC URGENTE · aguardando confirmação</span><span class="pp-uf">⏸</span></div>`
+                    + `<div class="pp-us"><b>${esc(g.nome)}</b>${g.idade != null ? ' · ' + g.idade + ' a' : ''}${g.conv ? ' · ' + esc(g.conv) : ''}${g.ficha ? ' · ficha ' + esc(g.ficha) : ''}</div>`
+                    + `<div class="pp-us">${esc(exs0)}</div><div class="pp-us">marcado há ${faltaTxt(agora - (g.detectadoEm || agora))} · o prazo de ${+cfg.urg.horas || 2} h começa na confirmação dos técnicos</div>`
+                    + `<div class="pp-ub"><button data-urg-ver="${esc(g.nome)}">🔎 Ver na lista</button><button data-urg-ocultar="${esc(g.key)}">Ocultar 15 min</button></div></div>`;
+            }
             const falta = g.vence - agora;
             const cls = falta <= 0 ? 'vencido' : falta <= 30 * 60000 ? 'vermelho' : falta <= 60 * 60000 ? 'laranja' : 'azul';
             const exs = Object.values(g.exames || {}).map(y => y.d).join(' + ');
@@ -2309,11 +2329,11 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         let txt = '', cor = '';
         if (urgLigado()) {
             const e = urgEstado(), agora = Date.now();
-            const gs = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+            const gs = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto).sort((a, b) => (a.vence || 9e15) - (b.vence || 9e15));
             if (gs.length) {
-                const f = gs[0].vence - agora;
-                txt = `🚨 ${gs.length} TC urgente${gs.length > 1 ? 's' : ''} · ${f <= 0 ? 'vencido' : faltaTxt(f)}`;
-                cor = f <= 30 * 60000 ? '' : f <= 60 * 60000 ? 'laranja' : 'azul';
+                const f = gs[0].vence ? gs[0].vence - agora : null;
+                txt = `🚨 ${gs.length} TC urgente${gs.length > 1 ? 's' : ''} · ${f == null ? 'aguardando confirmação' : f <= 0 ? 'vencido' : faltaTxt(f)}`;
+                cor = f == null ? 'azul' : f <= 30 * 60000 ? '' : f <= 60 * 60000 ? 'laranja' : 'azul';
             }
         }
         if (ug.textContent !== txt) ug.textContent = txt;
@@ -3743,13 +3763,13 @@ ${slaStat.ultimo ? `Exames recalculados na lista agora: <b>${slaStat.ajustados}<
         let lider = null; try { lider = JSON.parse(localStorage.getItem(URG_LIDER_KEY)); } catch (x) { lider = null; }
         const vigiaAqui = lider && lider.id === URG_TAB && agora - lider.ts < URG_LIDER_TTL;
         const grupos = e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : [];
-        const abertos = grupos.filter(g => g.aberto && g.vence).sort((a, b) => a.vence - b.vence);
+        const abertos = grupos.filter(g => g.aberto).sort((a, b) => (a.vence || 9e15) - (b.vence || 9e15));
         const fechados = grupos.filter(g => !g.aberto && g.motivo && g.motivo !== 'jaLiberado').length;
         const estado = !urgLigado() ? '⚪ Monitor desligado neste computador' : urgPausado() ? '⏸ Pausado até ' + esc(u.pausaAte) : '🟢 Monitor ligado neste computador';
         body.innerHTML = `
 <div class="pp-res" style="margin-top:0;"><b>${estado}</b>${urgModoTeste() ? ' · <span class="pp-warn">MODO TESTE até ' + hm(cfg.urg.testeAte) + ' (inclui pacientes TESTE)</span>' : ''}
 <div class="pp-muted">Agora: ${naEscalaData(new Date()) ? 'dentro' : 'fora'} da escala · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}${urgLigado() ? ' · ' + (vigiaAqui ? 'esta aba é a que vigia' : 'outra aba deste computador vigia') : ''}${e.erro ? ' · <span class="pp-warn">' + esc(e.erro) + '</span>' : ''}</div>
-${abertos.length ? abertos.map(g => `<div>🚨 <b>${esc(g.nome)}</b> — ${esc(Object.values(g.exames || {}).map(y => y.d).join(' + '))} · vence <b>${hm(g.vence)}</b>${g.provisorio ? ' (provisório)' : ''}</div>`).join('') : '<div class="pp-muted">Nenhum TC urgente aberto agora.</div>'}
+${abertos.length ? abertos.map(g => `<div>🚨 <b>${esc(g.nome)}</b> — ${esc(Object.values(g.exames || {}).map(y => y.d).join(' + '))} · ${g.vence ? 'vence <b>' + hm(g.vence) + '</b>' + (g.provisorio ? ' (provisório)' : '') : '<b>aguardando confirmação</b> (cronômetro parado)'}</div>`).join('') : '<div class="pp-muted">Nenhum TC urgente aberto agora.</div>'}
 ${fechados ? `<div class="pp-muted">Encerrados hoje: ${fechados}</div>` : ''}</div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-tela" ${u.tela ? 'checked' : ''}><span>Alerta na tela deste computador<small>Cartão no canto da tela, som e notificação do sistema.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-u-cel" ${u.celular ? 'checked' : ''}><span>Enviar avisos ao celular a partir deste computador<small>Pode ligar em mais de um (ex.: Mac de casa sempre ligado + PC do hospital). Só um envia por vez; se ele parar ou a sessão do PACS expirar, o outro assume em ~2 min. Precisa do login da Agenda (🔐) nos dois e do MESMO tópico do ntfy.</small></span></label>
@@ -3761,6 +3781,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-grid3"><label>Início<input id="pp-u-ini" value="${esc(u.inicio)}" placeholder="07:00"></label><label>Fim<input id="pp-u-fim" value="${esc(u.fim)}" placeholder="17:00"></label><label>Modalidades<input id="pp-u-mods" value="${esc(u.modalidades)}"></label></div>
 <div class="pp-grid3"><label>Lembretes (min antes)<input id="pp-u-lemb" value="${esc(u.lembretes)}"></label><label>Repetir vencido a cada (min)<input id="pp-u-rep" value="${esc(u.repetirVencido)}"></label><label>… quantas vezes<input id="pp-u-vezes" value="${esc(u.repetirVezes)}"></label></div>
 <div class="pp-grid3"><label>Prazo da urgência (h)<input id="pp-u-horas" value="${esc(u.horas)}"></label><label>Avisar sem confirmação após (min)<input id="pp-u-semc" value="${esc(u.semConfirmacao)}"></label><label>Encerra quando<input id="pp-u-enc" value="${esc(u.encerra)}"></label></div>
+<label class="pp-tog"><input type="checkbox" id="pp-u-prov" ${u.provisorio ? 'checked' : ''}><span>Prazo provisório antes da confirmação (modo antigo)<small>Desligado (recomendado): o cronômetro só começa quando os técnicos confirmam o exame no PACS — igual ao SLA do PACS. Ligado: conta ${esc(u.horas)} h desde a marcação de urgente.</small></span></label>
 <div class="pp-grid2"><label>Pausar avisos até (férias/folga)<input type="date" id="pp-u-pausa" value="${esc(u.pausaAte)}"></label>
 <div class="pp-checks" style="margin-top:16px;"><label><input type="checkbox" id="pp-u-som" ${u.som ? 'checked' : ''}>Som</label><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
 <div class="pp-h">Celular — app ntfy (grátis, Android e iPhone)</div>
@@ -3805,6 +3826,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
                 repetirVezes: inteiro($('#pp-u-vezes').value, URG_PADRAO.repetirVezes, 0, 12),
                 horas: inteiro($('#pp-u-horas').value, URG_PADRAO.horas, 1, 48),
                 semConfirmacao: inteiro($('#pp-u-semc').value, URG_PADRAO.semConfirmacao, 1, 240),
+                provisorio: $('#pp-u-prov').checked,
                 encerra: $('#pp-u-enc').value.trim() || 'LIBERADO',
                 pausaAte: $('#pp-u-pausa').value || '',
                 som: $('#pp-u-som').checked, notifWindows: $('#pp-u-notif').checked,
