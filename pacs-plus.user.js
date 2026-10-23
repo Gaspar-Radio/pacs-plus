@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.27.0
+// @version      1.27.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2516,7 +2516,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!ed || !vm || !vm.exame) return null;
         const e = vm.exame, pac = e.paciente || {};
         const mod = String((e.tipoexame && e.tipoexame.modalidade && e.tipoexame.modalidade.mod_sigla) || '').toUpperCase();
-        const crit = [...document.querySelectorAll('.v-dialog__content .v-input')].find(v => norm(v.innerText) === 'resultado critico');
+        const crit = caixaCritico(false);
         const critInput = crit && crit.querySelector('input[type=checkbox]');
         return {
             ed, exa: e.exa_codigo, mod, tipo: mod === 'US' ? 'US' : mod === 'CT' ? 'TC' : 'GERAL',
@@ -3299,27 +3299,43 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
             } catch (e) { $('#pc-st').textContent = '✓ Copiado. ⚠ Não consegui registrar nos comentários (' + e.message + ').'; }
         };
     }
-    // botões no laudo: 📣 ao lado de "Resultado crítico" e 💬 Comentários na barra (Padrão · Anexar · Visualizar · Imprimir)
+    // caixinha "Resultado crítico" do laudo (o texto vira ☠ em 1.27.1 → reconhece também pela marca data-pp-crit)
+    function caixaCritico(soVisivel) {
+        return [...document.querySelectorAll('.v-dialog__content .v-input')].find(v => (!soVisivel || v.offsetParent) && (v.hasAttribute('data-pp-crit') || norm(v.innerText) === 'resultado critico'));
+    }
+    // v1.27.1 — barra compacta (pedido do usuário: em 110% não cabia): "Resultado crítico" = caixinha + ☠ vermelha,
+    // Comunicação = ⚠ (mdi-alert), Comentários = 💬 (mdi-comment); só ícones, no tamanho de Anexar/Visualizar/Imprimir.
+    const COM_ICON_CSS = `html body .v-dialog__content .v-input[data-pp-crit] label.v-label{font-size:0 !important;}
+.v-dialog__content [data-pp-crit] .pp-caveira{font-size:28px !important;color:#ef4444 !important;margin-left:2px;}
+.v-dialog__content .pp-ico-btn{min-width:0 !important;width:44px !important;height:44px !important;padding:0 !important;margin:0 2px !important;background:transparent !important;box-shadow:none !important;}
+.v-dialog__content .pp-ico-btn .v-icon{font-size:30px !important;}`;
+    function comIcone(cls, mdi, cor, titulo, onClick) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'v-btn v-btn--icon v-btn--round theme--dark pp-ico-btn ' + cls; b.title = titulo;
+        b.innerHTML = `<span class="v-btn__content"><i aria-hidden="true" class="v-icon notranslate mdi ${mdi} theme--dark" style="color:${cor};"></i></span>`;
+        b.addEventListener('mousedown', e => e.preventDefault());
+        b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); onClick(); });
+        return b;
+    }
     function comBotoesLaudo() {
-        const crit = [...document.querySelectorAll('.v-dialog__content .v-input')].find(v => v.offsetParent && norm(v.innerText) === 'resultado critico');
+        const crit = caixaCritico(true);
         let b = document.querySelector('.pp-com-btn');
-        if (!crit || !editorLaudo()) { if (b) b.remove(); return; }
+        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); return; }
+        setCss('pp-com-ico-css', COM_ICON_CSS);
+        if (!crit.hasAttribute('data-pp-crit')) { crit.setAttribute('data-pp-crit', ''); crit.title = 'Resultado crítico'; }
+        const lab = crit.querySelector('.v-label');
+        if (lab && !lab.querySelector('.pp-caveira')) lab.insertAdjacentHTML('beforeend', '<i aria-hidden="true" class="v-icon notranslate mdi mdi-skull pp-caveira"></i>');
         if (!b || b.previousElementSibling !== crit) {
             if (b) b.remove();
-            b = document.createElement('button'); b.type = 'button'; b.className = 'v-btn v-btn--text theme--dark v-size--small pp-com-btn';
-            b.innerHTML = '<span class="v-btn__content">📣 Comunicação</span>'; b.title = 'Gera a mensagem de comunicação de achado crítico para o WhatsApp e registra nos comentários do exame';
-            b.style.cssText = 'color:#fca5a5;font-weight:700;margin-left:6px;';
-            b.addEventListener('mousedown', e => e.preventDefault());
-            b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); abrirComunicacao(null, 'laudo'); });
+            b = comIcone('pp-com-btn', 'mdi-alert', '#f59e0b', 'Comunicação de achado crítico — gera a mensagem para o WhatsApp e registra nos comentários', () => abrirComunicacao(null, 'laudo'));
             crit.after(b);
         }
-        const vm = laudoComp(), exa = vm && vm.exame && vm.exame.exa_codigo;
-        const linha = crit.parentElement;
-        if (exa && linha && !linha.querySelector(':scope > .pp-cmt-btn')) {
-            const c = document.createElement('button'); c.type = 'button'; c.className = 'v-btn v-btn--text theme--dark v-size--small pp-cmt-btn';
-            c.innerHTML = '<span class="v-btn__content">💬 Comentários</span>'; c.title = 'Ações / Comentários deste exame';
-            c.addEventListener('mousedown', e => e.preventDefault());
-            c.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); const v2 = laudoComp(); const st = document.querySelector('#app').__vue__.$store; st.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: v2.exame.exa_codigo }, callBackClose: () => {} }); });
+        let c = document.querySelector('.pp-cmt-btn');
+        if (!c || c.previousElementSibling !== b) {
+            if (c) c.remove();
+            c = comIcone('pp-cmt-btn', 'mdi-comment-text', '#e5e7eb', 'Comentários / ações deste exame', () => {
+                const v2 = laudoComp(); if (!v2 || !v2.exame) return;
+                document.querySelector('#app').__vue__.$store.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: v2.exame.exa_codigo }, callBackClose: () => {} });
+            });
             b.after(c);
         }
     }
