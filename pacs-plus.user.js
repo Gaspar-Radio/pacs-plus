@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.25.1
+// @version      1.26.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1158,7 +1158,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (!forcar && ntfyCotaAte()) return false;
         const p = new URLSearchParams();
         if (o.titulo) p.set('t', o.titulo);
-        p.set('p', String(o.prio || 3));
+        p.set('p', String(Math.min(o.prio || 3, 2))); // v1.26: ≤ 2 = sem som/vibração no celular
         if (o.tags) p.set('ta', o.tags);
         p.set('click', URG_LINK);
         if (o.sid) p.set('sid', o.sid);
@@ -1199,8 +1199,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     async function poEnviar(o, forcar) {
         const u = cfg.urg;
         if ((!celOn() && !forcar) || !u.poUser || !u.poToken) return null;
-        let prio = o.prio == null ? 0 : o.prio;
-        if (prio === 2 && !u.poEmergencia) prio = 1;
+        let prio = -1; // v1.26: Pushover sempre "silencioso" (-1); emergência desativada
         const f = { token: String(u.poToken).trim(), user: String(u.poUser).trim(), title: o.titulo, message: o.msg || o.titulo, priority: String(prio), url: URG_LINK, url_title: 'Abrir PACS' };
         if (prio === 2) Object.assign(f, { retry: '60', expire: '1800', tags: o.tag || 'pacsplus' });
         try {
@@ -1228,8 +1227,11 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     // o navegador só libera som depois de um clique na página
     document.addEventListener('pointerdown', () => { if (cfg.urg.tela) urgAudioCtx(); }, true);
+    // v1.26 (pedido do usuário, 23/10): NUNCA tocar som — a esposa fica no mesmo ambiente do PC de casa.
+    // Bip, notificação do sistema, ntfy e Pushover ficam sempre silenciosos; nenhuma configuração religa.
+    const SEM_SOM = true;
     function urgBip(nivel) {
-        if (!cfg.urg.som) return;
+        if (SEM_SOM || !cfg.urg.som) return;
         const ctx = urgAudioCtx();
         if (!ctx || ctx.state !== 'running') return;
         const seq = nivel === 'urgente' ? [988, 0, 988, 0, 988, 0, 1319, 1319] : nivel === 'aviso' ? [784, 0, 784] : [660];
@@ -1250,7 +1252,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (!cfg.urg.tela) return;
         try {
             if (cfg.urg.notifWindows && 'Notification' in window && Notification.permission === 'granted') {
-                const n = new Notification(titulo, { body: msg, tag: tag || undefined, renotify: !!tag, requireInteraction: nivel === 'urgente' });
+                const n = new Notification(titulo, { body: msg, tag: tag || undefined, renotify: false, silent: true, requireInteraction: nivel === 'urgente' });
                 n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
             }
         } catch (e) { /* sem notificação do sistema */ }
@@ -1816,7 +1818,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!t) return null;
         const p = new URLSearchParams();
         if (o.titulo) p.set('t', o.titulo);
-        p.set('p', String(o.prio || 3));
+        p.set('p', String(Math.min(o.prio || 3, 2))); // v1.26: ≤ 2 = sem som/vibração no celular
         if (o.tags) p.set('ta', o.tags);
         p.set('click', URG_LINK);
         if (o.sid) p.set('sid', o.sid);
@@ -1836,7 +1838,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!cfg.cheg.tela) return;
         try {
             if ('Notification' in window && Notification.permission === 'granted') {
-                const n = new Notification(titulo, { body: msg, tag: tag || undefined });
+                const n = new Notification(titulo, { body: msg, tag: tag || undefined, silent: true });
                 n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
             }
         } catch (e) { /* sem notificação do sistema */ }
@@ -4033,7 +4035,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-grid3"><label>Prazo da urgência (h)<input id="pp-u-horas" value="${esc(u.horas)}"></label><label>Avisar sem confirmação após (min)<input id="pp-u-semc" value="${esc(u.semConfirmacao)}"></label><label>Encerra quando<input id="pp-u-enc" value="${esc(u.encerra)}"></label></div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-prov" ${u.provisorio ? 'checked' : ''}><span>Prazo provisório antes da confirmação (modo antigo)<small>Desligado (recomendado): o cronômetro só começa quando os técnicos confirmam o exame no PACS — igual ao SLA do PACS. Ligado: conta ${esc(u.horas)} h desde a marcação de urgente.</small></span></label>
 <div class="pp-grid2"><label>Pausar avisos até (férias/folga)<input type="date" id="pp-u-pausa" value="${esc(u.pausaAte)}"></label>
-<div class="pp-checks" style="margin-top:16px;"><label><input type="checkbox" id="pp-u-som" ${u.som ? 'checked' : ''}>Som</label><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
+<div class="pp-checks" style="margin-top:16px;"><span class="pp-muted" title="Pedido do usuário: nunca tocar som (computador e celular)">🔇 Sem som (sempre)</span><input type="checkbox" id="pp-u-som" hidden><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
 <div class="pp-h">Celular — app ntfy (grátis, Android e iPhone)</div>
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-u-topico" value="${esc(u.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-u-serv" value="${esc(u.ntfyServidor)}"></label></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-gerar">Gerar</button> <button class="pp-btn sec" id="pp-u-copiar">Copiar</button></span></div>
@@ -4042,7 +4044,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-row"><span class="pp-muted">Crie o bot no @BotFather, mande /start para ele e clique em Descobrir.</span><button class="pp-btn sec" id="pp-u-tgdesc">Descobrir</button></div>
 <div class="pp-h">Pushover (opcional — toca mesmo com o iPhone no silencioso)</div>
 <div class="pp-grid2"><label>User key<input id="pp-u-pouser" value="${esc(u.poUser)}"></label><label>API token do app<input id="pp-u-potok" value="${esc(u.poToken)}"></label></div>
-<label class="pp-tog"><input type="checkbox" id="pp-u-poemerg" ${u.poEmergencia ? 'checked' : ''}><span>Emergência a partir de 15 min do prazo<small>Repete a cada 1 min até você confirmar no celular; para sozinho quando o laudo é liberado.</small></span></label>
+<input type="checkbox" id="pp-u-poemerg" hidden><div class="pp-muted">🔇 Pushover também sempre silencioso (sem emergência repetindo).</div>
 <div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-u-testar">Enviar teste</button></span><button class="pp-btn" id="pp-u-salvar">Salvar</button></div>
 <div class="pp-res" id="pp-u-res" style="display:none;"></div>
 <div class="pp-muted" style="margin-top:8px;">Em cada computador que vigia: Chrome → Configurações → Desempenho → <b>Economia de memória</b> → “Sempre manter estes sites ativos” → adicione <b>pacs.ladi.org.br</b>; não deixe o computador dormir/hibernar no horário da escala (Mac: Ajustes → Bateria/Energia → “Impedir repouso automático com a tela desligada”). Nome de paciente nunca vai para o celular. Tópico e tokens ficam só neste computador.</div>`;
@@ -4079,7 +4081,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
                 provisorio: $('#pp-u-prov').checked,
                 encerra: $('#pp-u-enc').value.trim() || 'LIBERADO',
                 pausaAte: $('#pp-u-pausa').value || '',
-                som: $('#pp-u-som').checked, notifWindows: $('#pp-u-notif').checked,
+                som: false, notifWindows: $('#pp-u-notif').checked,
                 ntfyTopico: $('#pp-u-topico').value.trim(), ntfyServidor: $('#pp-u-serv').value.trim() || URG_PADRAO.ntfyServidor,
                 tgToken: $('#pp-u-tgtok').value.trim(), tgChat: $('#pp-u-tgchat').value.trim(),
                 poUser: $('#pp-u-pouser').value.trim(), poToken: $('#pp-u-potok').value.trim(), poEmergencia: $('#pp-u-poemerg').checked
