@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.26.2
+// @version      1.27.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -636,7 +636,7 @@ ${C} #pp-btn { top: 6px; }`;
             if (iConv) css += `${cell(iConv)} { white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }\n`;
             const iAc = idx('acoes');
             // Ações (do estilo do Mac): largura fixa para os botões + botão extra (Horos/RadiAnt); menu ⋮ sempre na mesma linha, à direita
-            const A = `${S} td:nth-child(${iAc})`, EXTRA = '[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"]';
+            const A = `${S} td:nth-child(${iAc})`, EXTRA = '[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"], [data-pp-com="true"]';
             if (iAc) css += `${cell(iAc)} { width: 184px !important; min-width: 184px !important; max-width: 184px !important; box-sizing: border-box !important; white-space: nowrap !important; overflow: visible !important; }
 ${S} th:nth-child(${iAc}) { padding-left: 4px !important; padding-right: 2px !important; text-align: left !important; }
 ${A} { position: relative !important; padding: 0 28px 0 2px !important; text-align: left !important; font-size: 0 !important; }
@@ -2536,7 +2536,15 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         [texto.indexOf('\n', idx), texto.indexOf('. ', idx)].forEach(p => { if (p >= 0 && p < fim) fim = p + 1; });
         return texto.slice(ini, fim).trim().slice(0, 160);
     }
-    const CRITICOS = ['pneumoperitonio', 'pneumotorax hipertensivo', 'disseccao', 'tromboembolismo pulmonar', 'embolia pulmonar', 'hemorragia subaracnoide', 'hemorragia intraparenquimatosa', 'hematoma subdural', 'hematoma extradural', 'hematoma epidural', 'hemorragia intracraniana', 'torcao testicular', 'torcao ovariana', 'torcao anexial', 'gestacao ectopica', 'gravidez ectopica', 'aneurisma roto', 'ruptura de aneurisma', 'isquemia mesenterica', 'trombose venosa profunda', 'apendicite perfurada', 'herniacao', 'desvio da linha media'];
+    // v1.27 — lista do SERVIÇO (decisão do usuário 23/10/2026, base CFM 20/2019 + CBR/ACR). NÃO são críticos: fratura simples de
+    // costela, fratura vertebral estável sem retropulsão, fraturas não complicadas, crônicos/degenerativos, incidentais e quadros
+    // inflamatórios (apendicite/colecistite/diverticulite/abscesso) compatíveis com a indicação (inclusive "dor abdominal a esclarecer").
+    const CRITICOS = ['pneumoperitonio', 'perfuracao de visc', 'pneumotorax hipertensivo', 'pneumotorax volumoso', 'disseccao', 'sindrome aortica aguda',
+        'tromboembolismo pulmonar', 'embolia pulmonar', 'hemorragia subaracnoide', 'hemorragia intraparenquimatosa', 'hematoma subdural', 'hematoma extradural',
+        'hematoma epidural', 'hemorragia intracraniana', 'herniacao', 'hidrocefalia aguda', 'compressao medular', 'tamponamento', 'hemoperitonio',
+        'sangramento ativo', 'extravasamento ativo', 'isquemia mesenterica', 'volvo', 'torcao testicular', 'torcao ovariana', 'torcao anexial',
+        'ectopica rota', 'aneurisma roto', 'ruptura de aneurisma', 'rotura de aneurisma', 'fratura instavel', 'torax instavel'];
+    const CRIT_POLITICA = `ACHADO CRÍTICO (protocolo do serviço — só cobre a marcação "Resultado crítico" nestes casos): AVC agudo/oclusão arterial; hemorragia intracraniana aguda; herniação; hidrocefalia aguda; compressão medular; pneumotórax hipertensivo ou volumoso; síndrome aórtica aguda/rotura de aneurisma; TEP agudo; tamponamento; pneumoperitônio/perfuração; hemoperitônio/sangramento ativo; isquemia mesentérica; obstrução em alça fechada/volvo; gestação ectópica rota; torção ovariana ou testicular; fratura INSTÁVEL de coluna ou pelve; tórax instável; tubo/cateter mal posicionado. Apendicite, colecistite, diverticulite e abscesso SÓ são críticos quando incompatíveis com a indicação (ex.: pedido por nefrolitíase e laudo com apendicite); com indicação compatível ou inespecífica ("dor abdominal", "abdome agudo") NÃO são críticos. NÃO são críticos: fratura simples de costela, fratura vertebral estável sem retropulsão, fraturas não complicadas, alterações crônicas/degenerativas, achados incidentais. Nunca cobre "Resultado crítico" fora desta lista.`;
     // ---------- Referências do serviço (tabela Bersch validada + ESUR-SPIWG 2024 para testículo) ----------
     // Regra: só confere a medida que está escrita; se a medida não foi informada, não diz nada.
     // Aponta (atenção) quando o valor está fora da referência e a alteração não aparece na frase nem na impressão,
@@ -2727,7 +2735,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!c.critico) {
             for (const k of CRITICOS) {
                 let i = -1, de = 0;
-                while ((i = tl.indexOf(k, de)) >= 0 && negado(tl, i)) de = i + k.length; // todas as ocorrências; só conta a não negada
+                // todas as ocorrências; só conta a não negada e (subdural) não crônica
+                while ((i = tl.indexOf(k, de)) >= 0 && (negado(tl, i) || (k === 'hematoma subdural' && /cronic/.test(tl.slice(i, i + 60))))) de = i + k.length;
                 if (i < 0) continue;
                 add('critico', 'atencao', i, `Termo de achado crítico (“${k}”) com “Resultado Crítico” desmarcado.`, 'Marcar Resultado Crítico se for o caso.'); break;
             }
@@ -2747,6 +2756,7 @@ Procure:
 7. contradição interna (“sem X” e depois “X presente”), frase truncada ou palavra trocada pelo ditado que muda o sentido;
 8. campos de matriz não preenchidos (XX, ___).
 Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medida ausente ou não informada (o médico não mede tudo) — só confira as medidas escritas; "trecho" deve ser cópia LITERAL e curta (até 120 caracteres) do laudo, para localizar; se estiver coerente, devolva lista vazia. Gravidade: "grave" = erro factual ou que pode mudar conduta (lado, sexo, medida, achado omitido na conclusão, técnica errada); "atencao" = provável erro menor ou ambíguo. No máximo 8 itens, mais importantes primeiro. Explicação e sugestão curtas (no máximo 25 palavras cada).`;
+    const REV_ESP_CRIT = '\n' + CRIT_POLITICA;
     const REV_ESP = {
         US: `Contexto: ULTRASSONOGRAFIA. Atenção especial: órgãos descritos coerentes com a região do exame; Doppler — lado, vasos/segmentos, refluxo/trombose/estenose coerentes com a conclusão, IR/IP e velocidades plausíveis; carótidas — grau de estenose coerente com VPS/VDF/razão (consenso SRU); tireoide — TI-RADS de cada nódulo coerente com composição/ecogenicidade/forma/margens/focos e tamanho; volumes (tireoide, próstata, ovário, útero, bexiga/resíduo) coerentes com as medidas; obstétrico — biometria, idade gestacional e peso coerentes; mama — BI-RADS coerente.`,
         TC: `Contexto: TOMOGRAFIA COMPUTADORIZADA. Atenção especial: técnica (sem/com contraste, fases) coerente com o nome do exame; achados agudos (hemorragia, pneumoperitônio, dissecção, TEP, isquemia, fratura, obstrução) obrigatoriamente na conclusão; níveis vertebrais e segmentos coerentes entre corpo e conclusão; nódulos — medida e conduta (Fleischner/Lung-RADS) coerentes; Bosniak/LI-RADS coerentes; lateralidade de lesões; incidental relevante sem menção na conclusão.`,
@@ -2775,7 +2785,7 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
     ];
     const refsDoExame = c => { const e = norm(c.exame); return REV_REFS.filter(r => r.ex.test(e) && (!r.tipo || r.tipo === c.tipo)).map(r => r.txt).join('\n'); };
     const ehUro = c => /abdom|rins|renal|vias urin|aparelho urin|bexig|prostat|pelv|retroperit|figado|hepat/.test(norm(c.exame));
-    const revSistema = (c, extra) => { const rf = refsDoExame(c); return REV_BASE + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS APROVADAS PELO SERVIÇO (use para conferir; não cobre o que não foi medido):\n' + rf : '') + (extra || ''); };
+    const revSistema = (c, extra) => { const rf = refsDoExame(c); return REV_BASE + REV_ESP_CRIT + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS APROVADAS PELO SERVIÇO (use para conferir; não cobre o que não foi medido):\n' + rf : '') + (extra || ''); };
     const REV_CATS = ['lateralidade', 'sexo_anatomia', 'corpo_conclusao', 'medidas', 'classificacao', 'exame_texto', 'redacao_sentido', 'campo_vazio', 'padrao', 'outro'];
     const REV_TOOL = {
         name: 'revisao', description: 'Registra os possíveis erros de incompatibilidade encontrados no laudo (lista vazia se coerente).',
@@ -2850,7 +2860,7 @@ ${c.texto}`;
               agudo_fora_conclusao: ['corpo_conclusao', 'grave', 'Achado agudo (hemorragia, pneumoperitônio, dissecção, tromboembolismo, fratura, obstrução) descrito no corpo não está na conclusão.'] },
         GERAL: {}
     };
-    const JEV_CRITICO = 'O laudo descreve achado agudo ou crítico que exige comunicação imediata ao médico assistente.';
+    const JEV_CRITICO = 'O laudo descreve achado crítico DA LISTA DO SERVIÇO (AVC agudo, hemorragia intracraniana aguda, herniação, hidrocefalia aguda, compressão medular, pneumotórax hipertensivo/volumoso, síndrome aórtica aguda, TEP agudo, tamponamento, pneumoperitônio/perfuração, hemoperitônio/sangramento ativo, isquemia mesentérica, volvo/alça fechada, ectópica rota, torção, fratura instável de coluna/pelve, tórax instável, tubo/cateter mal posicionado). NÃO contam: fratura simples de costela, fratura vertebral estável, quadros inflamatórios compatíveis com a indicação.';
     // v1.23 — checklists por TIPO DE EXAME (pelo nome do exame). Regras citadas = referências já aprovadas pelo usuário (ACR TI-RADS, BI-RADS, SRU, Fleischner).
     const JEV_EXAME = [
         { re: /tireo/, so: null, q: {
@@ -3213,6 +3223,134 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         }
         revisar(false);
     }
+    // =====================================================================
+    // 3H. 📣 COMUNICAÇÃO DE ACHADO CRÍTICO (v1.27, pedido do usuário 23/10/2026)
+    // Gera a mensagem curta para o WhatsApp (copiar e colar; *negrito* do WhatsApp), com o achado resumido
+    // pelo Claude Sonnet (1 linha, editável). Ao copiar, registra sozinho 1 comentário no exame
+    // (POST /backend/api/exame/comentario {exa_codigo, acao_tipo:'COMENTARIO', acao_comentario}). Sem níveis,
+    // sem cobrança de confirmação, sem nome/CRM (sai do WhatsApp do próprio médico).
+    // =====================================================================
+    const COM_PREFIXO = 'Comunicação de achado crítico';
+    const comDataBR = d => { const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+    const comOk = new Map(); // exa → true quando já há comentário de comunicação
+    async function comExameApi(exa) {
+        const r = await fetch('/backend/api/exame/' + exa, { headers: { 'x-access-token': localStorage.getItem('lwtoken') || '' } });
+        if (!r.ok) throw new Error('PACS ' + r.status);
+        const d = await r.json(); return d && d.exame ? d.exame : d;
+    }
+    async function comJaRegistrado(exa) {
+        if (comOk.has(exa)) return comOk.get(exa);
+        comOk.set(exa, false);
+        try {
+            const r = await fetch('/backend/api/exame/' + exa + '/comentario', { headers: { 'x-access-token': localStorage.getItem('lwtoken') || '' } });
+            const d = await r.json();
+            const ok = (d.rows || []).some(x => String(x.acao_comentario || '').startsWith(COM_PREFIXO));
+            comOk.set(exa, ok); return ok;
+        } catch (e) { comOk.delete(exa); return false; }
+    }
+    async function comResumir(texto, exame) {
+        try {
+            const d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-sonnet-5-5', max_tokens: 400, thinking: { type: 'disabled' },
+                system: 'Você resume, em UMA linha (até 25 palavras), o(s) achado(s) crítico(s) de um laudo radiológico para comunicar ao médico assistente. Linguagem médica objetiva, sem conduta, sem recomendação, sem dados do paciente. Use a impressão/conclusão. Responda só a linha, sem aspas e terminando com ponto.',
+                messages: [{ role: 'user', content: `Exame: ${exame}\nLaudo:\n${String(texto).slice(0, 12000)}` }] });
+            const t = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').replace(/\s+/g, ' ').trim();
+            if (t) return t;
+        } catch (e) { /* cai para a impressão */ }
+        const n = String(texto || ''); const i = n.search(/impress[aã]o|conclus[aã]o|opini[aã]o/i);
+        return (i >= 0 ? n.slice(i).split('\n').slice(1).join(' ') : n).replace(/\s+/g, ' ').trim().slice(0, 220);
+    }
+    function comMensagem(o) {
+        return `*${COM_PREFIXO}*\nConforme protocolo institucional de comunicação de achados críticos em exames de imagem, informo:\n` +
+            `Paciente: ${o.paciente}${o.atend ? ' · Atend. ' + o.atend : ''}\nExame: ${o.exame}${o.data ? ' · ' + o.data : ''}\nAchado: ${o.achado}\nSolicito ciência.`;
+    }
+    const COM_CSS = `#pp-com{position:fixed;z-index:10000003;top:12%;left:50%;transform:translateX(-50%);width:560px;max-width:94vw;background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.6);padding:14px;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+#pp-com h3{margin:0 0 8px;font-size:15px} #pp-com textarea{width:100%;min-height:150px;background:#111827;color:#e5e7eb;border:1px solid #475569;border-radius:8px;padding:8px;font:13px/1.45 inherit;box-sizing:border-box}
+#pp-com .pc-b{display:flex;gap:8px;justify-content:flex-end;margin-top:10px} #pp-com button{border:0;border-radius:7px;padding:6px 12px;font-weight:700;cursor:pointer;color:#fff;background:#334155}
+#pp-com button.pc-ok{background:#15803d} #pp-com .pc-st{margin-top:6px;font-size:12px;color:#94a3b8}`;
+    async function abrirComunicacao(exa, fonte) {
+        setCss('pp-com-css', COM_CSS);
+        let w = document.getElementById('pp-com'); if (w) w.remove();
+        w = document.createElement('div'); w.id = 'pp-com';
+        w.innerHTML = '<h3>📣 Comunicação de achado crítico</h3><textarea id="pc-txt">Gerando a mensagem…</textarea><div class="pc-st" id="pc-st">O resumo do achado é feito pela IA — confira antes de copiar.</div><div class="pc-b"><button id="pc-x">Fechar</button><button class="pc-ok" id="pc-cp" disabled>📋 Copiar</button></div>';
+        document.body.appendChild(w);
+        const $ = q => w.querySelector(q);
+        $('#pc-x').onclick = () => w.remove();
+        try {
+            let ex, texto;
+            if (fonte === 'laudo') { const vm = laudoComp(); ex = vm && vm.exame; const c = contextoLaudo(); texto = c ? c.texto : ''; exa = ex && ex.exa_codigo; }
+            else { ex = await comExameApi(exa); texto = htmlParaTexto((ex.laudo && ex.laudo.lau_laudo) || ''); }
+            if (!ex) throw new Error('exame não encontrado');
+            const exame = String((ex.tipoexame && ex.tipoexame.tpe_descricao) || '');
+            const achado = await comResumir(texto, exame);
+            $('#pc-txt').value = comMensagem({ paciente: String((ex.paciente && ex.paciente.pac_nome) || '').toUpperCase(), atend: ex.exa_his_atendimento || '', exame, data: comDataBR(ex.exa_data), achado });
+            $('#pc-cp').disabled = false;
+        } catch (e) { $('#pc-txt').value = ''; $('#pc-st').textContent = 'Não consegui montar a mensagem: ' + e.message; return; }
+        $('#pc-cp').onclick = async () => {
+            const msg = $('#pc-txt').value;
+            try { await navigator.clipboard.writeText(msg); } catch (e) { $('#pc-txt').select(); document.execCommand('copy'); }
+            const d = new Date(), quando = `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} às ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+            const linhaAchado = (msg.match(/^Achado:\s*(.+)$/m) || [])[1] || '';
+            try {
+                const r = await fetch('/backend/api/exame/comentario', { method: 'POST', headers: { 'x-access-token': localStorage.getItem('lwtoken') || '', 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ exa_codigo: Number(exa), acao_tipo: 'COMENTARIO', acao_comentario: `${COM_PREFIXO} enviada via WhatsApp em ${quando}.${linhaAchado ? ' Achado: ' + linhaAchado : ''}` }) });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                comOk.set(Number(exa), true); comOk.set(String(exa), true);
+                $('#pc-st').textContent = `✓ Copiado. Registrado nos comentários do exame (${quando}). Cole no WhatsApp.`;
+            } catch (e) { $('#pc-st').textContent = '✓ Copiado. ⚠ Não consegui registrar nos comentários (' + e.message + ').'; }
+        };
+    }
+    // botões no laudo: 📣 ao lado de "Resultado crítico" e 💬 Comentários na barra (Padrão · Anexar · Visualizar · Imprimir)
+    function comBotoesLaudo() {
+        const crit = [...document.querySelectorAll('.v-dialog__content .v-input')].find(v => v.offsetParent && norm(v.innerText) === 'resultado critico');
+        let b = document.querySelector('.pp-com-btn');
+        if (!crit || !editorLaudo()) { if (b) b.remove(); return; }
+        if (!b || b.previousElementSibling !== crit) {
+            if (b) b.remove();
+            b = document.createElement('button'); b.type = 'button'; b.className = 'v-btn v-btn--text theme--dark v-size--small pp-com-btn';
+            b.innerHTML = '<span class="v-btn__content">📣 Comunicação</span>'; b.title = 'Gera a mensagem de comunicação de achado crítico para o WhatsApp e registra nos comentários do exame';
+            b.style.cssText = 'color:#fca5a5;font-weight:700;margin-left:6px;';
+            b.addEventListener('mousedown', e => e.preventDefault());
+            b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); abrirComunicacao(null, 'laudo'); });
+            crit.after(b);
+        }
+        const vm = laudoComp(), exa = vm && vm.exame && vm.exame.exa_codigo;
+        const linha = crit.parentElement;
+        if (exa && linha && !linha.querySelector(':scope > .pp-cmt-btn')) {
+            const c = document.createElement('button'); c.type = 'button'; c.className = 'v-btn v-btn--text theme--dark v-size--small pp-cmt-btn';
+            c.innerHTML = '<span class="v-btn__content">💬 Comentários</span>'; c.title = 'Ações / Comentários deste exame';
+            c.addEventListener('mousedown', e => e.preventDefault());
+            c.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); const v2 = laudoComp(); const st = document.querySelector('#app').__vue__.$store; st.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: v2.exame.exa_codigo }, callBackClose: () => {} }); });
+            b.after(c);
+        }
+    }
+    // ícone 📣 na coluna Ações da lista: só exames LIBERADOS marcados como "Resultado crítico"; ✓ verde quando já registrado
+    function comIconesLista() {
+        const f = findListTable(), comp = f && componenteLista();
+        if (!f || !comp) return;
+        const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        linhas.forEach((tr, i) => {
+            const ex = comp.exames[i], td = tr.children[iAc]; if (!td) return;
+            let b = td.querySelector(':scope [data-pp-com]');
+            const crit = ex && ex.laudo && ex.laudo.lau_idncritico && String(ex.exa_situacao || '').toUpperCase() === 'LIBERADO';
+            if (!crit) { if (b) b.remove(); return; }
+            const exa = ex.exa_codigo, ok = comOk.get(exa) === true;
+            if (!b) {
+                b = document.createElement('button'); b.type = 'button'; b.setAttribute('data-pp-com', 'true');
+                b.className = 'v-btn v-btn--icon theme--dark v-size--small';
+                b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); abrirComunicacao(Number(b.dataset.exa), 'lista'); });
+                td.appendChild(b);
+                comJaRegistrado(exa);
+            }
+            b.dataset.exa = exa;
+            const html = `<span class="v-btn__content" style="font-size:14px">${ok ? '📣✓' : '📣'}</span>`;
+            if (b.innerHTML !== html) b.innerHTML = html;
+            b.title = ok ? 'Comunicação de achado crítico já registrada — gerar de novo' : 'Gerar comunicação de achado crítico (WhatsApp)';
+            b.style.cssText = ok ? 'color:#4ade80 !important;filter:none' : 'color:#94a3b8 !important';
+        });
+    }
+    setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
     function fecharRevisao() { const p = document.getElementById('pp-rev'); if (p) p.remove(); if (revAtual) revAtual.depois = null; }
     function renderRevisao() {
         if (!revAtual) return;
@@ -3257,7 +3395,7 @@ ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__op
 <div class="pr-ex">${esc(a.explicacao)}</div>${a.fraco ? `<div class="pr-fraco">provável falso alarme — Jev ${fmt(a.juiz, 2)}</div>` : ''}
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
-<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
+<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
@@ -3292,6 +3430,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
             el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); renderRevisao(); };
             const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); pedirCorrecao(r, a, false); };
+            const cm = el.querySelector('[data-com]'); if (cm) cm.onclick = () => abrirComunicacao(null, 'laudo');
             ligarCorrecao(el, r, chaveAchado(a));
         });
         const pf = p.querySelector('#pr-full'); if (pf) pf.onclick = () => pedirCorrecao(r, null, true);
