@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.24.0
+// @version      1.25.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -293,6 +293,9 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .pp-zoom-laudo .pz-v { min-width: 36px; color: #93c5fd; }`,
         revisaoIA: `
 .document-editor__toolbar > .v-btn.pp-rev-btn { color: #fbbf24 !important; font-weight: 700 !important; }
+.v-dialog__content .row > .v-btn.pp-rod-conf { background-color: #b45309 !important; min-width: 0 !important; padding: 0 10px !important; }
+.v-dialog__content .row > .v-btn.pp-rod-lib { background-color: #15803d !important; min-width: 0 !important; padding: 0 10px !important; box-shadow: 0 0 0 2px #86efac inset !important; }
+.v-dialog__content .row > .v-btn.pp-canc-sep { margin-left: 36px !important; }
 .document-editor__toolbar > .v-btn.pp-calc-laudo, .document-editor__toolbar > .v-btn.pp-rev-btn { padding: 0 5px !important; min-width: 0 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 #pp-rev .pr-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; z-index: 1; }
@@ -2474,10 +2477,13 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: true, aoColar: true, triagem: true, opusAuto: true, revisor: 'opus', grok: true }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, aoColar: false, triagem: true, opusAuto: true, revisor: 'opus', grok: true, gemini: false }; // v1.25: revisão só pelos botões do rodapé // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
     // v1.24 (pedido do usuário): liga uma vez "Revisar ao Liberar" + "Revisar ao colar" + triagem nos computadores que já tinham a revisão configurada
     if (cfg.rev && !cfg.rev.mig124) { cfg.rev = Object.assign(revCfg(), { noLiberar: true, aoColar: true, triagem: true, mig124: true }); try { saveCfg(); } catch (e) { /* ok */ } }
+    // v1.25 (usuário, 23/10 16h): automático inviável (laudo conjunto liberado em dois locais; Gemini grátis estoura o tempo) →
+    // desliga ao colar/ao Liberar, Gemini pausado, modo Jev + Claude. Revisão pelos botões "🛡 Conferir" e "✔ Liberar c/ IA" ao lado do Liberar.
+    if (cfg.rev && !cfg.rev.mig125) { cfg.rev = Object.assign(revCfg(), { noLiberar: false, aoColar: false, gemini: false, modo: 'completo', mig125: true }); try { saveCfg(); } catch (e) { /* ok */ } }
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
         exame_texto: 'Exame × texto', corpo_conclusao: 'Corpo × conclusão', medidas: 'Medidas / unidades',
@@ -3002,8 +3008,8 @@ ${c.texto}`;
 
 
     // ---------- ✍ Corrigir: cálculo (Plus) · frase/lado (Sonnet) · diagnóstico/global (Opus) ----------
-    const CORR_SONNET = ['lateralidade', 'campo_vazio', 'redacao_sentido', 'medidas', 'exame_texto', 'sexo_anatomia'];
-    const nivelCorrecao = a => a.fix ? 'calc' : CORR_SONNET.includes(a.categoria) ? 'sonnet' : 'opus';
+    // v1.25: quem corrige é o MESMO Claude que revisa (Opus por padrão) — antes parte das correções ia ao Sonnet
+    const nivelCorrecao = a => a.fix ? 'calc' : revisorDe(revCfg());
     const NIVEL_NOME = { calc: 'cálculo do Plus', sonnet: 'Sonnet', opus: 'Opus' };
     const chaveTxt = x => String(x).normalize('NFC').toLowerCase().split('').map(ch => ch.normalize('NFD').replace(/[̀-ͯ]/g, '') || ch).join('');
     function blocosLaudo(ed) {
@@ -3241,6 +3247,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
+<label title="Gemini como revisor extra — pausado: a API grátis estoura o tempo. Ligar quando houver faturamento no Google."><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
@@ -3259,6 +3266,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
+        p.querySelector('#pr-gemini').onchange = e => { cfg.rev = Object.assign(revCfg(), { gemini: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('gemini')) rodarMotor(r, 'gemini'); };
         p.querySelector('#pr-colar').onchange = e => { cfg.rev = Object.assign(revCfg(), { aoColar: e.target.checked }); saveCfg(); };
         const tf = p.querySelector('#pr-tri-full'); if (tf) tf.onclick = () => revisar(true, r.depois);
         p.querySelector('#pr-grok').onchange = e => { cfg.rev = Object.assign(revCfg(), { grok: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('grok')) { grokSemChave = false; rodarMotor(r, 'grok'); } };
@@ -3285,11 +3293,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         opus: { nome: 'Opus', fn: c => revOpus(c) },
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
-    const REV_MODOS = {
-        completo: { nome: 'Jev + Claude + Gemini', motores: ['jev', 'claude', 'gemini'] },
-        jev_haiku: { nome: 'Jev + Claude', motores: ['jev', 'claude'] },
-        haiku_gemini: { nome: 'Claude + Gemini', motores: ['claude', 'gemini'] },
-        haiku: { nome: 'Só Claude', motores: ['claude'] }
+    const REV_MODOS = { // v1.25: Gemini e Grok viraram caixinhas opcionais (+ Gemini / + Grok)
+        completo: { nome: 'Jev + Claude', motores: ['jev', 'claude'] },
+        so_claude: { nome: 'Só Claude', motores: ['claude'] }
     };
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
@@ -3422,6 +3428,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (c.texto.length >= 30 && r.triagem !== 'normal') {
             const onda = REV_MODOS[modo].motores.filter(m => !(m === 'jev' && r.res.jev)).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
             if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
+            if (rc.gemini) onda.push(rodarMotor(r, 'gemini')); // v1.25: Gemini opcional (pausado por padrão)
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
             await revJevJuiz(r); // v1.23: Jev confere cada achado das IAs (< 1 s)
@@ -3526,11 +3533,39 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const rev = tb.querySelector(':scope > .pp-rev-btn') || tb.querySelector(':scope > .pp-calc-laudo');
         if (rev && rev.nextSibling) tb.insertBefore(w, rev.nextSibling); else tb.appendChild(w);
     }
+    // v1.25 — botões no rodapé do laudo: Aberto · Digitado · Revisar · [🛡 Conferir] [✔ Liberar c/ IA] Liberar · · Cancelar
+    function revBotoesRodape() {
+        const lib = [...document.querySelectorAll('.v-dialog__content .row button')].find(b => b.offsetParent && norm(b.innerText) === 'liberar');
+        const row = lib && lib.parentElement;
+        document.querySelectorAll('.pp-rod-btn').forEach(x => { if (!row || x.parentElement !== row) x.remove(); });
+        if (!row || !on('revisaoIA') || !editorLaudo()) return;
+        const canc = [...row.children].find(b => norm(b.innerText) === 'cancelar');
+        if (canc && !canc.classList.contains('pp-canc-sep')) canc.classList.add('pp-canc-sep');
+        const fazer = (cls, txt, tit, fn) => {
+            let b = row.querySelector(':scope > .' + cls);
+            if (!b) {
+                b = document.createElement('button'); b.type = 'button';
+                b.className = 'white--text ma-1 v-btn v-btn--is-elevated v-btn--has-bg theme--dark v-size--small pp-rod-btn ' + cls;
+                b.innerHTML = '<span class="v-btn__content">' + txt + '</span>'; b.title = tit;
+                b.addEventListener('mousedown', e => e.preventDefault());
+                b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fn(); });
+            }
+            if (b.nextSibling !== lib && cls === 'pp-rod-lib') row.insertBefore(b, lib);
+            return b;
+        };
+        const bl = fazer('pp-rod-lib', '✔ Liberar c/ IA', 'Confere com regras + Jev + Claude e libera: laudo normal sai em ~1 s; com achado, abre a revisão e libera sozinho se não houver nada grave.', () => {
+            revisar(false, () => { revLiberando = true; try { lib.click(); } finally { revLiberando = false; } });
+        });
+        const bc = fazer('pp-rod-conf', '🛡 Conferir', 'Revisão completa por IA (regras + Jev + Claude), sem liberar. ✍ Corrigir só altera o laudo ao clicar Aplicar.', () => abrirRevisao());
+        if (bc.nextSibling !== bl) row.insertBefore(bc, bl);
+    }
     function revBtn() {
         const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
         let b = tb && tb.querySelector(':scope > .pp-rev-btn');
-        if (!tb || !on('revisaoIA')) { if (b) b.remove(); if (!tb) fecharRevisao(); return; }
-        if (b) return;
+        try { revBotoesRodape(); } catch (e) { /* segue */ }
+        if (b) b.remove(); // v1.25: o 🛡 saiu da barra do editor (agora no rodapé)
+        if (!tb) fecharRevisao();
+        return;
         b = document.createElement('button');
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
