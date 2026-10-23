@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.23.0
+// @version      1.24.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2474,8 +2474,10 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'opus', grok: true }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
+    const REV_PADRAO = { modo: 'completo', noLiberar: true, aoColar: true, triagem: true, opusAuto: true, revisor: 'opus', grok: true }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
+    // v1.24 (pedido do usuário): liga uma vez "Revisar ao Liberar" + "Revisar ao colar" + triagem nos computadores que já tinham a revisão configurada
+    if (cfg.rev && !cfg.rev.mig124) { cfg.rev = Object.assign(revCfg(), { noLiberar: true, aoColar: true, triagem: true, mig124: true }); try { saveCfg(); } catch (e) { /* ok */ } }
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
         exame_texto: 'Exame × texto', corpo_conclusao: 'Corpo × conclusão', medidas: 'Medidas / unidades',
@@ -2905,7 +2907,7 @@ ${c.texto}`;
     const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
     const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
     const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
-    const GEMINI_REVISOR = 'gemini-4-argon'; // v1.22: modelo mais forte do Google; o servidor cai para 3.8/3.6 Flash se falhar
+    const GEMINI_REVISOR = 'gemini-3.8-flash'; // v1.24: custo × benefício (Argon = papel do Opus, 2–5× o preço); o servidor cai para 3.6 Flash se falhar
     const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     async function revGemini(c) {
         const t0 = performance.now();
@@ -3225,8 +3227,9 @@ ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde est
 ${(r.pedidos || []).slice().reverse().map(k => r.corr[k] ? `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k])}</div>` : '').join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
+${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
 ${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
-<div class="pr-libb"><button class="pr-b" id="pr-lib" ${r.carregando ? 'disabled' : ''}>Liberar ${graves ? 'mesmo assim' : ''}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
+<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : 'Liberar ' + (graves ? 'mesmo assim' : '')}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
@@ -3237,6 +3240,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
+<label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
@@ -3255,6 +3259,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
+        p.querySelector('#pr-colar').onchange = e => { cfg.rev = Object.assign(revCfg(), { aoColar: e.target.checked }); saveCfg(); };
+        const tf = p.querySelector('#pr-tri-full'); if (tf) tf.onclick = () => revisar(true, r.depois);
         p.querySelector('#pr-grok').onchange = e => { cfg.rev = Object.assign(revCfg(), { grok: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('grok')) { grokSemChave = false; rodarMotor(r, 'grok'); } };
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
@@ -3311,7 +3317,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             if (p < JEV_LIM.falso && !a.fontes.includes('regra') && a.fontes.filter(f => REV_LLMS.includes(f)).length === 1) { a.gravidade = 'atencao'; a.fraco = true; }
         });
         const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0) - (a.fraco ? 12 : 0);
-        return base.sort((x, y) => peso(y) - peso(x));
+        // v1.24: texto mudou pouco (reaproveitado) → some o achado das IAs cujo trecho já não existe (provavelmente corrigido)
+        const txtN = r.alterado ? norm(r.ctx.texto) : '';
+        const vale = a => !r.alterado || !a.trecho || a.fontes.includes('regra') || txtN.includes(norm(a.trecho).slice(0, 40));
+        return base.filter(vale).sort((x, y) => peso(y) - peso(x));
     }
     async function revJevJuiz(r) {
         if (!r.ativos.includes('jev') || r.ctx.texto.length < 30) return;
@@ -3351,21 +3360,67 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         r.carregando = false;
         if (revAtual === r) renderRevisao();
     }
-    async function revisar(forcar, depois) {
+    // v1.24 — triagem: laudo "normal" (impressão normal, sem regra/Jev acusando, curto) não chama as IAs grandes
+    function impressaoNormal(t) {
+        // normalização própria: mantém pontuação (o norm() geral tira ponto e dois-pontos)
+        const n = String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        const re = /(impressao|conclusao|opiniao)/g; let i = -1, m;
+        while ((m = re.exec(n))) i = m.index;
+        if (i < 0) return false;
+        const imp = n.slice(i, i + 500);
+        const ok = /(normal|normais|normalidade|sem alteracoes|sem achados|nao (ha|foram|se observ)|sem evidencias?|sem sinais|sem (nodul|lesoes|lesao))/.test(imp);
+        // tira só o trecho negado (até vírgula, ponto, ";", quebra ou "exceto/porém/mas")
+        const semNegacoes = imp.replace(/(sem|nao (ha|se observa\w*|foram \w+|se identifica\w*|se caracteriza\w*)|ausencia de)((?!\b(exceto|porem|mas|entretanto|salvo)\b)[^.;,\n]){0,80}/g, ' ');
+        const achado = /(nodul|cist|calcul|litias|esteatos|massa|lesao|lesoes|espessament|derrame|aumentad|reduzid|dilatac|ectasi|estenos|trombo|fratur|hernia|rads|megalia|colecist|apendic|diverticul|hidronefros|ateromat|placa|refluxo|insuficienc|aneurism|consolidac|atelectas|enfisem|edema|hematom|colecao|abscess|sugestiv|compativ|provavel|inflamat|neoplas|alterac|exceto|porem|variz|varize|tortuos|incompet|calcifica|cirro|hepatopat|nefropat|ateros|ectopi|polip|adenomeg|linfonod|cardiomeg|opacid|vidro fosco|bronquiec|cicatri|sequel|operad|protes|stent|cateter|dreno|corpo estranho)/.test(semNegacoes);
+        // impressão longa raramente é "normal": mais de ~220 caracteres → revisão completa
+        return ok && !achado && imp.trim().length <= 220;
+    }
+    function precisaIA(r) {
+        if (r.regras.length) return true;
+        const j = r.res.jev;
+        if (!j) return true; // Jev falhou → revisão completa
+        if (j.achados.some(a => (a.prob || 0) >= JEV_LIM.mostrar)) return true;
+        if (r.ctx.texto.length > REV_EXTENSO) return true;
+        return !impressaoNormal(r.ctx.texto);
+    }
+    // mudança pequena = até 5% das palavras (mín. 5) — não revisa de novo
+    function mudancaPequena(a, b) {
+        if (!a || !b) return false;
+        const conta = t => { const m = new Map(); norm(t).split(/\s+/).filter(Boolean).forEach(w => m.set(w, (m.get(w) || 0) + 1)); return m; };
+        const A = conta(a), B = conta(b); let d = 0, n = 0;
+        new Set([...A.keys(), ...B.keys()]).forEach(w => { d += Math.abs((A.get(w) || 0) - (B.get(w) || 0)); n += Math.max(A.get(w) || 0, B.get(w) || 0); });
+        return d / 2 <= Math.max(5, n * 0.05);
+    }
+    const temGrave = r => achadosAtuais(r).some(a => a.gravidade === 'grave');
+    // erro que impede liberar sozinho: só do Claude principal (Gemini/Grok lentos ou fora não seguram o Liberar)
+    const erroPrincipal = r => !!(r.err[r.revisor] || r.err.jev && !REV_LLMS.some(m => r.res[m]));
+    async function revisar(forcar, depois, opc = {}) {
         const c = contextoLaudo();
         if (!c) return null;
         const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico);
         const rc = revCfg();
         const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
-        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && revAtual.revisor === revisorDe(rc) && !revAtual.carregando) {
-            revAtual.depois = depois || null; revAtual.alterado = false; revAtual.min = false; renderRevisao(); return revAtual;
+        // reaproveita: mesmo exame e texto igual ou quase igual (v1.24) — inclusive se ainda está rodando
+        if (!forcar && revAtual && revAtual.exa === c.exa && revAtual.modo === modo && revAtual.revisor === revisorDe(rc)
+            && (revAtual.hash === hash || mudancaPequena(revAtual.ctx.texto, c.texto))) {
+            const r0 = revAtual;
+            if (r0.hash !== hash) { r0.alterado = true; r0.ctx = c; r0.regras = regrasLaudo(c); r0.hash = hash; }
+            if (opc.auto) return r0;
+            r0.depois = depois || null;
+            if (r0.depois && !r0.carregando && !temGrave(r0) && !erroPrincipal(r0)) { const f = r0.depois; r0.depois = null; fecharRevisao(); f(); return r0; }
+            r0.min = false; renderRevisao(); return r0;
         }
         const rasc = revAtual && revAtual.exa === c.exa ? (document.getElementById('pr-ped') || {}).value || revAtual.rascunho || '' : '';
-        const r = revAtual = { rascunho: rasc, hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
+        const r = revAtual = { rascunho: rasc, hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null, min: !!opc.auto, auto: !!opc.auto };
         renderRevisao();
+        r.revisor = revisorDe(rc);
         if (c.texto.length >= 30) {
-            r.revisor = revisorDe(rc);
-            const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
+            const motores = REV_MODOS[modo].motores;
+            const triar = !forcar && rc.triagem !== false && motores.includes('jev') && (opc.auto || !!depois);
+            if (triar) { await rodarMotor(r, 'jev'); if (!precisaIA(r)) r.triagem = 'normal'; }
+        }
+        if (c.texto.length >= 30 && r.triagem !== 'normal') {
+            const onda = REV_MODOS[modo].motores.filter(m => !(m === 'jev' && r.res.jev)).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
             if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
@@ -3378,13 +3433,13 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             }
         }
         r.carregando = false;
-        const reg = { t: Date.now(), tipo: c.tipo, modo, n: c.texto.length, nR: r.regras.length, erros: Object.keys(r.err).join('') };
+        const reg = { t: Date.now(), tipo: c.tipo, modo, n: c.texto.length, nR: r.regras.length, erros: Object.keys(r.err).join(''), triagem: r.triagem || 'completa', auto: !!opc.auto };
         Object.entries(r.res).forEach(([m, x]) => { if (x) Object.assign(reg, { [m + 'Ms']: Math.round(x.ms), [m + 'In']: x.tin, [m + 'Out']: x.tout, [m + 'N']: x.achados.length }); });
         revLog(reg);
         if (revAtual === r) {
             const graves = achadosAtuais(r).filter(a => a.gravidade === 'grave').length;
             // revisão no Liberar sem nada grave → segue sozinho
-            if (r.depois && !graves && !Object.keys(r.err).length) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
+            if (r.depois && !graves && !erroPrincipal(r)) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
             renderRevisao();
         }
         return r;
@@ -3480,12 +3535,28 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
         b.innerHTML = '<span class="v-btn__content">🛡 Rev.</span>';
-        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Claude Opus ou Sonnet, Gemini 4 Argon). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
+        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Claude Opus ou Sonnet, Gemini 3.8 Flash, Grok). Revisa sozinho ao colar e ao Liberar; laudo normal não chama as IAs. ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); abrirRevisao(); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
         if (calc && calc.nextSibling) tb.insertBefore(b, calc.nextSibling); else tb.insertBefore(b, tb.firstChild);
     }
+    // v1.24 — Revisar ao colar: 3 s depois da última mudança no texto (só uma vez por versão do laudo; mudança pequena não repete)
+    let revObsEd = null, revObsUlt = 0;
+    setInterval(() => {
+        try {
+            if (!cfg.master || !on('revisaoIA') || revCfg().aoColar === false) return;
+            const ed = editorLaudo();
+            if (!ed) { revObsEd = null; return; }
+            if (revObsEd !== ed) { revObsEd = ed; revObsUlt = 0; ed.model.document.on('change:data', () => { revObsUlt = Date.now(); }); return; }
+            if (!revObsUlt || Date.now() - revObsUlt < 3000) return;
+            revObsUlt = 0;
+            const c = contextoLaudo();
+            if (!c || c.texto.length < 80) return;
+            if (revAtual && revAtual.exa === c.exa && revAtual.carregando) return; // termina a atual; o Liberar confere se mudou muito
+            revisar(false, null, { auto: true });
+        } catch (e) { /* segue */ }
+    }, 1500);
     // Revisar ao clicar Liberar (opcional)
     let revLiberando = false;
     document.addEventListener('click', e => {
