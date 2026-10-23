@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.26.1
+// @version      1.26.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3424,8 +3424,11 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const rc = revCfg();
         const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
         // reaproveita: mesmo exame e texto igual ou quase igual (v1.24) — inclusive se ainda está rodando
+        // v1.26.2: para LIBERAR (depois) só reaproveita se o texto for EXATAMENTE o revisado — 1 palavra trocada
+        // (ex.: direito → esquerdo) passava como "mudança pequena" e liberava sem nova revisão.
+        const mesmoTexto = revAtual && revAtual.hashRevisado === hash;
         if (!forcar && revAtual && revAtual.exa === c.exa && revAtual.modo === modo && revAtual.revisor === revisorDe(rc)
-            && (revAtual.hash === hash || mudancaPequena(revAtual.ctx.texto, c.texto))) {
+            && (mesmoTexto || (!depois && mudancaPequena(revAtual.ctx.texto, c.texto)))) {
             const r0 = revAtual;
             if (r0.hash !== hash) { r0.alterado = true; r0.ctx = c; r0.regras = regrasLaudo(c); r0.hash = hash; }
             if (opc.auto) return r0;
@@ -3434,7 +3437,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             r0.min = false; renderRevisao(); return r0;
         }
         const rasc = revAtual && revAtual.exa === c.exa ? (document.getElementById('pr-ped') || {}).value || revAtual.rascunho || '' : '';
-        const r = revAtual = { rascunho: rasc, hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null, min: !!opc.auto, auto: !!opc.auto };
+        const r = revAtual = { rascunho: rasc, hash, hashRevisado: hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null, min: !!opc.auto, auto: !!opc.auto };
         renderRevisao();
         r.revisor = revisorDe(rc);
         if (c.texto.length >= 30) {
