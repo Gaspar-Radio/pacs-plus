@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.22.0
+// @version      1.22.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -353,7 +353,7 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -2445,7 +2445,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'opus' }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'opus', grok: true }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
@@ -2855,6 +2855,16 @@ ${c.texto}`;
         const u = d.usage || {};
         return { achados: limparAchados(j.achados, 'gemini'), ms: performance.now() - t0, tin: u.promptTokenCount || 0, tout: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0), modelo: d.modelo || 'gemini' };
     }
+    // v1.22.1 — Grok (xAI, grok-4.7): revisor independente opcional (☑ + Grok no painel). Mesmo prompt; resposta em JSON.
+    async function revGrok(c) {
+        const t0 = performance.now();
+        const formato = '\nResponda SOMENTE com um objeto JSON: {"achados":[{"categoria":"<uma de: ' + REV_CATS.join(', ') + '>","gravidade":"grave|atencao","trecho":"<trecho literal do laudo>","explicacao":"...","sugestao":"..."}]} — lista vazia se o laudo estiver coerente.';
+        const d = await iaProxy({ acao: 'grok', system: revSistema(c, formato), mensagem: revMensagem(c) });
+        let j = null; try { j = JSON.parse(d.texto); } catch (e) { const m = String(d.texto || '').match(/\{[\s\S]*\}/); if (m) { try { j = JSON.parse(m[0]); } catch (x) { /* segue */ } } }
+        if (!j || !Array.isArray(j.achados)) throw new Error('resposta sem a lista de achados');
+        const u = d.usage || {};
+        return { achados: limparAchados(j.achados, 'grok'), ms: performance.now() - t0, tin: u.prompt_tokens || 0, tout: u.completion_tokens || 0, modelo: d.modelo || 'grok' };
+    }
     // junta achados iguais de fontes diferentes (mesmo trecho ou mesma categoria com trechos parecidos)
     const tokensDe = s => new Set(norm(s).replace(/[^a-z0-9 ]/g, ' ').split(' ').filter(w => w.length > 2));
     // mesmo erro = mesma categoria + trecho igual/contido ou palavras em comum (categorias diferentes nunca se fundem:
@@ -3164,6 +3174,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
+<label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
@@ -3181,6 +3192,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
+        p.querySelector('#pr-grok').onchange = e => { cfg.rev = Object.assign(revCfg(), { grok: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('grok')) { grokSemChave = false; rodarMotor(r, 'grok'); } };
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
@@ -3201,7 +3213,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         haiku: { nome: 'Haiku', fn: c => revHaiku(c) },
         sonnet: { nome: 'Sonnet', fn: c => revSonnet(c) },
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
-        opus: { nome: 'Opus', fn: c => revOpus(c) }
+        opus: { nome: 'Opus', fn: c => revOpus(c) },
+        grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
     const REV_MODOS = {
         completo: { nome: 'Jev + Claude + Gemini', motores: ['jev', 'claude', 'gemini'] },
@@ -3215,7 +3228,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'sonnet', 'gemini', 'opus'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
+        ['haiku', 'sonnet', 'gemini', 'opus', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
         const base = juntarAchados(listas);
         // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
         if (r.res.jev) r.res.jev.achados.slice().sort((x, y) => y.prob - x.prob).forEach(j => {
@@ -3226,10 +3239,18 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0);
         return base.sort((x, y) => peso(y) - peso(x));
     }
+    let grokSemChave = false;
     function rodarMotor(r, m) {
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
-        return MOTORES[m].fn(r.ctx).then(x => { r.res[m] = x; }).catch(e => { r.err[m] = e.message; }).finally(() => { if (revAtual === r) renderRevisao(); });
+        // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
+        const lim = m === 'opus' ? 90000 : 45000;
+        const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
+        return corrida.then(x => { r.res[m] = x; }).catch(e => {
+            // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
+            if (m === 'grok' && /XAI_API_KEY/.test(e.message)) { grokSemChave = true; r.ativos = r.ativos.filter(x => x !== 'grok'); return; }
+            r.err[m] = e.message;
+        }).finally(() => { if (revAtual === r) renderRevisao(); });
     }
     async function rodarOpus(r, motivo) {
         if (r.ativos.includes('opus') && (r.res.opus || !r.err.opus)) return;
@@ -3255,10 +3276,11 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (c.texto.length >= 30) {
             r.revisor = revisorDe(rc);
             const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
+            if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
             // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
-            const ias = r.ativos.filter(m => ['opus', 'sonnet', 'gemini'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
+            const ias = r.ativos.filter(m => ['opus', 'sonnet', 'gemini', 'grok'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
             if (rc.opusAuto && !r.ativos.includes('opus') && ias.length >= 2) {
                 const disc = achadosAtuais(r).find(a => a.gravidade === 'grave' && !a.fontes.includes('regra') && a.fontes.filter(f => ias.includes(f)).length === 1);
                 if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); }
