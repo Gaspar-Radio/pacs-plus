@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.27.1
+// @version      1.27.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1330,6 +1330,36 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         g.agenda = {};
         g.agendaVence = null;
     }
+    // v1.27.2 — FAXINA dos lembretes agendados no ntfy (falha de 23/10/2026: lembretes "Vencido há…" de exames já
+    // liberados continuaram chegando porque o cancelamento ficou só na memória do PC que agendou — falhou (cota 429 /
+    // troca de PC líder / versão antiga) e ninguém mais sabia cancelar). Agora quem envia ao celular consulta, a cada
+    // 10 min, os lembretes AINDA AGENDADOS no servidor do ntfy e apaga os de urgentes que não estão mais em aberto.
+    // Só roda logo após uma leitura boa do PACS (lista atual) ou fora do horário sem urgente aberto. Falhou → tenta de novo.
+    const URG_VARRER_CADA = 10 * 60000;
+    let urgVarridoEm = 0;
+    async function urgVarrerAgendados(e, ativo) {
+        const u = cfg.urg;
+        if (!celOn() || !u.ntfyTopico || !(urgPapel === 'lider' || urgPapel === 'sozinho') || ntfyCotaAte()) return;
+        if (Date.now() - urgVarridoEm < URG_VARRER_CADA) return;
+        const leituraBoa = e.ultLeitura && e.ultTentativa && e.ultLeitura >= e.ultTentativa && Date.now() - e.ultLeitura < 5 * 60000;
+        if (ativo && !leituraBoa) return; // lista do PACS desatualizada: não decide nada
+        urgVarridoEm = Date.now();
+        const vivos = new Set();
+        Object.values(e.grupos || {}).filter(g => g.aberto).forEach(g => { for (let c = 0; c <= (g.ciclo || 0) + 2; c++) vivos.add('u' + hashCurto(`${g.key}|${g.dia}|${c}`)); });
+        let linhas;
+        try {
+            const r = await fetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}/json?poll=1&scheduled=1&since=24h`);
+            ntfyMarcarCota(r); if (!r.ok) return;
+            linhas = (await r.text()).split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (x) { return null; } }).filter(Boolean);
+        } catch (x) { return; }
+        const agora = Date.now() / 1000, ultimo = new Map(); // último evento de cada id (apagado e reagendado conta o reagendamento)
+        linhas.forEach(m => { if (m.sequence_id && (m.event === 'message' || m.event === 'message_delete')) ultimo.set(m.sequence_id, m); });
+        const orfaos = [...ultimo.values()].filter(m => m.event === 'message' && m.time > agora + 30 && /^u[0-9a-z]+-(r\d+|v\d+)$/.test(m.sequence_id) && !vivos.has(m.sequence_id.split('-')[0]));
+        let ok = 0;
+        for (const m of orfaos) if (await ntfyAcao(m.sequence_id, 'delete')) ok++;
+        if (orfaos.length) console.info(`[PACS Plus] faxina ntfy: ${ok}/${orfaos.length} lembrete(s) órfão(s) cancelado(s)`);
+        if (ok < orfaos.length) urgVarridoEm = Date.now() - URG_VARRER_CADA + 2 * 60000; // falhou algum → tenta em 2 min
+    }
     async function urgEncerrar(g, motivo, e) {
         g.aberto = false; g.encerradoEm = Date.now(); g.motivo = motivo;
         urgSalvar(e);
@@ -1605,6 +1635,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             }
             if (!urgPausado()) await urgTick(e);
             await urgVigia(e);
+            await urgVarrerAgendados(e, ativo);
         } catch (err) {
             console.warn('[PACS Plus] monitor de urgências', err);
             e.erro = String((err && err.message) || err);
