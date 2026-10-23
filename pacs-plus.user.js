@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.21.1
+// @version      1.22.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -41,7 +41,7 @@
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
-        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Haiku 5.5 + Gemini, e Opus 5.5 como sênior, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas/unidades, contraste, padrão do serviço…). ✍ Corrigir propõe antes → depois (conta: o Plus; frase/lado: Sonnet; diagnóstico: Opus) e só altera ao clicar Aplicar. Usa o login da Agenda'],
+        ['revisaoIA', 'Laudo: 🛡 Revisar (regras + IA)', 'Botão na barra do editor: regras fixas + Jev (checklist com probabilidade) + Claude Opus 5.5 (ou Sonnet) + Gemini 4 Argon, procuram incompatibilidades (lado, sexo, corpo × conclusão, medidas/unidades, contraste, padrão do serviço…). ✍ Corrigir propõe antes → depois (conta: o Plus; frase/lado: Sonnet; diagnóstico: Opus) e só altera ao clicar Aplicar. Usa o login da Agenda'],
         ['rodapeCompacto', 'Rodapé da lista compacto', 'Linha “Linhas por página / 1-50 de …” com 30 px de altura (antes ~60 px)'],
         ['zoomPdf', 'Laudo impresso (PDF) já abre com zoom', 'Ao clicar em Imprimir, a aba do PDF abre no zoom escolhido em ⚙️ Ajustes (padrão 110%) em vez de 100%. Só a visualização: o papel impresso não muda'],
         ['zoomLaudo', 'Laudo: zoom só da folha (A− 120% A+)', 'Controle na barra do editor: aumenta ou diminui só o texto da folha do laudo (90–160%), salvo neste computador. Só a tela: a impressão não muda'],
@@ -2432,7 +2432,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     }
 
     // =====================================================================
-    // 3G. REVISÃO DO LAUDO (regras fixas + Claude Haiku 5.5 + Gemini) — v1.12
+    // 3G. REVISÃO DO LAUDO (regras fixas + Jev + Claude Opus/Sonnet + Gemini) — v1.12; v1.22: Haiku removido, Opus é o revisor padrão, Gemini 4 Argon
     // ---------------------------------------------------------------------
     // Botão 🛡 Revisar na barra do editor. Camadas:
     //   • Regras fixas (aqui mesmo, instantâneas): campo vazio, sexo × anatomia,
@@ -2445,7 +2445,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'auto' }; // revisor: auto (TC → Sonnet, US → Haiku) | haiku | sonnet
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, opusAuto: true, revisor: 'opus' }; // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
     const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
     const CAT_NOME = {
         campo_vazio: 'Campo não preenchido', sexo_anatomia: 'Sexo × anatomia', lateralidade: 'Lateralidade',
@@ -2822,7 +2822,7 @@ ${c.texto}`;
         return { achados, probs, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || 'jev' };
     }
 
-    // ---------- Claude (Haiku = revisor; Opus = sênior) ----------
+    // ---------- Claude (Opus = revisor padrão; Sonnet opcional, com Opus como sênior) ----------
     async function revClaude(c, modelo, esforco, fonte, tentativa = 1) {
         const t0 = performance.now();
         let d;
@@ -2844,9 +2844,11 @@ ${c.texto}`;
     const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
     const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
     const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
+    const GEMINI_REVISOR = 'gemini-4-argon'; // v1.22: modelo mais forte do Google; o servidor cai para 3.8/3.6 Flash se falhar
+    const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     async function revGemini(c) {
         const t0 = performance.now();
-        const d = await iaProxy({ acao: 'gemini', system: revSistema(c), parts: [{ text: revMensagem(c) }],
+        const d = await iaProxy({ acao: 'gemini', modelo: GEMINI_REVISOR, system: revSistema(c), parts: [{ text: revMensagem(c) }],
             generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0 } });
         let j = null; try { j = JSON.parse(d.texto); } catch (e) { const m = String(d.texto || '').match(/\{[\s\S]*\}/); if (m) { try { j = JSON.parse(m[0]); } catch (x) { /* segue */ } } }
         if (!j || !Array.isArray(j.achados)) throw new Error('resposta sem a lista de achados');
@@ -3135,13 +3137,13 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
             p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
             return;
         }
-        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || '')}">${MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${m === 'gemini' && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
         const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
 <div class="pr-top"><b>🛡 Revisão · ${r.ctx.tipo === 'GERAL' ? esc(r.ctx.mod) : r.ctx.tipo}</b>
 <select id="pr-modo" title="Motores">${Object.entries(REV_MODOS).map(([k, v]) => `<option value="${k}" ${rc.modo === k ? 'selected' : ''}>${v.nome}</option>`).join('')}</select>
-<select id="pr-revisor" title="Qual Claude revisa">${Object.entries(REVISORES).map(([k, v]) => `<option value="${k}" ${(rc.revisor || 'auto') === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+<select id="pr-revisor" title="Qual Claude revisa">${Object.entries(REVISORES).map(([k, v]) => `<option value="${k}" ${revisorDe(rc) === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
 <button class="pr-x pr-min" title="Minimizar">▁</button><button class="pr-x" title="Fechar (Esc) — o resultado fica guardado; 🛡 reabre sem revisar de novo">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
 ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}
@@ -3162,7 +3164,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
-<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>
+${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
@@ -3179,7 +3181,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
-        p.querySelector('#pr-opus-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
+        const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
         p.querySelectorAll('.pr-it').forEach(el => {
@@ -3207,8 +3209,8 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         haiku_gemini: { nome: 'Claude + Gemini', motores: ['claude', 'gemini'] },
         haiku: { nome: 'Só Claude', motores: ['claude'] }
     };
-    const REVISORES = { auto: 'Claude: auto (TC Sonnet · US Haiku)', haiku: 'Claude: Haiku', sonnet: 'Claude: Sonnet' };
-    const revisorDe = (rc, c) => rc.revisor === 'haiku' || rc.revisor === 'sonnet' ? rc.revisor : (c.tipo === 'TC' ? 'sonnet' : 'haiku');
+    const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
+    const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
@@ -3244,19 +3246,19 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico);
         const rc = revCfg();
         const modo = REV_MODOS[rc.modo] ? rc.modo : 'completo';
-        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && revAtual.revisor === revisorDe(rc, c) && !revAtual.carregando) {
+        if (!forcar && revAtual && revAtual.hash === hash && revAtual.modo === modo && revAtual.revisor === revisorDe(rc) && !revAtual.carregando) {
             revAtual.depois = depois || null; revAtual.alterado = false; revAtual.min = false; renderRevisao(); return revAtual;
         }
         const rasc = revAtual && revAtual.exa === c.exa ? (document.getElementById('pr-ped') || {}).value || revAtual.rascunho || '' : '';
         const r = revAtual = { rascunho: rasc, hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null };
         renderRevisao();
         if (c.texto.length >= 30) {
-            r.revisor = revisorDe(rc, c);
+            r.revisor = revisorDe(rc);
             const onda = REV_MODOS[modo].motores.map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
-            if (rc.opusAuto && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
+            if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
             // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
-            const ias = r.ativos.filter(m => ['haiku', 'sonnet', 'gemini'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
+            const ias = r.ativos.filter(m => ['opus', 'sonnet', 'gemini'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
             if (rc.opusAuto && !r.ativos.includes('opus') && ias.length >= 2) {
                 const disc = achadosAtuais(r).find(a => a.gravidade === 'grave' && !a.fontes.includes('regra') && a.fontes.filter(f => ias.includes(f)).length === 1);
                 if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); }
@@ -3365,7 +3367,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
         b.innerHTML = '<span class="v-btn__content">🛡 Rev.</span>';
-        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Haiku/Sonnet, Gemini; Opus como sênior). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
+        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Claude Opus ou Sonnet, Gemini 4 Argon). ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); abrirRevisao(); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
