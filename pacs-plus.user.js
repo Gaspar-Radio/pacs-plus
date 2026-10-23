@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.26.0
+// @version      1.26.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3248,8 +3248,8 @@ ${(r.pedidos || []).slice().reverse().map(k => r.corr[k] ? `<div class="pr-pd" d
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
-${r.depois ? `<div class="pr-lib ${graves ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : graves ? `⚠ ${graves} achado(s) grave(s). Revise ou libere mesmo assim.` : '✓ Sem achados graves.'}
-<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : 'Liberar ' + (graves ? 'mesmo assim' : '')}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
+${r.depois ? `<div class="pr-lib ${todos.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : todos.length ? `⚠ ${todos.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : '✓ Sem pendências.'}
+<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : todos.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
@@ -3412,6 +3412,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         return d / 2 <= Math.max(5, n * 0.05);
     }
     const temGrave = r => achadosAtuais(r).some(a => a.gravidade === 'grave');
+    // v1.26.1 (usuário): "Liberar c/ IA" só libera sozinho se NÃO houver nenhuma pendência (grave ou atenção);
+    // com qualquer achado, para e espera o clique em "Liberar mesmo assim".
+    const pendencias = r => achadosAtuais(r).filter(a => !r.ignorados.has(chaveAchado(a))).length;
     // erro que impede liberar sozinho: só do Claude principal (Gemini/Grok lentos ou fora não seguram o Liberar)
     const erroPrincipal = r => !!(r.err[r.revisor] || r.err.jev && !REV_LLMS.some(m => r.res[m]));
     async function revisar(forcar, depois, opc = {}) {
@@ -3427,7 +3430,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             if (r0.hash !== hash) { r0.alterado = true; r0.ctx = c; r0.regras = regrasLaudo(c); r0.hash = hash; }
             if (opc.auto) return r0;
             r0.depois = depois || null;
-            if (r0.depois && !r0.carregando && !temGrave(r0) && !erroPrincipal(r0)) { const f = r0.depois; r0.depois = null; fecharRevisao(); f(); return r0; }
+            if (r0.depois && !r0.carregando && !pendencias(r0) && !erroPrincipal(r0)) { const f = r0.depois; r0.depois = null; fecharRevisao(); f(); return r0; }
             r0.min = false; renderRevisao(); return r0;
         }
         const rasc = revAtual && revAtual.exa === c.exa ? (document.getElementById('pr-ped') || {}).value || revAtual.rascunho || '' : '';
@@ -3458,9 +3461,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         Object.entries(r.res).forEach(([m, x]) => { if (x) Object.assign(reg, { [m + 'Ms']: Math.round(x.ms), [m + 'In']: x.tin, [m + 'Out']: x.tout, [m + 'N']: x.achados.length }); });
         revLog(reg);
         if (revAtual === r) {
-            const graves = achadosAtuais(r).filter(a => a.gravidade === 'grave').length;
-            // revisão no Liberar sem nada grave → segue sozinho
-            if (r.depois && !graves && !erroPrincipal(r)) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
+            // revisão do "Liberar c/ IA" sem NENHUMA pendência → segue sozinho (v1.26.1: antes bastava não ter grave)
+            if (r.depois && !pendencias(r) && !erroPrincipal(r)) { const f = r.depois; r.depois = null; fecharRevisao(); f(); return r; }
             renderRevisao();
         }
         return r;
