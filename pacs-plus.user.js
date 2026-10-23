@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.22.1
+// @version      1.23.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -104,7 +104,7 @@
         lembretes: '60,30,15',       // minutos antes do prazo
         repetirVencido: 15, repetirVezes: 4,
         horas: 2,                    // prazo da urgência (teto, e base do prazo provisório)
-        semConfirmacao: 15,          // avisa se o urgente não for confirmado em X min (repete até 4x)
+        semConfirmacao: 15,          // avisa se o urgente não for confirmado em X min (repete 1x — v1.23)
         provisorio: false,           // v1.21: false = cronômetro só começa na confirmação dos técnicos; true = prazo provisório desde a marcação (antigo)
         encerra: 'LIBERADO',         // situações que encerram o acompanhamento
         som: true, notifWindows: true,
@@ -353,7 +353,7 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -1321,7 +1321,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     async function urgCancelarAgenda(g) {
         const agora = Date.now();
-        for (const [sid, em] of Object.entries(g.agenda || {})) await ntfyAcao(sid, em > agora ? 'delete' : 'clear');
+        for (const [sid, em] of Object.entries(g.agenda || {})) if (em > agora) await ntfyAcao(sid, 'delete');
         g.agenda = {};
         g.agendaVence = null;
     }
@@ -1332,8 +1332,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         urgTela(m.titulo, m.tela, 'info', gsid(g));
         if (!celOn()) return;
         await urgCancelarAgenda(g);
-        for (const sid of (g.entregues || [])) await ntfyAcao(sid, 'clear');
-        g.entregues = [];
+        g.entregues = []; // v1.23: não marca como lidas no celular (cada "clear" gasta 1 mensagem da cota)
         await ntfyEnviar({ sid: gsid(g) + '-fim', titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags });
         await poCancelar(gsid(g));
         await tgEnviar(m.titulo + '\n' + m.msg);
@@ -1464,7 +1463,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             if (g.provisorio && g.detectadoEm) {
                 const n = Math.floor((agora - g.detectadoEm) / ((+cfg.urg.semConfirmacao || 15) * 60000));
                 const ja = g.semConfN || (g.enviados.semConf ? 1 : 0);
-                if (n >= 1 && n > ja && ja < 4) { g.semConfN = n; await urgEvento(g, 'semConf', e); }
+                if (n >= 1 && n > ja && ja < 2) { g.semConfN = n; await urgEvento(g, 'semConf', e); }
             }
             if (!g.vence) continue;
             const dev = L.filter(m => !g.enviados['r' + m] && agora >= g.vence - m * 60000 && agora < g.vence);
@@ -1492,12 +1491,41 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         return null;
     }
     function fimEscalaHoje() { const d = new Date(), f = minutosDoDia(cfg.urg.fim); d.setHours(Math.floor(f / 60), f % 60, 59, 0); return d.getTime(); }
+    // v1.23 — com login na nuvem (papel 'lider') quem vigia "PAROU / não iniciou" é o SERVIDOR (pg_cron a cada 5 min,
+    // interno.monitor_verificar): aqui só informamos 1x/min até quando vigiamos hoje e quando começa a próxima escala.
+    // Zero mensagens no ntfy enquanto tudo funciona. Sem login na nuvem ('sozinho'): mantém o vigia antigo pelo ntfy.
+    let urgVigiaRpcEm = 0;
+    async function urgVigiaServidor(e) {
+        const n = sessaoNuvemPlus(), u = cfg.urg, agora = Date.now();
+        if (!n || agora - urgVigiaRpcEm < URG_LEASE_CADA - 5000) return;
+        urgVigiaRpcEm = agora;
+        const dentro = !urgPausado() && naEscalaData(new Date());
+        // próximo início: hoje (se ainda não começou e hoje é dia de escala) ou o próximo dia de escala
+        const hojeIni = new Date(agora); const [hI, mI] = String(u.inicio || '07:00').split(':').map(Number); hojeIni.setHours(hI || 0, (mI || 0) + 30, 0, 0);
+        const ehDia = janelaDias().includes(hojeIni.getDay()) && !feriadosDoAno(hojeIni.getFullYear(), cfg.sla)[chaveDia(hojeIni)] && !(u.pausaAte && chaveDia(hojeIni) <= u.pausaAte);
+        const prox = ehDia && agora < hojeIni.getTime() - 30 * 60000 ? hojeIni : proximoInicioEscala(agora);
+        try {
+            await fetch(n.url + '/rest/v1/rpc/monitor_vigia_estado', { method: 'POST', headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok },
+                body: JSON.stringify({ p_nome: 'tc_urgente', p_pc: urgPcId(), p_vigia_ate: dentro ? new Date(fimEscalaHoje() + 3 * 60000).toISOString() : null,
+                    p_proximo_inicio: prox ? prox.toISOString() : null, p_topico: u.ntfyTopico, p_servidor: ntfyBase() }) });
+        } catch (x) { /* próxima volta */ }
+        // limpeza única: cancela os vigias antigos agendados no ntfy (2 mensagens, uma vez só)
+        if (!e.vigiaMig123) { e.vigiaMig123 = true; await ntfyAcao('pp-vigia', 'delete'); await ntfyAcao('pp-inicio', 'delete'); e.vigiaEm = 0; }
+    }
     async function urgVigia(e) {
         const u = cfg.urg;
         if (!celOn() || !u.ntfyTopico) return;
         const agora = Date.now(), hoje = chaveDia(new Date());
         const dentro = !urgPausado() && naEscalaData(new Date());
         const lendoOk = e.ultLeitura && agora - e.ultLeitura < 3 * 60000; // se a leitura falha, o vigia não é renovado e dispara
+        if (urgPapel === 'lider') {
+            if (lendoOk) await urgVigiaServidor(e);
+            if (dentro && lendoOk && e.diaAtivo !== hoje) {
+                e.diaAtivo = hoje;
+                await ntfyEnviar({ titulo: '✅ Monitor de urgências ativo', msg: `O ${urgPcNome()} está vigiando os TC urgentes da escala (${u.inicio}–${u.fim}). Se nenhum computador vigiar, o servidor avisa.`, prio: 2, tags: 'white_check_mark' });
+            }
+            return;
+        }
         if (dentro && lendoOk) {
             if (e.diaAtivo !== hoje) {
                 e.diaAtivo = hoje;
@@ -1519,7 +1547,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const prox = proximoInicioEscala(agora);
             if (prox && prox.getTime() - agora < 3 * 86400000 - 120000) {
                 const ok = await ntfyEnviar({ sid: 'pp-inicio', em: prox.getTime(), titulo: '⚠ Monitor de urgências não iniciou',
-                    msg: `Até ${hm(prox.getTime())} nenhum computador com o PACS aberto começou a vigiar os TC urgentes. Abra/faça login no PACS (Mac ou PC do hospital).`, prio: 4, tags: 'warning' });
+                    msg: `Até ${hm(prox.getTime())} nenhum computador com o PACS aberto começou a vigiar os TC urgentes. Abra/faça login no PACS (Mac ou PC de casa).`, prio: 4, tags: 'warning' });
                 e.inicioAgendado = ok ? chaveDia(prox) : '';
             }
         }
@@ -1565,7 +1593,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                     if (err && err.code === 'login' && !e.sessaoAvisada) {
                         e.sessaoAvisada = true;
                         urgTela('⚠ Monitor de urgências parado', 'Sessão do PACS expirada — faça login para voltar a vigiar os TC urgentes.', 'aviso', 'pp-sessao');
-                        await ntfyEnviar({ titulo: `⚠ Sessão do PACS expirou (${urgPcNome()})`, msg: `O ${urgPcNome()} parou de vigiar os TC urgentes. Se outro computador estiver com o PACS aberto, ele assume em ~2 min; senão, faça login no PACS.`, prio: 4, tags: 'warning' });
+                        // v1.23: sem mensagem no celular — outro PC assume; se ninguém assumir, o servidor manda "PAROU"
+                        if (urgPapel === 'sozinho') await ntfyEnviar({ titulo: `⚠ Sessão do PACS expirou (${urgPcNome()})`, msg: `O ${urgPcNome()} parou de vigiar os TC urgentes. Faça login no PACS.`, prio: 4, tags: 'warning' });
                     }
                 }
             }
@@ -2800,12 +2829,39 @@ ${c.texto}`;
         GERAL: {}
     };
     const JEV_CRITICO = 'O laudo descreve achado agudo ou crítico que exige comunicação imediata ao médico assistente.';
+    // v1.23 — checklists por TIPO DE EXAME (pelo nome do exame). Regras citadas = referências já aprovadas pelo usuário (ACR TI-RADS, BI-RADS, SRU, Fleischner).
+    const JEV_EXAME = [
+        { re: /tireo/, so: null, q: {
+            tirads_pontos: ['classificacao', 'grave', 'A categoria ACR TI-RADS informada não corresponde à soma dos pontos das características descritas do nódulo (composição, ecogenicidade, forma, margens e focos ecogênicos): TR1 0 pt, TR2 2 pt, TR3 3 pt, TR4 4–6 pt, TR5 7 ou mais.'],
+            tirads_conduta: ['classificacao', 'grave', 'A recomendação de PAAF ou seguimento não segue o ACR TI-RADS para a categoria e o maior diâmetro do nódulo (TR3: PAAF ≥ 2,5 cm, seguimento ≥ 1,5 cm; TR4: PAAF ≥ 1,5 cm, seguimento ≥ 1,0 cm; TR5: PAAF ≥ 1,0 cm, seguimento ≥ 0,5 cm).'] } },
+        { re: /mama|mamari/, so: null, q: {
+            birads_descricao: ['classificacao', 'grave', 'A categoria BI-RADS é incoerente com as características descritas da lesão (forma, margens, orientação, ecogenicidade, achados associados).'],
+            birads_conduta: ['classificacao', 'grave', 'A recomendação não corresponde à categoria BI-RADS (1–2: rotina; 3: controle em curto prazo, 6 meses; 4–5: biópsia; 6: conduta oncológica; 0: complementação).'] } },
+        { re: /carot|vertebr|cervic/, so: 'US', q: {
+            estenose_velocidade: ['medidas', 'grave', 'O grau de estenose carotídea informado não é coerente com as velocidades descritas (critérios SRU: < 50% com VPS < 125 cm/s; 50–69% com VPS 125–230 cm/s; ≥ 70% com VPS > 230 cm/s ou razão ACI/ACC > 4).'] } },
+        { re: /venos|varize|safen|trombose|tvp/, so: 'US', q: {
+            refluxo_tempo: ['exame_texto', 'grave', 'A conclusão sobre refluxo ou insuficiência venosa não é coerente com os tempos de refluxo descritos (patológico: > 0,5 s em veias superficiais, > 0,35 s em perfurantes, > 1,0 s em veias profundas femoral e poplítea).'],
+            trombose_conclusao: ['corpo_conclusao', 'grave', 'O corpo descreve veia não compressível ou com material intraluminal e a conclusão não cita trombose, ou a conclusão cita trombose sem descrição que a sustente.'] } },
+        { re: /obstet|gesta|morfolog|fetal|biometr/, so: 'US', q: {
+            ig_biometria: ['medidas', 'grave', 'A idade gestacional da conclusão não é coerente com a biometria descrita ou com a idade gestacional de referência citada (DUM ou primeiro ultrassom).'],
+            peso_percentil: ['classificacao', 'grave', 'A classificação do peso fetal (adequado, pequeno ou grande para a idade gestacional) é incoerente com o percentil informado (PIG < p10, GIG > p90).'] } },
+        { re: /torax|pulm/, so: 'TC', q: {
+            fleischner_conduta: ['classificacao', 'grave', 'A recomendação de seguimento de nódulo pulmonar não segue Fleischner 2017 para o tamanho, número e tipo (sólido, subsólido) descritos, ou falta recomendação quando a diretriz indica seguimento.'] } }
+    ];
+    // v1.23 — lateralidade por ESCOLHA (o Jev diz o lado no corpo e na conclusão; o Plus compara de forma exata)
+    const JEV_LADO = { direito: 'lado direito', esquerdo: 'lado esquerdo', bilateral: 'ambos os lados', nenhum: 'sem achado anormal lateralizado, ou exame sem lado' };
+    const ladoDoNome = ex => { const n = norm(ex); const d = /direit|\b(mid|msd)\b/.test(n), e = /esquerd|\b(mie|mse)\b/.test(n); return d && !e ? 'direito' : e && !d ? 'esquerdo' : null; };
+    const aLado = l => l === 'direito' ? 'à direita' : 'à esquerda';
     async function revJev(c) {
         const t0 = performance.now();
         const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {}, c.tipo !== 'TC' && ehUro(c) ? JEV_ESP.URO : {});
+        const nEx = norm(c.exame);
+        JEV_EXAME.forEach(g => { if (g.re.test(nEx) && (!g.so || g.so === c.tipo)) Object.assign(mapa, g.q); });
         const questions = {};
         Object.entries(mapa).forEach(([k, v]) => { questions[k] = { type: 'noul', instructions: v[2] }; });
         if (!c.critico) questions.critico_presente = { type: 'noul', instructions: JEV_CRITICO };
+        questions.lado_corpo_ch = { type: 'choice', instructions: 'No CORPO (descrição) do laudo, de que lado está o principal achado anormal?', criteria: JEV_LADO };
+        questions.lado_conc_ch = { type: 'choice', instructions: 'Na IMPRESSÃO/CONCLUSÃO do laudo, de que lado está o principal achado anormal?', criteria: JEV_LADO };
         const d = await iaProxy({ acao: 'jev', state: revMensagem(c), questions });
         const ans = d.answers || {};
         const achados = [], probs = {};
@@ -2813,13 +2869,18 @@ ${c.texto}`;
             const p = a && typeof a.noul === 'number' ? a.noul : null;
             if (p == null) return;
             probs[k] = p;
-            if (k === 'critico_presente') { if (p >= 0.7) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (Jev ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
+            if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (Jev ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
             const m = mapa[k];
-            if (!m || p < 0.5) return;
-            achados.push({ categoria: m[0], gravidade: p >= 0.85 ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
+            if (!m || p < JEV_LIM.mostrar) return;
+            achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
         });
+        // v1.23: lados por escolha (só com confiança ≥ 0,75)
+        const lc = ans.lado_corpo_ch, lk = ans.lado_conc_ch, lado = x => x && x.confidence >= 0.75 && ['direito', 'esquerdo'].includes(x.choice) ? x.choice : null;
+        const ladoC = lado(lc), ladoK = lado(lk), ladoN = ladoDoNome(c.exame);
+        if (ladoC && ladoK && ladoC !== ladoK) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `Achado principal ${aLado(ladoC)} no corpo do laudo e ${aLado(ladoK)} na conclusão (Jev, confiança ${fmt(Math.min(lc.confidence, lk.confidence), 2)}).`, sugestao: 'Conferir o lado.', fontes: ['jev'], prob: Math.min(lc.confidence, lk.confidence) });
+        else if (ladoN && ladoC && ladoN !== ladoC) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `O exame é do lado ${ladoN} e o achado principal descrito está ${aLado(ladoC)} (Jev, confiança ${fmt(lc.confidence, 2)}).`, sugestao: 'Conferir o lado do exame e do texto.', fontes: ['jev'], prob: lc.confidence });
         const u = d.usage || {};
-        return { achados, probs, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || 'jev' };
+        return { achados, probs, lados: { corpo: lc && lc.choice, conclusao: lk && lk.choice }, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || 'jev' };
     }
 
     // ---------- Claude (Opus = revisor padrão; Sonnet opcional, com Opus como sênior) ----------
@@ -2923,6 +2984,8 @@ ${c.texto}`;
         }
         return false;
     }
+    // v1.23: registro sem texto para calibrar os limiares (categoria, fontes, probabilidade do Jev e do juiz, decisão do médico)
+    const marcaCalib = (r, a, decisao) => ({ t: Date.now(), calib: decisao, tipo: r.ctx.tipo, cat: a.categoria, grav: a.gravidade, fontes: a.fontes.join('+'), jev: a.prob != null ? Math.round(a.prob * 100) / 100 : null, juiz: a.juiz != null ? Math.round(a.juiz * 100) / 100 : null, fraco: !!a.fraco });
     function revLog(reg) {
         try { const l = JSON.parse(localStorage.getItem(REV_LOG_KEY) || '[]'); l.push(reg); localStorage.setItem(REV_LOG_KEY, JSON.stringify(l.slice(-300))); } catch (e) { /* ok */ }
     }
@@ -3168,7 +3231,7 @@ ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__op
 <div class="pr-lista">${todos.length ? todos.map((a, i) => `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
-<div class="pr-ex">${esc(a.explicacao)}</div>
+<div class="pr-ex">${esc(a.explicacao)}</div>${a.fraco ? `<div class="pr-fraco">provável falso alarme — Jev ${fmt(a.juiz, 2)}</div>` : ''}
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
@@ -3177,7 +3240,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
-<div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1). A IA pode errar: a decisão é sua.</div></div>`;
+<div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
         p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
         const ar = p.querySelector('#pr-alt-rev'); if (ar) ar.onclick = () => revisar(true);
@@ -3199,8 +3262,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
-            el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; renderRevisao(); };
-            const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => pedirCorrecao(r, a, false);
+            el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); renderRevisao(); };
+            const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); pedirCorrecao(r, a, false); };
             ligarCorrecao(el, r, chaveAchado(a));
         });
         const pf = p.querySelector('#pr-full'); if (pf) pf.onclick = () => pedirCorrecao(r, null, true);
@@ -3224,6 +3287,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     };
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
+    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku'];
+    // v1.23 — limiares do Jev num só lugar (calibrar com o registro de Ignorar/Corrigir): mostrar ≥ 0,5; sozinho ≥ 0,7; grave ≥ 0,85; juiz < 0,3 = provável falso alarme
+    const JEV_LIM = Object.assign({ mostrar: 0.5, sozinho: 0.7, grave: 0.85, falso: 0.3 }, (cfg.rev && cfg.rev.jevLim) || {});
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
@@ -3234,10 +3300,33 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (r.res.jev) r.res.jev.achados.slice().sort((x, y) => y.prob - x.prob).forEach(j => {
             const iguais = base.filter(o => o.categoria === j.categoria);
             if (iguais.length) { iguais.forEach(o => { if (!o.fontes.includes('jev')) o.fontes.push('jev'); o.prob = Math.max(o.prob || 0, j.prob); }); return; }
-            if (j.prob >= 0.7) base.push(Object.assign({}, j, { fontes: ['jev'], gravidade: j.prob >= 0.85 ? j.gravidade : 'atencao' }));
+            if (j.prob >= JEV_LIM.sozinho) base.push(Object.assign({}, j, { fontes: ['jev'], gravidade: j.prob >= JEV_LIM.grave ? j.gravidade : 'atencao' }));
         });
-        const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0);
+        // v1.23 — Jev como JUIZ: probabilidade de cada achado das IAs ser erro real
+        if (r.juiz) base.forEach(a => {
+            const p = r.juiz[chaveAchado(a)];
+            if (p == null) return;
+            a.juiz = p;
+            if (p >= JEV_LIM.sozinho && !a.fontes.includes('jev')) { a.fontes.push('jev'); a.prob = Math.max(a.prob || 0, p); }
+            if (p < JEV_LIM.falso && !a.fontes.includes('regra') && a.fontes.filter(f => REV_LLMS.includes(f)).length === 1) { a.gravidade = 'atencao'; a.fraco = true; }
+        });
+        const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0) - (a.fraco ? 12 : 0);
         return base.sort((x, y) => peso(y) - peso(x));
+    }
+    async function revJevJuiz(r) {
+        if (!r.ativos.includes('jev') || r.ctx.texto.length < 30) return;
+        r.juiz = r.juiz || {};
+        const lista = achadosAtuais(r).filter(a => a.fontes.some(f => REV_LLMS.includes(f)) && !(chaveAchado(a) in r.juiz)).slice(0, 40);
+        if (!lista.length) return;
+        const questions = {};
+        lista.forEach((a, i) => { questions['v' + i] = { type: 'noul', instructions: `É verdade que o laudo contém este erro (${CAT_NOME[a.categoria] || a.categoria})? ${a.explicacao}${a.trecho ? ` — trecho citado: “${a.trecho}”` : ''}` }; });
+        const t0 = performance.now();
+        try {
+            const d = await iaProxy({ acao: 'jev', state: revMensagem(r.ctx), questions });
+            lista.forEach((a, i) => { const x = (d.answers || {})['v' + i]; if (x && typeof x.noul === 'number') r.juiz[chaveAchado(a)] = x.noul; });
+            r.juizMs = Math.round(performance.now() - t0);
+        } catch (e) { r.juizErro = e.message; }
+        if (revAtual === r) renderRevisao();
     }
     let grokSemChave = false;
     function rodarMotor(r, m) {
@@ -3258,6 +3347,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         r.carregando = true;
         renderRevisao();
         await rodarMotor(r, 'opus');
+        await revJevJuiz(r);
         r.carregando = false;
         if (revAtual === r) renderRevisao();
     }
@@ -3279,11 +3369,12 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
+            await revJevJuiz(r); // v1.23: Jev confere cada achado das IAs (< 1 s)
             // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
             const ias = r.ativos.filter(m => ['opus', 'sonnet', 'gemini', 'grok'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
             if (rc.opusAuto && !r.ativos.includes('opus') && ias.length >= 2) {
                 const disc = achadosAtuais(r).find(a => a.gravidade === 'grave' && !a.fontes.includes('regra') && a.fontes.filter(f => ias.includes(f)).length === 1);
-                if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); }
+                if (disc) { r.motivoOpus = `as IAs discordaram (“${CAT_NOME[disc.categoria] || disc.categoria}”)`; await rodarMotor(r, 'opus'); await revJevJuiz(r); }
             }
         }
         r.carregando = false;
