@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.25.0
+// @version      1.25.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2633,8 +2633,20 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const tl = t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
         if (exD && !exE && !/bilateral/.test(ex)) { const i = tl.search(/\besquerd[oa]s?\b/); if (i >= 0) add('lateralidade', 'atencao', i, 'Exame do lado DIREITO e o texto cita “esquerdo(a)”.', 'Conferir o lado.'); }
         if (exE && !exD && !/bilateral/.test(ex)) { const i = tl.search(/\bdireit[oa]s?\b/); if (i >= 0) add('lateralidade', 'atencao', i, 'Exame do lado ESQUERDO e o texto cita “direito(a)”.', 'Conferir o lado.'); }
+        // v1.25.1 — negação na FRASE inteira (desde o último ponto/quebra), não só 60 letras antes:
+        // "Ausência de efeito de massa, desvio … ou sinais de herniação" e "obtidas sem o uso do meio de contraste iodado endovenoso"
+        // são negativas. Uma ressalva depois da negação ("porém", "exceto", "mas") desfaz a negação.
+        const negado = (txt, i) => {
+            const ini = Math.max(txt.lastIndexOf('.', i - 1), txt.lastIndexOf('\n', i - 1), txt.lastIndexOf(';', i - 1), i - 250);
+            const trecho = txt.slice(ini + 1, i);
+            const m = trecho.match(/\b(sem|nao|ausencia|ausentes?|afastad|exclu|negativ|descart|nenhum|inexist)\w*/g);
+            if (!m) return false;
+            const ultimaNeg = Math.max(...m.map(w => trecho.lastIndexOf(w)));
+            return !/\b(porem|mas|exceto|entretanto|contudo|todavia|salvo)\b/.test(trecho.slice(ultimaNeg));
+        };
+        const buscaNaoNegada = (txt, re) => { const g = new RegExp(re.source, 'g'); let m; while ((m = g.exec(txt))) { if (!negado(txt, m.index)) return m.index; } return -1; };
         // contraste
-        if (/sem contraste/.test(ex)) { const i = tl.search(/apos (a )?(injecao|administracao)|contraste (iodado )?(endovenoso|intravenoso)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|realce (pelo|ao|apos o) (meio de )?contraste/); if (i >= 0) add('exame_texto', 'grave', i, 'Exame SEM contraste, mas o texto descreve uso de contraste/fases.', 'Conferir técnica e matriz.'); }
+        if (/sem contraste/.test(ex)) { const i = buscaNaoNegada(tl, /apos (a )?(injecao|administracao)|contraste (iodado )?(endovenoso|intravenoso)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|realce (pelo|ao|apos o) (meio de )?contraste/); if (i >= 0) add('exame_texto', 'grave', i, 'Exame SEM contraste, mas o texto descreve uso de contraste/fases.', 'Conferir técnica e matriz.'); }
         if (/com contraste/.test(ex)) { const i = tl.search(/sem (a )?(injecao|uso|administracao) (de|do) (meio de )?contraste|\bsem contraste\b/); if (i >= 0) add('exame_texto', 'atencao', i, 'Exame COM contraste, mas o texto diz “sem contraste”.', 'Conferir técnica.'); }
         // unidades implausíveis (linear: não pega cm³/cm²/cm3/cm/s)
         const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![³²0-9a-z])(?!\s*\/\s*s)/gi;
@@ -2712,9 +2724,9 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         refsServico(c, t, iImp >= 0 ? imp : '').forEach(x => add(x.cat, 'atencao', x.idx, x.msg, x.sug));
         if (!c.critico) {
             for (const k of CRITICOS) {
-                const i = tl.indexOf(k); if (i < 0) continue;
-                const antes = tl.slice(Math.max(0, i - 60), i);
-                if (/\b(sem|nao|ausencia|afastad|exclu|negativ|descart)\w*[^.]*$/.test(antes)) continue;
+                let i = -1, de = 0;
+                while ((i = tl.indexOf(k, de)) >= 0 && negado(tl, i)) de = i + k.length; // todas as ocorrências; só conta a não negada
+                if (i < 0) continue;
                 add('critico', 'atencao', i, `Termo de achado crítico (“${k}”) com “Resultado Crítico” desmarcado.`, 'Marcar Resultado Crítico se for o caso.'); break;
             }
         }
