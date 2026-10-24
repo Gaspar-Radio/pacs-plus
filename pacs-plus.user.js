@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.27.2
+// @version      1.28.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -296,6 +296,14 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 .v-dialog__content .row > .v-btn.pp-rod-conf { background-color: #b45309 !important; min-width: 0 !important; padding: 0 10px !important; }
 .v-dialog__content .row > .v-btn.pp-rod-lib { background-color: #15803d !important; min-width: 0 !important; padding: 0 10px !important; box-shadow: 0 0 0 2px #86efac inset !important; }
 .v-dialog__content .row > .v-btn.pp-canc-sep { margin-left: 36px !important; }
+/* v1.28 — barra do laudo compacta (cores mantidas): botões de situação estreitos, Conferir e Cancelar só ícone */
+html body .v-dialog__content .row.pp-rodape { flex-wrap: nowrap !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn { min-width: 0 !important; width: auto !important; flex: 0 0 auto !important; height: 34px !important; padding: 0 9px !important; margin: 0 2px !important; font-size: 13px !important; letter-spacing: 0 !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-rod-conf { width: 38px !important; padding: 0 !important; margin-left: 12px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-rod-conf .v-icon { font-size: 22px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep { width: 38px !important; padding: 0 !important; margin-left: 22px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep .v-btn__content { font-size: 0 !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep .v-btn__content::before { content: "✖"; font-size: 17px; font-weight: 700; }
 .document-editor__toolbar > .v-btn.pp-calc-laudo, .document-editor__toolbar > .v-btn.pp-rev-btn { padding: 0 5px !important; min-width: 0 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 #pp-rev .pr-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; z-index: 1; }
@@ -3338,8 +3346,9 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
     // Comunicação = ⚠ (mdi-alert), Comentários = 💬 (mdi-comment); só ícones, no tamanho de Anexar/Visualizar/Imprimir.
     const COM_ICON_CSS = `html body .v-dialog__content .v-input[data-pp-crit] label.v-label{font-size:0 !important;}
 .v-dialog__content [data-pp-crit] .pp-caveira{font-size:28px !important;color:#ef4444 !important;margin-left:2px;}
-.v-dialog__content .pp-ico-btn{min-width:0 !important;width:44px !important;height:44px !important;padding:0 !important;margin:0 2px !important;background:transparent !important;box-shadow:none !important;}
-.v-dialog__content .pp-ico-btn .v-icon{font-size:30px !important;}`;
+.v-dialog__content .pp-ico-btn{min-width:0 !important;width:40px !important;height:40px !important;padding:0 !important;margin:0 2px !important;background:transparent !important;box-shadow:none !important;}
+.v-dialog__content .pp-ico-btn .v-icon{font-size:27px !important;}
+.v-dialog__content [data-pp-crit]{margin-left:10px !important;}`;
     function comIcone(cls, mdi, cor, titulo, onClick) {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'v-btn v-btn--icon v-btn--round theme--dark pp-ico-btn ' + cls; b.title = titulo;
         b.innerHTML = `<span class="v-btn__content"><i aria-hidden="true" class="v-icon notranslate mdi ${mdi} theme--dark" style="color:${cor};"></i></span>`;
@@ -3354,7 +3363,18 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         setCss('pp-com-ico-css', COM_ICON_CSS);
         if (!crit.hasAttribute('data-pp-crit')) { crit.setAttribute('data-pp-crit', ''); crit.title = 'Resultado crítico'; }
         const lab = crit.querySelector('.v-label');
-        if (lab && !lab.querySelector('.pp-caveira')) lab.insertAdjacentHTML('beforeend', '<i aria-hidden="true" class="v-icon notranslate mdi mdi-skull pp-caveira"></i>');
+        if (lab) {
+            if (lab.style.getPropertyValue('font-size') !== '0px') lab.style.setProperty('font-size', '0px', 'important');
+            if (!lab.querySelector('.pp-caveira')) lab.insertAdjacentHTML('beforeend', '<i aria-hidden="true" class="v-icon notranslate mdi mdi-skull pp-caveira"></i>');
+        }
+        // Padrão / Anexo → "P" / "A" (nome completo no título)
+        crit.closest('.v-dialog__content') && crit.closest('.v-dialog__content').querySelectorAll('input[value="PADRAO"], input[value="ANEXO"]').forEach(inp => {
+            const r = inp.closest('.v-radio'), l = r && r.querySelector('.v-label');
+            if (!l || l.querySelector('.pp-curto')) return;
+            const nome = l.textContent.trim();
+            l.style.setProperty('font-size', '0px', 'important'); r.title = nome;
+            l.insertAdjacentHTML('beforeend', `<span class="pp-curto" style="font-size:14.5px;font-weight:700;">${inp.value === 'PADRAO' ? 'P' : 'A'}</span>`);
+        });
         if (!b || b.previousElementSibling !== crit) {
             if (b) b.remove();
             b = comIcone('pp-com-btn', 'mdi-alert', '#f59e0b', 'Comunicação de achado crítico — gera a mensagem para o WhatsApp e registra nos comentários', () => abrirComunicacao(null, 'laudo'));
@@ -3548,7 +3568,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
         // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
-        const lim = m === 'opus' ? 90000 : 45000;
+        const lim = m === 'opus' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
         const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
         return corrida.then(x => { r.res[m] = x; }).catch(e => {
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
@@ -3744,8 +3764,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const row = lib && lib.parentElement;
         document.querySelectorAll('.pp-rod-btn').forEach(x => { if (!row || x.parentElement !== row) x.remove(); });
         if (!row || !on('revisaoIA') || !editorLaudo()) return;
-        const canc = [...row.children].find(b => norm(b.innerText) === 'cancelar');
-        if (canc && !canc.classList.contains('pp-canc-sep')) canc.classList.add('pp-canc-sep');
+        const canc = [...row.children].find(b => b.classList.contains('pp-canc-sep') || norm(b.innerText) === 'cancelar');
+        if (canc && !canc.classList.contains('pp-canc-sep')) { canc.classList.add('pp-canc-sep'); canc.title = 'Cancelar (fecha sem salvar)'; }
+        row.classList.add('pp-rodape'); // v1.28: barra compacta (CSS revisaoIA)
         const fazer = (cls, txt, tit, fn) => {
             let b = row.querySelector(':scope > .' + cls);
             if (!b) {
@@ -3761,7 +3782,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const bl = fazer('pp-rod-lib', '✔ Liberar c/ IA', 'Confere com regras + Jev + Claude e libera: laudo normal sai em ~1 s; com achado, abre a revisão e libera sozinho se não houver nada grave.', () => {
             revisar(false, () => { revLiberando = true; try { lib.click(); } finally { revLiberando = false; } });
         });
-        const bc = fazer('pp-rod-conf', '🛡 Conferir', 'Revisão completa por IA (regras + Jev + Claude), sem liberar. ✍ Corrigir só altera o laudo ao clicar Aplicar.', () => abrirRevisao());
+        const bc = fazer('pp-rod-conf', '<i aria-hidden="true" class="v-icon notranslate mdi mdi-shield-search theme--dark"></i>', '🛡 Conferir — revisão completa por IA (regras + Jev + Claude), sem liberar. ✍ Corrigir só altera o laudo ao clicar Aplicar.', () => abrirRevisao());
         if (bc.nextSibling !== bl) row.insertBefore(bc, bl);
     }
     function revBtn() {
