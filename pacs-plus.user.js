@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.29.0
+// @version      1.30.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3490,7 +3490,8 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
     setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top { cursor: move; user-select: none; }');
 
     // ---- Trecho selecionado no laudo: mini-barra ✍ Reescrever · 🛡 Revisar · 🧮 Volume · 💬 Pedir ----
-    const SEL_CSS = `#pp-sel{position:fixed;z-index:10000004;display:flex;gap:2px;padding:3px;background:#0f172a;border:1px solid #475569;border-radius:9px;box-shadow:0 8px 22px rgba(0,0,0,.55);font:600 12.5px -apple-system,"Segoe UI",Roboto,sans-serif}
+    const SEL_CSS = `#pp-sel .ps-l{display:flex;gap:2px} #pp-sel .ps-mais{display:none;border-top:1px solid #334155;margin-top:3px;padding-top:3px} #pp-sel.mais .ps-mais{display:flex}
+#pp-sel{position:fixed;z-index:10000004;display:flex;flex-direction:column;gap:0;padding:3px;background:#0f172a;border:1px solid #475569;border-radius:9px;box-shadow:0 8px 22px rgba(0,0,0,.55);font:600 12.5px -apple-system,"Segoe UI",Roboto,sans-serif}
 #pp-sel button{background:transparent;color:#e2e8f0;border:0;border-radius:6px;padding:5px 8px;cursor:pointer;font:inherit;white-space:nowrap}
 #pp-sel button:hover{background:#1e293b}
 #pp-sel-pop{position:fixed;z-index:10000004;top:120px;right:470px;width:460px;max-width:94vw;max-height:70vh;overflow:auto;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;box-shadow:0 16px 40px rgba(0,0,0,.6);font:12.5px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif}
@@ -3525,14 +3526,16 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         selAtual = { txt, ed };
         setCss('pp-sel-css', SEL_CSS);
         let b = document.getElementById('pp-sel');
+        if (b) b.classList.remove('mais');
         if (!b) {
             b = document.createElement('div'); b.id = 'pp-sel';
             b.addEventListener('mousedown', e => e.preventDefault()); // não perde a seleção
-            b.addEventListener('click', e => { const bt = e.target.closest('button[data-a]'); if (bt) { e.stopPropagation(); selAcao(bt.dataset.a); } });
+            b.addEventListener('click', e => { const bt = e.target.closest('button[data-a]'); if (!bt) return; e.stopPropagation(); if (bt.dataset.a === 'mais') { b.classList.toggle('mais'); return; } selAcao(bt.dataset.a); });
             document.body.appendChild(b);
         }
-        const vol = medidasDe(txt);
-        b.innerHTML = `<button data-a="reescrever" title="Opus reescreve só este trecho (mesmo sentido; você confere antes de aplicar)">✍ Reescrever</button><button data-a="revisar" title="Opus revisa só este trecho">🛡 Revisar</button>${vol ? `<button data-a="volume" title="Volume do elipsoide (0,523 × D1 × D2 × D3) — cálculo exato, sem IA">🧮 Volume</button>` : ''}<button data-a="pedir" title="Escreva o que quer que o Opus faça com este trecho">💬 Pedir…</button>`;
+        const vol = medidasDe(txt), temNum = /\d/.test(txt) && /\b(mm|cm)\b/i.test(txt);
+        b.innerHTML = `<div class="ps-l"><button data-a="reescrever" title="Opus reescreve só este trecho (mesmo sentido; você confere antes de aplicar)">✍ Reescrever</button><button data-a="revisar" title="Opus revisa só este trecho">🛡 Revisar</button>${vol ? `<button data-a="volume" title="Volume do elipsoide (0,523 × D1 × D2 × D3) — cálculo exato, sem IA">🧮 Volume</button>` : ''}<button data-a="mais" title="Mais ações">⋯ Mais</button></div>` +
+            `<div class="ps-l ps-mais"><button data-a="encurtar" title="Deixa o trecho mais enxuto sem perder informação">✂ Encurtar</button>${temNum ? `<button data-a="medidas" title="Converte mm ↔ cm e padroniza o “x” (sem IA)">📏 mm↔cm</button>` : ''}<button data-a="classificar" title="Sugere TI-RADS, Bosniak, Fleischner, Lung-RADS, BI-RADS, O-RADS, LI-RADS, PI-RADS… com categoria e motivo">🏷 Classificar</button><button data-a="comparar" title="Compara com o laudo anterior do paciente e escreve a evolução">🕘 Comparar</button><button data-a="impressao" title="Escreve a IMPRESSÃO a partir dos achados (selecione a análise)">📝 Impressão</button><button data-a="pedir" title="Escreva o que quer que o Opus faça com este trecho">💬 Pedir…</button></div>`;
         const r = s.getRangeAt(0).getBoundingClientRect();
         const w = b.offsetWidth || 300;
         b.style.left = Math.round(Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8))) + 'px';
@@ -3587,15 +3590,64 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
             ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ir(); });
             return;
         }
+        if (a === 'medidas') {
+            const cv = converterMedidas(txt);
+            const p = selPop('📏 Converter medidas', `<div class="ps-t"><div class="ps-de">${esc(txt)}</div><div class="ps-para">${esc(cv)}</div><button class="ok" data-b="ap">✔ Aplicar</button><button data-b="cp">📋 Copiar</button></div><div class="ps-obs" style="color:#64748b;font-size:11px">Cálculo local, sem IA · Ctrl+Z desfaz</div>`);
+            p.querySelector('[data-b=ap]').onclick = e => { e.target.textContent = selSubstituir(ed, cv) ? '✔ Aplicado' : '✖ trecho mudou — use Copiar'; e.target.disabled = true; };
+            p.querySelector('[data-b=cp]').onclick = () => { try { navigator.clipboard.writeText(cv); } catch (x) { /* ok */ } };
+            return;
+        }
+        if (a === 'encurtar') return selIA(ed, txt, 'Encurte o trecho selecionado: mais enxuto e direto, sem perder NENHUMA informação (achados, medidas, lateralidade, negativas relevantes). Não acrescente nada.');
+        if (a === 'classificar') return selIA(ed, txt, 'Classifique o achado do trecho pelo sistema de classificação aplicável e vigente (ex.: ACR TI-RADS, Bosniak 2019, Fleischner 2017, Lung-RADS, BI-RADS, O-RADS, LI-RADS, PI-RADS). Em "observacao": sistema, categoria (com pontuação quando houver), o motivo em 1–2 linhas e o que falta descrever se os dados forem insuficientes. Só proponha troca (acrescentar a categoria ao trecho) se os dados do laudo forem suficientes; nunca invente característica.', 'medium');
+        if (a === 'impressao') return selIA(ed, txt, 'Escreva a IMPRESSÃO a partir dos achados do laudo (use o trecho selecionado como base principal). Padrão do serviço: tópicos curtos em ordem de importância, sem repetir medidas desnecessárias, sem condutas não pedidas, mantendo lateralidade. Se já existir a seção IMPRESSÃO/CONCLUSÃO, substitua o conteúdo dela (troca com "original" = texto atual da impressão, mesmo fora do trecho). Se não existir, insira ao fim do trecho uma linha "IMPRESSÃO:" seguida dos tópicos (use \\n para quebrar linha).', 'medium', true);
+        if (a === 'comparar') {
+            const ant = await laudoAnterior();
+            if (!ant) { selPop('🕘 Comparar com o anterior', `<div class="ps-q">«${esc(txt)}»</div><div class="ps-err">Não achei laudo anterior liberado deste paciente no histórico.</div>`); return; }
+            return selIA(ed, txt, `Compare o achado do trecho selecionado com o LAUDO ANTERIOR abaixo (${ant.data} · ${ant.exame}). Proponha troca no trecho acrescentando uma frase curta de evolução (ex.: "inalterado em relação ao exame de ${ant.data}", "aumentou de X para Y cm", "novo em relação a ${ant.data}"). Use só o que está escrito nos dois laudos; se o achado não é citado no anterior ou a comparação não é possível, não troque e explique em "observacao".\nLAUDO ANTERIOR (${ant.data} · ${ant.exame}):\n${ant.texto}`, 'medium');
+        }
         if (a === 'reescrever') return selIA(ed, txt, 'Reescreva SOMENTE o trecho selecionado com redação radiológica clara, objetiva e formal (português do Brasil), mantendo exatamente o mesmo sentido, as mesmas medidas e a lateralidade. Não acrescente nem retire achados.');
         if (a === 'revisar') return selIA(ed, txt, 'Revise SOMENTE o trecho selecionado: português, concordância, termos técnicos, lateralidade, medidas/unidades e coerência com o restante do laudo e com a indicação. Corrija o mínimo necessário. Se estiver correto, não troque nada e diga em "observacao".');
     }
-    async function selIA(ed, txt, ordem) {
+    function selSubstituir(ed, novo) {
+        try {
+            const mk = ed.model.markers.get('pp-sel'); if (!mk) return false;
+            const rg = mk.getRange(); if (rg.isCollapsed) return false;
+            ed.model.change(w => { const ini = rg.start, no = ini.textNode || ini.nodeAfter; const at = no && no.getAttributes ? new Map(no.getAttributes()) : new Map(); const pos = w.createPositionAt(rg.start.parent, rg.start.offset); w.remove(rg); w.insertText(novo, at, pos); });
+            ed.editing.view.focus(); return true;
+        } catch (e) { return false; }
+    }
+    // mm ↔ cm (local): todas as medidas do trecho mudam de unidade; "x"/"×" padronizados como " x "
+    function converterMedidas(txt) {
+        const praCm = /\bmm\b/i.test(txt) && !/\bcm\b/i.test(txt);
+        const fmt = v => { const r = Math.round(v * 100) / 100; return (Number.isInteger(r) ? String(r) : (Math.round(r * 10) === r * 10 ? r.toFixed(1) : r.toFixed(2))).replace('.', ','); };
+        return String(txt)
+            .replace(/(\d+(?:[.,]\d+)?)/g, n => { const v = parseFloat(n.replace(',', '.')); return fmt(praCm ? v / 10 : v * 10); })
+            .replace(praCm ? /\bmm\b/gi : /\bcm\b/gi, praCm ? 'cm' : 'mm')
+            .replace(/(\d)\s*[x×X]\s*(?=\d)/g, '$1 x ');
+    }
+    // laudo anterior liberado do mesmo paciente (histórico do diálogo): prefere a mesma modalidade, o mais recente
+    async function laudoAnterior() {
+        const vm = laudoComp(); if (!vm || !vm.exame) return null;
+        const atual = vm.exame, mod = String((atual.tipoexame && atual.tipoexame.modalidade && atual.tipoexame.modalidade.mod_sigla) || '');
+        const quando = x => String(x.exa_data || '').slice(0, 10) + ' ' + String(x.exa_hora || '');
+        const cands = (vm.examesPacienteHistorico || []).filter(x => x.exa_codigo !== atual.exa_codigo && quando(x) <= quando(atual) && String(x.exa_situacao || '').toUpperCase() === 'LIBERADO');
+        const modDe = x => String((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || (x.modalidade && x.modalidade.mod_sigla) || '');
+        cands.sort((a, b) => ((modDe(b) === mod) - (modDe(a) === mod)) || quando(b).localeCompare(quando(a)));
+        for (const x of cands.slice(0, 4)) {
+            try {
+                const ex = await comExameApi(x.exa_codigo);
+                const t = htmlParaTexto((ex.laudo && ex.laudo.lau_laudo) || '').trim();
+                if (t) return { data: comDataBR(ex.exa_data), exame: String((ex.tipoexame && ex.tipoexame.tpe_descricao) || ''), texto: t.slice(0, 12000) };
+            } catch (e) { /* tenta o próximo */ }
+        }
+        return null;
+    }
+    async function selIA(ed, txt, ordem, esforco = 'low', foraDoTrecho = false) {
         const p = selPop('✍ Opus — trecho selecionado', `<div class="ps-q">«${esc(txt)}»</div><div class="ps-obs">⏳ Pensando…</div>`);
         const c = contextoLaudo();
         if (!c) { p.querySelector('.ps-obs').textContent = 'Abra o laudo para usar.'; return; }
         try {
-            const x = await pedidoOpus(c, `${ordem}\nTRECHO SELECIONADO: «${txt}»\nAs trocas devem ficar DENTRO desse trecho ("original" = parte literal dele).`, 1, 'low');
+            const x = await pedidoOpus(c, `${ordem}\nTRECHO SELECIONADO: «${txt}»` + (foraDoTrecho ? '' : '\nAs trocas devem ficar DENTRO desse trecho ("original" = parte literal dele).'), 1, esforco);
             if (!document.body.contains(p)) return;
             const cr = { trocas: x.trocas };
             const html = (x.trocas.length ? x.trocas.map((t, i) => `<div class="ps-t"><div class="ps-de">${esc(t.original)}</div><div class="ps-para">${esc(t.novo)}</div><button class="ok" data-i="${i}">✔ Aplicar</button><button data-c="${i}">📋 Copiar</button></div>`).join('') : '') +
