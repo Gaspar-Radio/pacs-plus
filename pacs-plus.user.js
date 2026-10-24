@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.28.1
+// @version      1.28.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3422,6 +3422,30 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         });
     }
     setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
+    // v1.28.2 — exames antigos ainda têm o bloco [FICHA TC HAMC … /FICHA TC] dentro da Anamnese (Anamnese TC ≤ 1.8).
+    // Só na TELA: esconde o bloco no cabeçalho do laudo (o PACS não é alterado; a ficha está nos Comentários/PDF).
+    const RE_FICHA_TELA = /\s*\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/gi;
+    function esconderFichaAnamnese() {
+        document.querySelectorAll('.v-dialog__content .v-expansion-panel-content').forEach(painel => {
+            if (!/\[FICHA TC HAMC|\[\/FICHA TC\]/i.test(painel.textContent)) return;
+            // bloco partido em mais de um nó de texto: apaga o miolo até o fecho
+            const tw0 = document.createTreeWalker(painel, NodeFilter.SHOW_TEXT); let dentro = false;
+            for (let n = tw0.nextNode(); n; n = tw0.nextNode()) {
+                const v = n.nodeValue;
+                if (dentro) { const i = v.search(/\[\/FICHA TC\]/i); if (i >= 0) { n.nodeValue = v.slice(i + 11); dentro = false; } else n.nodeValue = ''; continue; }
+                const ini = v.search(/\[FICHA TC HAMC/i);
+                if (ini >= 0 && !/\[\/FICHA TC\]/i.test(v.slice(ini))) { n.nodeValue = v.slice(0, ini).trimEnd() + ' 📋'; if (n.parentElement) n.parentElement.title = 'A ficha de anamnese TC está nos Comentários e no PDF anexado'; dentro = true; }
+            }
+            const tw = document.createTreeWalker(painel, NodeFilter.SHOW_TEXT);
+            const nos = []; for (let n = tw.nextNode(); n; n = tw.nextNode()) if (/\[FICHA TC HAMC/i.test(n.nodeValue)) nos.push(n);
+            nos.forEach(n => {
+                const novo = n.nodeValue.replace(RE_FICHA_TELA, '').replace(/\[FICHA TC HAMC[\s\S]*$/i, '').trimEnd();
+                n.nodeValue = novo + ' 📋';
+                if (n.parentElement) n.parentElement.title = 'A ficha de anamnese TC está nos Comentários e no PDF anexado';
+            });
+        });
+    }
+    setInterval(() => { try { if (cfg.master) esconderFichaAnamnese(); } catch (e) { /* segue */ } }, 1500);
     function fecharRevisao() { const p = document.getElementById('pp-rev'); if (p) p.remove(); if (revAtual) revAtual.depois = null; }
     function renderRevisao() {
         if (!revAtual) return;
