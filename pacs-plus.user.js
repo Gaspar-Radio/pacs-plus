@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.28.2
+// @version      1.29.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3189,22 +3189,22 @@ Regras:
 • Mantenha o estilo, a terminologia e a formatação do laudo (caixa alta onde já houver).
 • Se o pedido for uma PERGUNTA ou revisão sem mudança necessária, devolva trocas vazias e responda em "observacao" (curta, objetiva).
 Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
-    async function pedidoOpus(c, pedido, tentativa = 1) {
+    async function pedidoOpus(c, pedido, tentativa = 1, esforco = 'medium') {
         const t0 = performance.now();
         const rf = refsDoExame(c);
         const sys = PEDIDO_SIS + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS DO SERVIÇO:\n' + rf : '');
         let d;
         try {
-            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-opus-5-5', max_tokens: 14000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-opus-5-5', max_tokens: 14000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
                 system: sys, tools: [CORR_TOOL], tool_choice: { type: 'auto' },
                 messages: [{ role: 'user', content: revMensagem(c) + '\n\nPEDIDO DO MÉDICO:\n' + pedido }] });
-        } catch (e) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1); throw e; }
+        } catch (e) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco); throw e; }
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'correcao');
         let inp = blk && blk.input;
         const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
         if (!inp) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { inp = JSON.parse(m[0]); } catch (e) { /* segue */ } } }
         if (!inp && txt) inp = { trocas: [], observacao: txt };
-        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1); throw new Error('resposta sem as edições'); }
+        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco); throw new Error('resposta sem as edições'); }
         const trocas = inp.trocas.filter(x => x && x.original && typeof x.novo === 'string' && x.original !== x.novo).slice(0, 20).map(x => ({ original: String(x.original), novo: String(x.novo) }));
         return { trocas, obs: String(inp.observacao || '').slice(0, 1500), ms: performance.now() - t0 };
     }
@@ -3446,12 +3446,174 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         });
     }
     setInterval(() => { try { if (cfg.master) esconderFichaAnamnese(); } catch (e) { /* segue */ } }, 1500);
+
+    // =====================================================================
+    // 3I. JANELAS ARRASTÁVEIS + AÇÕES NO TRECHO SELECIONADO (v1.29, pedido do usuário 23/10/2026)
+    // =====================================================================
+    // Arrastar: segure o cabeçalho (barra de abas do Plus, título da Revisão/Comunicação/Trecho) e arraste.
+    // Duplo clique no cabeçalho = volta à posição padrão. A posição fica guardada neste navegador.
+    const ARR_KEY = 'pp_arrastar_v1';
+    const ARR_ALCA = { 'pp-panel': '.pp-tabs', 'pp-rev': '.pr-top', 'pp-com': 'h3', 'pp-sel-pop': '.ps-top' };
+    let arrPos = {}; try { arrPos = JSON.parse(localStorage.getItem(ARR_KEY) || '{}') || {}; } catch (e) { arrPos = {}; }
+    function arrSalvar() { try { localStorage.setItem(ARR_KEY, JSON.stringify(arrPos)); } catch (e) { /* ok */ } }
+    function arrAplicar(el) {
+        const q = el && arrPos[el.id]; if (!q) return;
+        const x = Math.max(0, Math.min(q.x, window.innerWidth - 80)), y = Math.max(0, Math.min(q.y, window.innerHeight - 40));
+        el.style.setProperty('left', x + 'px', 'important'); el.style.setProperty('top', y + 'px', 'important');
+        el.style.setProperty('right', 'auto', 'important'); el.style.setProperty('bottom', 'auto', 'important');
+        el.style.setProperty('transform', 'none', 'important');
+        if (el.id === 'pp-panel' || el.id === 'pp-rev') el.style.setProperty('max-height', `calc(100vh - ${y}px - 12px)`, 'important');
+    }
+    function arrLimpar(el) { ['left', 'top', 'right', 'bottom', 'transform', 'max-height'].forEach(k => el.style.removeProperty(k)); }
+    document.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        for (const [id, sel] of Object.entries(ARR_ALCA)) {
+            const win = document.getElementById(id);
+            if (!win || !win.contains(e.target)) continue;
+            const alca = e.target.closest(sel);
+            if (!alca || !win.contains(alca) || e.target.closest('button, input, select, textarea, a, label')) return;
+            e.preventDefault();
+            const r = win.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+            const mover = ev => { arrPos[id] = { x: ev.clientX - dx, y: ev.clientY - dy }; arrAplicar(win); };
+            const soltar = () => { document.removeEventListener('mousemove', mover, true); document.removeEventListener('mouseup', soltar, true); arrSalvar(); };
+            document.addEventListener('mousemove', mover, true); document.addEventListener('mouseup', soltar, true);
+            return;
+        }
+    }, true);
+    document.addEventListener('dblclick', e => {
+        for (const [id, sel] of Object.entries(ARR_ALCA)) {
+            const win = document.getElementById(id);
+            if (win && win.contains(e.target) && e.target.closest(sel) && !e.target.closest('button, input, select, textarea')) { delete arrPos[id]; arrSalvar(); arrLimpar(win); if (id === 'pp-rev' && revAtual) renderRevisao(); return; }
+        }
+    }, true);
+    setInterval(() => { Object.keys(ARR_ALCA).forEach(id => { const el = document.getElementById(id); if (el && arrPos[id]) arrAplicar(el); }); }, 700);
+    setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top { cursor: move; user-select: none; }');
+
+    // ---- Trecho selecionado no laudo: mini-barra ✍ Reescrever · 🛡 Revisar · 🧮 Volume · 💬 Pedir ----
+    const SEL_CSS = `#pp-sel{position:fixed;z-index:10000004;display:flex;gap:2px;padding:3px;background:#0f172a;border:1px solid #475569;border-radius:9px;box-shadow:0 8px 22px rgba(0,0,0,.55);font:600 12.5px -apple-system,"Segoe UI",Roboto,sans-serif}
+#pp-sel button{background:transparent;color:#e2e8f0;border:0;border-radius:6px;padding:5px 8px;cursor:pointer;font:inherit;white-space:nowrap}
+#pp-sel button:hover{background:#1e293b}
+#pp-sel-pop{position:fixed;z-index:10000004;top:120px;right:470px;width:460px;max-width:94vw;max-height:70vh;overflow:auto;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;box-shadow:0 16px 40px rgba(0,0,0,.6);font:12.5px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif}
+#pp-sel-pop .ps-top{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #1e293b;font-weight:700;font-size:13px}
+#pp-sel-pop .ps-top b{flex:1} #pp-sel-pop .ps-c{padding:10px} #pp-sel-pop .ps-q{color:#94a3b8;font-style:italic;margin-bottom:8px;white-space:pre-wrap}
+#pp-sel-pop .ps-t{border:1px solid #334155;border-radius:8px;padding:8px;margin:6px 0;background:#111827}
+#pp-sel-pop .ps-de{color:#fca5a5;text-decoration:line-through;white-space:pre-wrap} #pp-sel-pop .ps-para{color:#86efac;white-space:pre-wrap;margin-top:3px}
+#pp-sel-pop textarea{width:100%;min-height:58px;box-sizing:border-box;background:#111827;color:#e5e7eb;border:1px solid #475569;border-radius:7px;padding:6px;font:inherit}
+#pp-sel-pop button{border:0;border-radius:7px;padding:5px 11px;font-weight:700;cursor:pointer;color:#fff;background:#334155;margin:6px 6px 0 0}
+#pp-sel-pop button.ok{background:#15803d} #pp-sel-pop button.ia{background:#6d28d9} #pp-sel-pop .ps-x{margin:0;background:transparent;color:#94a3b8;font-size:16px;padding:0 4px}
+#pp-sel-pop .ps-obs{color:#cbd5e1;margin-top:6px;white-space:pre-wrap} #pp-sel-pop .ps-err{color:#fca5a5}`;
+    const numVirg = (v, casas) => v.toFixed(casas).replace('.', ',');
+    function medidasDe(txt) {
+        const brutos = (String(txt).match(/\d+(?:[.,]\d+)?/g) || []).filter(x => parseFloat(x.replace(',', '.')) > 0);
+        const ns = brutos.map(x => parseFloat(x.replace(',', '.')));
+        if (ns.length < 3) return null;
+        const mm = /\bmm\b/i.test(txt) && !/\bcm\b/i.test(txt);
+        const [a, b, c] = ns.slice(0, 3);
+        let v = a * b * c * 0.523; if (mm) v /= 1000;
+        const txtV = v >= 10 ? numVirg(Math.round(v), 0) : v >= 0.1 ? numVirg(v, 1) : numVirg(v, 2);
+        return { a, b, c, mm, v, txtV, d: brutos.slice(0, 3) };
+    }
+    let selAtual = null; // { txt, ed }
+    function selEsconder() { const b = document.getElementById('pp-sel'); if (b) b.remove(); }
+    function selMostrar() {
+        if (!cfg.master || !on('revisaoIA')) return selEsconder();
+        const ed = editorLaudo(), raiz = document.querySelector('.v-dialog__content .ck-editor__editable');
+        const s = window.getSelection();
+        if (!ed || !raiz || !s || s.isCollapsed || !s.rangeCount || !raiz.contains(s.anchorNode) || !raiz.contains(s.focusNode)) return selEsconder();
+        const txt = s.toString().replace(/\s+/g, ' ').trim();
+        if (txt.length < 2) return selEsconder();
+        selAtual = { txt, ed };
+        setCss('pp-sel-css', SEL_CSS);
+        let b = document.getElementById('pp-sel');
+        if (!b) {
+            b = document.createElement('div'); b.id = 'pp-sel';
+            b.addEventListener('mousedown', e => e.preventDefault()); // não perde a seleção
+            b.addEventListener('click', e => { const bt = e.target.closest('button[data-a]'); if (bt) { e.stopPropagation(); selAcao(bt.dataset.a); } });
+            document.body.appendChild(b);
+        }
+        const vol = medidasDe(txt);
+        b.innerHTML = `<button data-a="reescrever" title="Opus reescreve só este trecho (mesmo sentido; você confere antes de aplicar)">✍ Reescrever</button><button data-a="revisar" title="Opus revisa só este trecho">🛡 Revisar</button>${vol ? `<button data-a="volume" title="Volume do elipsoide (0,523 × D1 × D2 × D3) — cálculo exato, sem IA">🧮 Volume</button>` : ''}<button data-a="pedir" title="Escreva o que quer que o Opus faça com este trecho">💬 Pedir…</button>`;
+        const r = s.getRangeAt(0).getBoundingClientRect();
+        const w = b.offsetWidth || 300;
+        b.style.left = Math.round(Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8))) + 'px';
+        b.style.top = Math.round(r.top > 60 ? r.top - 40 : r.bottom + 8) + 'px';
+    }
+    document.addEventListener('mouseup', e => { if (e.target.closest && e.target.closest('#pp-sel')) return; setTimeout(selMostrar, 20); }, true);
+    document.addEventListener('keyup', e => { if (e.shiftKey || e.key === 'Shift') setTimeout(selMostrar, 20); }, true);
+    document.addEventListener('mousedown', e => { if (!e.target.closest || !e.target.closest('#pp-sel')) selEsconder(); }, true);
+    document.addEventListener('scroll', selEsconder, true);
+    function selMarcar(ed) {
+        // marca o trecho no editor (acompanha edições) para inserir/substituir depois, mesmo se o cursor sair dali
+        try {
+            const rg = ed.model.document.selection.getFirstRange(); if (!rg || rg.isCollapsed) return false;
+            ed.model.change(w => { if (ed.model.markers.has('pp-sel')) w.updateMarker('pp-sel', { range: rg }); else w.addMarker('pp-sel', { range: rg, usingOperation: false, affectsData: false }); });
+            return true;
+        } catch (e) { return false; }
+    }
+    function selInserirApos(ed, texto) {
+        try {
+            const mk = ed.model.markers.get('pp-sel'); if (!mk) return false;
+            const fim = mk.getEnd();
+            ed.model.change(w => { const no = fim.textNode || fim.nodeBefore; const at = no && no.getAttributes ? new Map(no.getAttributes()) : new Map(); w.insertText(texto, at, fim); });
+            ed.editing.view.focus(); return true;
+        } catch (e) { return false; }
+    }
+    function selPop(titulo, html) {
+        setCss('pp-sel-css', SEL_CSS);
+        let p = document.getElementById('pp-sel-pop');
+        if (!p) { p = document.createElement('div'); p.id = 'pp-sel-pop'; document.body.appendChild(p); }
+        p.innerHTML = `<div class="ps-top"><b>${titulo}</b><button class="ps-x" title="Fechar">✕</button></div><div class="ps-c">${html}</div>`;
+        p.querySelector('.ps-x').onclick = () => p.remove();
+        arrAplicar(p);
+        return p;
+    }
+    async function selAcao(a) {
+        const s0 = selAtual; selEsconder(); if (!s0) return;
+        const ed = s0.ed, txt = s0.txt;
+        selMarcar(ed);
+        if (a === 'volume') {
+            const m = medidasDe(txt); if (!m) return;
+            const u = m.mm ? 'mm' : 'cm', frase = `, com volume estimado em ${m.txtV} cm³`;
+            const p = selPop('🧮 Volume (elipsoide)', `<div class="ps-q">«${esc(txt)}»</div><div>0,523 × ${m.d.join(' × ')} ${u}${m.mm ? ' ÷ 1000' : ''} = <b style="font-size:15px">${m.txtV} cm³</b></div><div class="ps-obs">Vai inserir logo após o trecho: “${esc(frase)}”</div><button class="ok" data-b="ins">↵ Inserir após o trecho</button><button data-b="cp">📋 Copiar valor</button>`);
+            p.querySelector('[data-b=ins]').onclick = () => { if (selInserirApos(ed, frase)) p.remove(); else p.querySelector('.ps-obs').textContent = 'Não consegui inserir — copie o valor.'; };
+            p.querySelector('[data-b=cp]').onclick = () => { try { navigator.clipboard.writeText(m.txtV + ' cm³'); } catch (e) { /* ok */ } };
+            return;
+        }
+        if (a === 'pedir') {
+            const p = selPop('💬 Pedido sobre o trecho', `<div class="ps-q">«${esc(txt)}»</div><textarea placeholder="Ex.: deixe mais objetivo · troque para linguagem de impressão · acrescente que não há sinais de complicação"></textarea><button class="ia" data-b="ir">Enviar ao Opus</button>`);
+            const ta = p.querySelector('textarea'); ta.focus();
+            const ir = () => { const q = ta.value.trim(); if (q) selIA(ed, txt, `Aplique SOMENTE ao trecho selecionado o pedido do médico: "${q}".`); };
+            p.querySelector('[data-b=ir]').onclick = ir;
+            ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ir(); });
+            return;
+        }
+        if (a === 'reescrever') return selIA(ed, txt, 'Reescreva SOMENTE o trecho selecionado com redação radiológica clara, objetiva e formal (português do Brasil), mantendo exatamente o mesmo sentido, as mesmas medidas e a lateralidade. Não acrescente nem retire achados.');
+        if (a === 'revisar') return selIA(ed, txt, 'Revise SOMENTE o trecho selecionado: português, concordância, termos técnicos, lateralidade, medidas/unidades e coerência com o restante do laudo e com a indicação. Corrija o mínimo necessário. Se estiver correto, não troque nada e diga em "observacao".');
+    }
+    async function selIA(ed, txt, ordem) {
+        const p = selPop('✍ Opus — trecho selecionado', `<div class="ps-q">«${esc(txt)}»</div><div class="ps-obs">⏳ Pensando…</div>`);
+        const c = contextoLaudo();
+        if (!c) { p.querySelector('.ps-obs').textContent = 'Abra o laudo para usar.'; return; }
+        try {
+            const x = await pedidoOpus(c, `${ordem}\nTRECHO SELECIONADO: «${txt}»\nAs trocas devem ficar DENTRO desse trecho ("original" = parte literal dele).`, 1, 'low');
+            if (!document.body.contains(p)) return;
+            const cr = { trocas: x.trocas };
+            const html = (x.trocas.length ? x.trocas.map((t, i) => `<div class="ps-t"><div class="ps-de">${esc(t.original)}</div><div class="ps-para">${esc(t.novo)}</div><button class="ok" data-i="${i}">✔ Aplicar</button><button data-c="${i}">📋 Copiar</button></div>`).join('') : '') +
+                (x.obs ? `<div class="ps-obs">${esc(x.obs)}</div>` : '') + (x.trocas.length > 1 ? `<button class="ok" data-todas>✔ Aplicar todas</button>` : '') + `<div class="ps-obs" style="color:#64748b;font-size:11px">Opus · ${Math.round(x.ms / 1000)} s · Ctrl+Z desfaz</div>`;
+            p.querySelector('.ps-c').innerHTML = `<div class="ps-q">«${esc(txt)}»</div>` + html;
+            const aplicar = i => { const t = cr.trocas[i]; if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo); const bt = p.querySelector(`[data-i="${i}"]`); if (f) { if (bt) bt.textContent = '✖ ' + f; } else { t.feito = true; if (bt) { bt.textContent = '✔ Aplicado'; bt.disabled = true; } } };
+            p.querySelectorAll('[data-i]').forEach(bt => { bt.onclick = () => aplicar(+bt.dataset.i); });
+            p.querySelectorAll('[data-c]').forEach(bt => { bt.onclick = () => { try { navigator.clipboard.writeText(cr.trocas[+bt.dataset.c].novo); } catch (e) { /* ok */ } }; });
+            const td = p.querySelector('[data-todas]'); if (td) td.onclick = () => cr.trocas.forEach((t, i) => aplicar(i));
+        } catch (e) { if (document.body.contains(p)) p.querySelector('.ps-c').innerHTML = `<div class="ps-q">«${esc(txt)}»</div><div class="ps-err">Falhou: ${esc(String(e.message || e).slice(0, 200))}</div>`; }
+    }
     function fecharRevisao() { const p = document.getElementById('pp-rev'); if (p) p.remove(); if (revAtual) revAtual.depois = null; }
     function renderRevisao() {
         if (!revAtual) return;
         const p = revPainel(), r = revAtual, rc = revCfg();
         const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
         p.style.top = Math.round(Math.max(48, Math.min(tb ? tb.getBoundingClientRect().bottom + 8 : 96, window.innerHeight - 320))) + 'px';
+        arrAplicar(p);
         const todos = achadosAtuais(r).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
         const graves = todos.filter(a => a.gravidade === 'grave').length;
         // v1.20: preserva o que está sendo digitado no pedido (o painel é redesenhado quando cada IA responde)
