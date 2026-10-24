@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.28.0
+// @version      1.28.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2518,8 +2518,12 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // Registro local sem texto do laudo (tempo, tokens, nº de achados).
     // =====================================================================
     const REV_LOG_KEY = 'pacsplus_rev_log_v1';
-    const REV_PADRAO = { modo: 'completo', noLiberar: false, aoColar: false, triagem: true, opusAuto: true, revisor: 'opus', grok: true, gemini: false }; // v1.25: revisão só pelos botões do rodapé // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
-    const revCfg = () => Object.assign({}, REV_PADRAO, cfg.rev || {});
+    const REV_PADRAO = { modo: 'completo', noLiberar: false, aoColar: false, triagem: true, opusAuto: true, revisor: 'opus', grok: true, gemini: true }; // v1.28.1: Gemini volta (API paga) // v1.25: revisão só pelos botões do rodapé // v1.22: revisor opus (padrão) | sonnet — Haiku saiu ('auto'/'haiku' antigos viram opus)
+    const revCfg = () => {
+        // v1.28.1 — API paga do Gemini (23/10/2026): liga o "+ Gemini" uma vez em quem o tinha desligado
+        if (cfg.rev && !cfg.rev.gemMig1281) { cfg.rev.gemini = true; cfg.rev.gemMig1281 = true; try { saveCfg(); } catch (e) { /* ok */ } }
+        return Object.assign({}, REV_PADRAO, cfg.rev || {});
+    };
     // v1.24 (pedido do usuário): liga uma vez "Revisar ao Liberar" + "Revisar ao colar" + triagem nos computadores que já tinham a revisão configurada
     if (cfg.rev && !cfg.rev.mig124) { cfg.rev = Object.assign(revCfg(), { noLiberar: true, aoColar: true, triagem: true, mig124: true }); try { saveCfg(); } catch (e) { /* ok */ } }
     // v1.25 (usuário, 23/10 16h): automático inviável (laudo conjunto liberado em dois locais; Gemini grátis estoura o tempo) →
@@ -3466,7 +3470,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
-<label title="Gemini como revisor extra — pausado: a API grátis estoura o tempo. Ligar quando houver faturamento no Google."><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
+<label title="Gemini 3.8 Flash como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
@@ -3654,7 +3658,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (c.texto.length >= 30 && r.triagem !== 'normal') {
             const onda = REV_MODOS[modo].motores.filter(m => !(m === 'jev' && r.res.jev)).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
             if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
-            if (rc.gemini) onda.push(rodarMotor(r, 'gemini')); // v1.25: Gemini opcional (pausado por padrão)
+            if (rc.gemini) onda.push(rodarMotor(r, 'gemini')); // v1.28.1: ligado por padrão (API paga)
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
             await revJevJuiz(r); // v1.23: Jev confere cada achado das IAs (< 1 s)
