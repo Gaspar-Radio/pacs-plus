@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.30.0
+// @version      1.31.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -327,6 +327,11 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-pedb { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
 #pp-rev .pr-pedb label { display: flex; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11.5px; }
 #pp-rev .pr-pd { margin-top: 6px; }
+#pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; }
+#pp-rev .pr-resp { display: flex; gap: 6px; align-items: flex-end; margin-top: 6px; }
+#pp-rev .pr-resp textarea { flex: 1; min-height: 38px; resize: vertical; background: #0f172a; color: #e5e7eb; border: 1px solid #6d28d9; border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
+#pp-rev .pr-voce { font-size: 11.5px; color: #93c5fd; margin-top: 3px; white-space: pre-wrap; }
 #pp-rev .pr-pq { color: #c4b5fd; font-style: italic; font-size: 11.5px; white-space: pre-wrap; }
 #pp-rev .pr-dep, #pp-rev .pr-antes, #pp-rev .pr-obs { white-space: pre-wrap; }
 #pp-rev .pr-tq { padding: 4px 0; border-bottom: 1px dashed #312e81; }
@@ -3169,14 +3174,15 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
             r.corr[k] = { nivel, trocas: [{ original: a.fix.busca, novo: a.fix.troca, dica: a.trecho }], obs: '' };
             renderRevisao(); return;
         }
-        r.corr[k] = { nivel, carregando: true };
+        const item = completa ? 'Revisão completa do laudo (todas as incompatibilidades)' : `[${CAT_NOME[a.categoria] || a.categoria}] ${a.explicacao}${a.trecho ? ` — trecho: “${a.trecho}”` : ''}${a.sugestao ? ` — sugestão: ${a.sugestao}` : ''}`;
+        r.corr[k] = { nivel, carregando: true, item };
         renderRevisao();
         try {
             const c = contextoLaudo() || r.ctx;
             const lista = completa ? achadosAtuais(r).filter(x => !r.ignorados.has(chaveAchado(x))) : [a];
             const x = await corrigirIA(c, nivel === 'opus' ? 'claude-opus-5-5' : 'claude-sonnet-5-5', lista, completa);
-            r.corr[k] = { nivel, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nenhuma troca proposta.'), ms: x.ms };
-        } catch (e) { r.corr[k] = { nivel, erro: String(e.message || e).slice(0, 200) }; }
+            r.corr[k] = { nivel, item, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nenhuma troca proposta.'), ms: x.ms };
+        } catch (e) { r.corr[k] = { nivel, item, erro: String(e.message || e).slice(0, 200) }; }
         if (revAtual === r) renderRevisao();
     }
     // ---------- 💬 Pedido livre ao Opus (v1.20): texto digitado ou ditado pelo médico ----------
@@ -3228,13 +3234,17 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
     function aplicarTrocas(cr) {
         (cr.trocas || []).forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; } });
     }
-    function htmlCorrecao(cr) {
+    function htmlCorrecao(cr, k) {
         if (!cr) return '';
-        if (cr.carregando) return `<div class="pr-co">⏳ ${cr.pedido ? 'Opus trabalhando no pedido…' : NIVEL_NOME[cr.nivel] + ' preparando a correção…'}</div>`;
-        if (cr.erro) return `<div class="pr-co err">⚠ ${esc(cr.erro)}</div>`;
-        return `<div class="pr-co">${(cr.trocas || []).map((t, j) => `<div class="pr-tq ${t.feito ? 'ok' : ''}" data-j="${j}"><div class="pr-antes">${esc(t.original)}</div><div class="pr-dep">→ ${esc(t.novo)}</div>${t.feito ? '<div class="pr-ok">✓ aplicado (Ctrl+Z desfaz)</div>' : t.falha ? `<div class="pr-ok err">⚠ ${esc(t.falha)}</div>` : ''}</div>`).join('')}
-${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
-<div class="pr-ac">${(cr.trocas || []).some(t => !t.feito) ? `<button class="pr-b" data-apl>Aplicar${cr.trocas.length > 1 ? ' tudo' : ''}</button>` : ''}<button class="pr-b sec" data-desc>${(cr.trocas || []).every(t => t.feito) && cr.trocas.length || (cr.pedido && !(cr.trocas || []).length) ? 'Fechar' : 'Descartar'}</button><span class="pr-niv">${NIVEL_NOME[cr.nivel]}${cr.ms ? ' · ' + fmt(cr.ms / 1000, 1) + ' s' : ''}</span></div></div>`;
+        // v1.31: conversa do item (observação da IA ↔ resposta do médico)
+        const hist = (cr.hist || []).map(h => `${h.obs ? `<div class="pr-obs">IA: ${esc(h.obs)}</div>` : ''}<div class="pr-voce">Você: ${esc(h.resp)}</div>`).join('');
+        if (cr.carregando) return `<div class="pr-co">${hist}⏳ ${cr.hist ? 'Opus corrigindo com a sua resposta…' : cr.pedido ? 'Opus trabalhando no pedido…' : NIVEL_NOME[cr.nivel] + ' preparando a correção…'}</div>`;
+        if (cr.erro) return `<div class="pr-co err">${hist}⚠ ${esc(cr.erro)}<div class="pr-ac"><button class="pr-b sec" data-desc>Descartar</button></div></div>`;
+        const todasFeitas = (cr.trocas || []).length && (cr.trocas || []).every(t => t.feito);
+        const resp = k && (cr.obs || !(cr.trocas || []).length) ? `<div class="pr-resp"><textarea class="pr-rt" data-k="${esc(k)}" rows="2" placeholder="Responder / complementar só este item (digite ou dite) — Ctrl+Enter envia"></textarea><button class="pr-b" data-resp>Responder</button></div>` : '';
+        return `<div class="pr-co">${hist}${(cr.trocas || []).map((t, j) => `<div class="pr-tq ${t.feito ? 'ok' : ''}" data-j="${j}"><div class="pr-antes">${esc(t.original)}</div><div class="pr-dep">→ ${esc(t.novo)}</div>${t.feito ? '<div class="pr-ok">✓ aplicado (Ctrl+Z desfaz)</div>' : t.falha ? `<div class="pr-ok err">⚠ ${esc(t.falha)}</div>` : ''}</div>`).join('')}
+${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : ''}${resp}
+<div class="pr-ac">${(cr.trocas || []).some(t => !t.feito) ? `<button class="pr-b" data-apl>Aplicar${cr.trocas.length > 1 ? ' tudo' : ''}</button>` : ''}${k ? '<button class="pr-b sec" data-mini title="Recolhe este item numa linha; clique na linha para ver de novo">▁ Minimizar</button>' : ''}${todasFeitas ? '' : '<button class="pr-b sec" data-desc>Descartar</button>'}<span class="pr-niv">${NIVEL_NOME[cr.nivel]}${cr.ms ? ' · ' + fmt(cr.ms / 1000, 1) + ' s' : ''}</span></div></div>`;
     }
     function ligarCorrecao(el, r, k) {
         const cr = r.corr && r.corr[k];
@@ -3243,6 +3253,32 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         if (ap) ap.onclick = () => { aplicarTrocas(cr); renderRevisao(); };
         const ds = el.querySelector(':scope > .pr-co [data-desc]');
         if (ds) ds.onclick = () => { delete r.corr[k]; if (r.pedidos) r.pedidos = r.pedidos.filter(x => x !== k); renderRevisao(); };
+        const mi = el.querySelector(':scope > .pr-co [data-mini]');
+        if (mi) mi.onclick = () => { (r.mini = r.mini || new Set()).add(k); renderRevisao(); };
+        const rt = el.querySelector(':scope > .pr-co .pr-rt'), rb = el.querySelector(':scope > .pr-co [data-resp]');
+        if (rt) {
+            rt.value = cr.rasc || '';
+            rt.oninput = () => { cr.rasc = rt.value; };
+            rt.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); responderCorrecao(r, k, rt.value); } };
+            if (rb) rb.onclick = () => responderCorrecao(r, k, rt.value);
+        }
+    }
+    // v1.31 — resposta do médico a uma dúvida da IA, só naquele item (não refaz a revisão inteira)
+    async function responderCorrecao(r, k, resp) {
+        const cr = r.corr && r.corr[k]; resp = String(resp || '').trim();
+        if (!cr || !resp || cr.carregando) return;
+        const hist = (cr.hist || []).concat([{ obs: cr.obs || '', resp }]);
+        const base = { nivel: 'opus', pedido: cr.pedido, item: cr.item, hist };
+        r.corr[k] = Object.assign({ carregando: true }, base);
+        renderRevisao();
+        try {
+            const c = contextoLaudo() || r.ctx;
+            const conversa = hist.map(h => `Sua observação anterior: ${h.obs || '(nenhuma)'}\nResposta do médico: ${h.resp}`).join('\n');
+            const x = await pedidoOpus(c, `Continuação de UM item da revisão do laudo (corrija só este item).\nITEM: ${cr.item || cr.pedido || 'revisão do laudo'}\n${conversa}\nCom a resposta do médico, faça agora a correção no laudo (trocas). Se ainda faltar informação, pergunte de forma objetiva em "observacao".`);
+            r.corr[k] = Object.assign(base, { trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nada a alterar.'), ms: x.ms });
+            if (revCfg().pedidoDireto && x.trocas.length) aplicarTrocas(r.corr[k]);
+        } catch (e) { r.corr[k] = Object.assign(base, { erro: String(e.message || e).slice(0, 200) }); }
+        if (revAtual === r) renderRevisao();
     }
 
     // ---------- tela ----------
@@ -3670,6 +3706,9 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
         const graves = todos.filter(a => a.gravidade === 'grave').length;
         // v1.20: preserva o que está sendo digitado no pedido (o painel é redesenhado quando cada IA responde)
         const ta0 = p.querySelector('#pr-ped'), foco = ta0 && document.activeElement === ta0 ? [ta0.selectionStart, ta0.selectionEnd] : null;
+        const rt0 = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('pr-rt') ? document.activeElement : null;
+        const focoResp = rt0 ? [rt0.dataset.k, rt0.selectionStart, rt0.selectionEnd] : null;
+        const mini = r.mini = r.mini || new Set();
         if (ta0) r.rascunho = ta0.value;
         const pedCarregando = (r.pedidos || []).some(k => r.corr[k] && r.corr[k].carregando);
         // v1.20: minimizado = só uma barrinha; clique expande
@@ -3691,20 +3730,20 @@ ${cr.obs ? `<div class="pr-obs">${esc(cr.obs)}</div>` : ''}
 ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}
 <div class="pr-ped"><textarea id="pr-ped" rows="3" placeholder="💬 Pedido ao Opus — digite ou cole o ditado. Ex.: “revise a impressão”, “insira que a vesícula não foi visualizada por jejum inadequado”, “deixe a conclusão em tópicos”."></textarea>
 <div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button></div>
-${(r.pedidos || []).slice().reverse().map(k => r.corr[k] ? `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k])}</div>` : '').join('')}</div>
+${(r.pedidos || []).slice().reverse().map(k => !r.corr[k] ? '' : mini.has(k) ? `<div class="pr-mini" data-maxi="${k}">▸ 💬 “${esc(String(r.corr[k].pedido).slice(0, 70))}” — ${estadoCorr(r.corr[k])}</div>` : `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k], k)}</div>`).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
 ${r.depois ? `<div class="pr-lib ${todos.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : todos.length ? `⚠ ${todos.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : todos.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
-${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
-<div class="pr-lista">${todos.length ? todos.map((a, i) => `
+${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ 🎓 Revisão completa com correção (Opus) — ${estadoCorr(r.corr.__opus__)}</div>` : '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
+<div class="pr-lista">${todos.length ? todos.map((a, i) => mini.has(chaveAchado(a)) ? `<div class="pr-mini ${a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
 <div class="pr-ex">${esc(a.explicacao)}</div>${a.fraco ? `<div class="pr-fraco">provável falso alarme — Jev ${fmt(a.juiz, 2)}</div>` : ''}
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
-<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)])}</div>`).join('')
+<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
@@ -3734,8 +3773,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
+        p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); renderRevisao(); }; });
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
+            const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); renderRevisao(); };
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
             el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); renderRevisao(); };
             const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); pedirCorrecao(r, a, false); };
@@ -3746,6 +3787,15 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const fu = p.querySelector('.pr-full'); if (fu) ligarCorrecao(fu, r, '__opus__');
         const bl = p.querySelector('#pr-lib'); if (bl) bl.onclick = () => { const f = r.depois; r.depois = null; fecharRevisao(); if (f) f(); };
         const bc = p.querySelector('#pr-canc'); if (bc) bc.onclick = () => { r.depois = null; renderRevisao(); };
+        if (focoResp) { const t = [...p.querySelectorAll('.pr-rt')].find(x => x.dataset.k === focoResp[0]); if (t) { t.focus(); try { t.setSelectionRange(focoResp[1], focoResp[2]); } catch (e) { /* ok */ } } }
+    }
+    function estadoCorr(cr) {
+        if (cr.carregando) return '⏳ trabalhando…';
+        if (cr.erro) return '⚠ erro';
+        const tr = cr.trocas || [];
+        if (tr.length && tr.every(t => t.feito)) return '✓ corrigido';
+        if (tr.length) return `${tr.filter(t => !t.feito).length} troca(s) a aplicar`;
+        return cr.obs ? '💬 aguardando sua resposta' : 'sem troca';
     }
     const MOTORES = {
         jev: { nome: 'Jev', fn: c => revJev(c) },
