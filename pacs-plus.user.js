@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.31.0
+// @version      1.32.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -301,9 +301,7 @@ html body .v-dialog__content .row.pp-rodape { flex-wrap: nowrap !important; }
 html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn { min-width: 0 !important; width: auto !important; flex: 0 0 auto !important; height: 34px !important; padding: 0 9px !important; margin: 0 2px !important; font-size: 13px !important; letter-spacing: 0 !important; }
 html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-rod-conf { width: 38px !important; padding: 0 !important; margin-left: 12px !important; }
 html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-rod-conf .v-icon { font-size: 22px !important; }
-html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep { width: 38px !important; padding: 0 !important; margin-left: 22px !important; }
-html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep .v-btn__content { font-size: 0 !important; }
-html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep .v-btn__content::before { content: "✖"; font-size: 17px; font-weight: 700; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep { min-width: 110px !important; padding: 0 16px !important; margin-left: 22px !important; font-size: 14px !important; font-weight: 700 !important; } /* v1.32: Cancelar escrito e maior (uso frequente) */
 .document-editor__toolbar > .v-btn.pp-calc-laudo, .document-editor__toolbar > .v-btn.pp-rev-btn { padding: 0 5px !important; min-width: 0 !important; }
 #pp-rev { position: fixed; right: 16px; width: 430px; max-width: 94vw; max-height: calc(100vh - 110px); overflow: auto; z-index: 10000003; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,.6); font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 #pp-rev .pr-top { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; z-index: 1; }
@@ -4025,6 +4023,31 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     }
     setInterval(ocultarLinhasLista, 700);
 
+    // v1.32 — zoom só da LISTA de exames (nome, idade, exame, data…), sem mexer no zoom do Chrome. Controle A− % A+ na barra do topo.
+    function zoomListaCss() {
+        const z = cfg.zoomLista || 100;
+        setCss('pp-zoom-lista', z !== 100 ? `.v-main .v-data-table.elevation-1 > .v-data-table__wrapper { zoom: ${z / 100}; }` : '');
+    }
+    function zoomListaCtl() {
+        zoomListaCss();
+        const d = document.getElementById('pp-dock');
+        let w = document.getElementById('ppd-zlista');
+        if (!d) { if (w) w.remove(); return; }
+        if (w) { const v = w.querySelector('.pz-v'), t = (cfg.zoomLista || 100) + '%'; if (v.textContent !== t) v.textContent = t; if (w.parentElement !== d) d.appendChild(w); return; }
+        w = document.createElement('span'); w.id = 'ppd-zlista'; w.className = 'pp-zoom-laudo pp-zoom-lista'; w.title = 'Tamanho da letra da lista de exames';
+        w.innerHTML = '<span class="pz-l">Lista</span><button type="button" class="pz-b" data-d="-10" title="Diminuir a lista">A−</button><button type="button" class="pz-v" title="Voltar a 100%"></button><button type="button" class="pz-b" data-d="10" title="Aumentar a lista">A+</button>';
+        w.querySelector('.pz-v').textContent = (cfg.zoomLista || 100) + '%';
+        w.addEventListener('click', e => {
+            const b = e.target.closest('button'); if (!b) return;
+            e.stopPropagation();
+            const z = b.dataset.d ? (cfg.zoomLista || 100) + Number(b.dataset.d) : 100;
+            cfg.zoomLista = Math.min(160, Math.max(80, z)); saveCfg();
+            w.querySelector('.pz-v').textContent = cfg.zoomLista + '%'; zoomListaCss();
+        });
+        d.appendChild(w);
+        setCss('pp-zoom-lista-ui', '#pp-dock .pp-zoom-lista { display: inline-flex; align-items: center; gap: 0; height: 26px; border: 1px solid #4a5058; border-radius: 6px; padding: 0 2px; background: #1f2937; } #pp-dock .pp-zoom-lista .pz-l { color: #94a3b8; font-size: 11px; padding: 0 4px; } #pp-dock .pp-zoom-lista button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 700 12px -apple-system,"Segoe UI",Roboto,sans-serif; padding: 2px 5px; border-radius: 4px; } #pp-dock .pp-zoom-lista button:hover { background: rgba(148,163,184,.2); } #pp-dock .pp-zoom-lista .pz-v { min-width: 38px; color: #93c5fd; }');
+    }
+    setInterval(() => { try { if (cfg.master) zoomListaCtl(); } catch (e) { /* segue */ } }, 1500);
     function zoomLaudoCss() {
         const z = cfg.zoomLaudo || 100;
         setCss('pp-zoom-laudo', on('zoomLaudo') && z !== 100 ? `@media screen { .v-dialog__content .document-editor .ck-editor__editable { zoom: ${z / 100}; } }` : '');
