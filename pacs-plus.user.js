@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.32.0
+// @version      1.32.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2988,7 +2988,7 @@ ${c.texto}`;
     async function revGemini(c) {
         const t0 = performance.now();
         const d = await iaProxy({ acao: 'gemini', modelo: GEMINI_REVISOR, system: revSistema(c), parts: [{ text: revMensagem(c) }],
-            generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0 } });
+            generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0, thinkingConfig: { thinkingLevel: 'low' } } }); // v1.32.1: raciocínio low (padrão medium = lento)
         let j = null; try { j = JSON.parse(d.texto); } catch (e) { const m = String(d.texto || '').match(/\{[\s\S]*\}/); if (m) { try { j = JSON.parse(m[0]); } catch (x) { /* segue */ } } }
         if (!j || !Array.isArray(j.achados)) throw new Error('resposta sem a lista de achados');
         const u = d.usage || {};
