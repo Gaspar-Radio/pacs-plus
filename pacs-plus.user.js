@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.32.2
+// @version      1.33.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -325,6 +325,8 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-pedb { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
 #pp-rev .pr-pedb label { display: flex; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11.5px; }
 #pp-rev .pr-pd { margin-top: 6px; }
+#pp-rev .pr-motivo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; padding: 5px 8px; border: 1px dashed #475569; border-radius: 7px; font-size: 11.5px; color: #cbd5e1; }
+#pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; }
 #pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; }
 #pp-rev .pr-resp { display: flex; gap: 6px; align-items: flex-end; margin-top: 6px; }
@@ -2833,7 +2835,17 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
     ];
     const refsDoExame = c => { const e = norm(c.exame); return REV_REFS.filter(r => r.ex.test(e) && (!r.tipo || r.tipo === c.tipo)).map(r => r.txt).join('\n'); };
     const ehUro = c => /abdom|rins|renal|vias urin|aparelho urin|bexig|prostat|pelv|retroperit|figado|hepat/.test(norm(c.exame));
-    const revSistema = (c, extra) => { const rf = refsDoExame(c); return REV_BASE + REV_ESP_CRIT + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS APROVADAS PELO SERVIÇO (use para conferir; não cobre o que não foi medido):\n' + rf : '') + (extra || ''); };
+    // v1.33 — "falsos conhecidos" (guias de lançamento da recepção HAMC/LADI) + como usar o contexto do atendimento.
+    // Validado em 26/10/2026: bateria de 24 laudos fictícios × Opus/Grok/Gemini (hoje × só regras × regras+contexto) e
+    // 6 casos de laudo no exame/paciente errado — alarmes falsos de região zeraram e os erros reais continuaram 100% detectados.
+    const REV_VERSAO = 'C1';
+    const FALSOS_SERV = {
+        US: `\nNOMES GENÉRICOS DE PROCEDIMENTO DO SERVIÇO (não definem a região nem o lado — não aponte "exame × região/lado" quando a região do laudo estiver dentro do que o nome cobre): US Estruturas superficiais = parede abdominal, região inguinal (1 código por lado), axila, região cervical/linfonodos, partes moles, músculo, nódulos/lipomas; US Órgãos superficiais = tireoide, bolsa escrotal/testículos, pênis; US Articular = 1 código por articulação (bilateral = 2 códigos; o nome não traz o lado); Doppler venoso ou arterial de MMII unilateral = 1 código por perna (bilateral = 2); Doppler de órgão ou estrutura isolada = território variável; Mamas com axilas = Mamas + Estruturas superficiais; Abdome total + pelve = códigos separados com laudo conjunto; Abdome inferior masculino = próstata via abdominal (próstata, vesículas seminais, resíduo). ATENÇÃO: esses nomes NÃO cobrem outras regiões — laudo de órgãos abdominais num exame de estruturas superficiais, laudo de abdome superior num exame de aparelho urinário (ou o inverso) etc. continuam sendo ERRO GRAVE (laudo/matriz no exame ou paciente errado).`,
+        TC: `\nLANÇAMENTOS DO SERVIÇO: no SUS a TC de abdome total é lançada como abdome superior + abdome inferior (pelve); laudos conjuntos (ex.: tórax + abdome) cobrem a soma dos procedimentos. Não aponte "exame × região" por isso. Região do laudo FORA do que foi lançado continua sendo ERRO GRAVE (laudo no exame/paciente errado).`,
+        GERAL: ''
+    };
+    const CTX_REGRA = `\nCONTEXTO DO ATENDIMENTO (só quando vier na mensagem): (a) "Procedimentos do mesmo atendimento" = códigos lançados no mesmo dia; o laudo pode ser CONJUNTO e cobrir a soma deles — só aceite diferença de região quando coberta pela soma; região fora da soma = ERRO GRAVE; não exija que o laudo descreva regiões de outros procedimentos (podem ter laudo próprio). (b) "Contraste registrado" informa só se houve contraste e a via; não deduza fases. (c) "Ficha de anamnese" traz dados do paciente; use só para apontar contradição EXPLÍCITA com o laudo (ex.: órgão retirado descrito como presente). Sem contexto, não conclua nada sobre ele.`;
+    const revSistema = (c, extra) => { const rf = refsDoExame(c); return REV_BASE + REV_ESP_CRIT + (FALSOS_SERV[c.tipo] || '') + CTX_REGRA + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS APROVADAS PELO SERVIÇO (use para conferir; não cobre o que não foi medido):\n' + rf : '') + (extra || ''); };
     const REV_CATS = ['lateralidade', 'sexo_anatomia', 'corpo_conclusao', 'medidas', 'classificacao', 'exame_texto', 'redacao_sentido', 'campo_vazio', 'padrao', 'outro'];
     const REV_TOOL = {
         name: 'revisao', description: 'Registra os possíveis erros de incompatibilidade encontrados no laudo (lista vazia se coerente).',
@@ -2849,7 +2861,7 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
 Exame: ${c.exame}
 Sexo: ${c.sexo || 'não informado'}
 Idade: ${c.idade != null ? c.idade + ' anos' : 'não informada'}
-Indicação: ${c.indicacao || 'não informada'}
+Indicação: ${c.indicacao || 'não informada'}${c.ctxAtend ? '\n' + c.ctxAtend : ''}
 "Resultado crítico" marcado: ${c.critico ? 'sim' : 'não'}
 
 LAUDO:
@@ -2893,7 +2905,7 @@ ${c.texto}`;
         volume_incoerente: ['medidas', 'atencao', 'Algum volume informado não confere com as três dimensões multiplicadas por 0,52 a 0,523 (elipsoide), mesmo considerando o arredondamento das medidas a uma casa decimal.'],
         unidade_grandeza: ['medidas', 'atencao', 'Há volume escrito com unidade de área ou linear (mm², cm², mm, cm), ou área escrita com unidade de volume ou linear (deveria ser mm² ou cm²).'],
         sexo_anatomia: ['sexo_anatomia', 'grave', 'O laudo descreve órgão incompatível com o sexo do paciente informado.'],
-        regiao_errada: ['exame_texto', 'grave', 'O laudo descreve região anatômica ou tipo de exame diferente do nome do exame (provável matriz errada).'],
+        regiao_errada: ['exame_texto', 'grave', 'O laudo descreve região anatômica ou tipo de exame diferente do nome do exame (provável matriz errada). Considere coberta a região quando estiver na soma dos "Procedimentos do mesmo atendimento" e quando o nome for genérico do serviço (US estruturas superficiais = parede, inguinal, axila, cervical, partes moles; órgãos superficiais = tireoide, bolsa escrotal; articular; Doppler de órgão ou estrutura isolada).'],
         contradicao_interna: ['redacao_sentido', 'grave', 'O laudo afirma e nega o mesmo achado em trechos diferentes.'],
         frase_sem_sentido: ['redacao_sentido', 'atencao', 'Há frase truncada, sem sentido ou palavra trocada pelo ditado que altera o significado.'],
         classificacao_incoerente: ['classificacao', 'grave', 'Alguma classificação (TI-RADS, BI-RADS, O-RADS, Bosniak, LI-RADS, Fleischner) é incoerente com a descrição do achado.'],
@@ -3179,6 +3191,7 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
         renderRevisao();
         try {
             const c = contextoLaudo() || r.ctx;
+            if (r.ctx && r.ctx.ctxAtend && !c.ctxAtend && c.exa === r.ctx.exa) c.ctxAtend = r.ctx.ctxAtend;
             const lista = completa ? achadosAtuais(r).filter(x => !r.ignorados.has(chaveAchado(x))) : [a];
             const x = await corrigirIA(c, nivel === 'opus' ? 'claude-opus-5-5' : 'claude-sonnet-5-5', lista, completa);
             r.corr[k] = { nivel, item, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nenhuma troca proposta.'), ms: x.ms };
@@ -3737,6 +3750,7 @@ ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas
 ${r.depois ? `<div class="pr-lib ${todos.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : todos.length ? `⚠ ${todos.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : todos.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ 🎓 Revisão completa com correção (Opus) — ${estadoCorr(r.corr.__opus__)}</div>` : '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
+${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button></div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => mini.has(chaveAchado(a)) ? `<div class="pr-mini ${a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
@@ -3773,13 +3787,15 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
+        p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => { if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', b.dataset.mot)]); r.ultIgn = null; renderRevisao(); }; });
+        const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; renderRevisao(); };
         p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); renderRevisao(); }; });
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
             const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); renderRevisao(); };
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
-            el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); renderRevisao(); };
-            const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); pedirCorrecao(r, a, false); };
+            el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); r.ultIgn = a; renderRevisao(); };
+            const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); revNuvemReg([linhaAchado(r, a, 'corrigido')]); pedirCorrecao(r, a, false); };
             const cm = el.querySelector('[data-com]'); if (cm) cm.onclick = () => abrirComunicacao(null, 'laudo');
             ligarCorrecao(el, r, chaveAchado(a));
         });
@@ -3915,6 +3931,60 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const pendencias = r => achadosAtuais(r).filter(a => !r.ignorados.has(chaveAchado(a))).length;
     // erro que impede liberar sozinho: só do Claude principal (Gemini/Grok lentos ou fora não seguram o Liberar)
     const erroPrincipal = r => !!(r.err[r.revisor] || r.err.jev && !REV_LLMS.some(m => r.res[m]));
+    // ---------- v1.33: contexto do atendimento (montado na hora; nada é gravado no PACS) ----------
+    // • procedimentos do MESMO paciente, MESMO dia e MESMA modalidade (lista do PACS filtrada pelo paciente);
+    // • contraste registrado pelo técnico (sim/não e via) — só TC;
+    // • ficha de anamnese TC filtrada (comentário "Ficha Anamnese TC HAMC" ou bloco antigo): queixa, evolução, cirurgias,
+    //   exame prévio, protocolo (+ tabagismo só em tórax). Fora: técnicos, códigos, peso, acesso, creatinina.
+    // Sem dado → a linha não vai (nunca "não informado"). Tudo com limite de 3 s; se falhar, revisa como antes.
+    async function contextoAtendimento(c) {
+        const vm = laudoComp(); const e = vm && vm.exame; if (!e || e.exa_codigo !== c.exa) return '';
+        const H = { 'x-access-token': localStorage.getItem('lwtoken') || '' };
+        const comTempo = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+        const dia = String(e.exa_data || '').slice(0, 10), mod = c.mod, linhas = [];
+        const pProcs = (async () => {
+            const nome = e.paciente && e.paciente.pac_nome; if (!nome || !dia) return null;
+            const q = new URLSearchParams({ offset: 0, limit: 60, tela: 'EXAMES', pac_nome: nome, pac_pacs_codigo: '', data_codigo: 1 });
+            const r = await fetch('/backend/api/exame?' + q, { headers: H }); if (!r.ok) return null;
+            const j = await r.json(); const rows = Array.isArray(j) ? j : (j.rows || []);
+            const ds = rows.filter(x => x && x.pac_codigo === e.pac_codigo && String(x.exa_data || '').slice(0, 10) === dia
+                && String((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '').toUpperCase() === mod
+                && String(x.exa_situacao || '').toUpperCase() !== 'CANCELADO').map(x => String((x.tipoexame && x.tipoexame.tpe_descricao) || '').trim()).filter(Boolean);
+            return ds.length > 1 ? ds.slice(0, 6) : null;
+        })().catch(() => null);
+        const pFicha = (async () => {
+            if (c.tipo !== 'TC') return null;
+            let txt = '';
+            try {
+                const r = await fetch('/backend/api/exame/' + e.exa_codigo + '/comentario', { headers: H });
+                if (r.ok) { const d = await r.json(); const rs = (d.rows || []).filter(x => String(x.acao_comentario || '').startsWith('Ficha Anamnese TC HAMC')); if (rs.length) txt = String(rs[rs.length - 1].acao_comentario); }
+            } catch (x) { /* segue */ }
+            if (!txt) { const m = String(e.exa_anamnese || '').match(/\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/i); if (m) txt = m[0]; }
+            if (!txt) return null;
+            const torax = /t[óo]rax|pulm|t[oó]rax/i.test(c.exame);
+            const itens = txt.replace(/^Ficha Anamnese TC HAMC[^:]*?[—–-]\s*/i, '').split('|').map(x => x.replace(/\[\/?FICHA TC[^\]]*\]?/gi, '').trim()).filter(x => /^[^:]{2,40}:/.test(x))
+                .filter(x => /^(queixa|evolu|cirurgia|exame pr[ée]vio|protocolo|hist[óo]ri|comorbid|neoplasia)/i.test(x) || (torax && /^tabagismo/i.test(x)))
+                .map(x => x.slice(0, 140));
+            return itens.length ? itens.join(' | ').slice(0, 600) : null;
+        })().catch(() => null);
+        const [procs, ficha] = await comTempo(Promise.all([pProcs, pFicha]), 3000) || [null, null];
+        if (procs) linhas.push('Procedimentos do mesmo atendimento: ' + procs.join(' + '));
+        if (c.tipo === 'TC' && (e.exa_idncontraste === true || e.exa_idncontraste === false)) {
+            const via = String(e.exa_contraste_tipo || '').toUpperCase();
+            linhas.push('Contraste registrado: ' + (e.exa_idncontraste ? 'sim' + (via ? ', via ' + ({ VENOSO: 'venosa', ORAL: 'oral', RETAL: 'retal' }[via] || via.toLowerCase()) : '') : 'não'));
+        }
+        if (ficha) linhas.push('Ficha de anamnese (resumo): ' + ficha);
+        return linhas.join('\n');
+    }
+    // ---------- v1.33: registro dos apontamentos na nuvem (para calibrar) — SEM nome, prontuário, atendimento, código do exame ou trecho do laudo ----------
+    function revNuvemReg(linhas) {
+        const n = sessaoNuvemPlus(); if (!n || !linhas.length) return;
+        const pc = (() => { try { return (cfg.urg && cfg.urg.nomePc) || ''; } catch (e) { return ''; } })();
+        const body = linhas.map(l => Object.assign({ pc: String(pc).slice(0, 40), versao: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '', regras_versao: REV_VERSAO }, l));
+        try { fetch(n.url + '/rest/v1/rev_achados', { method: 'POST', headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok, Prefer: 'return=minimal' }, body: JSON.stringify(body) }).catch(() => {}); } catch (e) { /* ok */ }
+    }
+    const linhaAchado = (r, a, decisao, motivo) => ({ modalidade: r.ctx.tipo, procedimento: String(r.ctx.exame || '').slice(0, 120), categoria: a.categoria, gravidade: a.gravidade,
+        fontes: (a.fontes || []).join('+'), explicacao: String(a.explicacao || '').replace(/["“«][^"”»]{0,300}["”»]/g, '«…»').replace(/\b[A-ZÀ-Ü]{3,}(?:\s+[A-ZÀ-Ü]{2,}){2,}\b/g, '«…»').slice(0, 400), decisao, motivo: motivo || null, jev: a.prob != null ? Math.round(a.prob * 100) / 100 : null, com_contexto: !!r.ctx.ctxAtend });
     async function revisar(forcar, depois, opc = {}) {
         const c = contextoLaudo();
         if (!c) return null;
@@ -3938,6 +4008,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const r = revAtual = { rascunho: rasc, hash, hashRevisado: hash, exa: c.exa, ctx: c, modo, regras: regrasLaudo(c), res: {}, err: {}, ativos: [], motivoOpus: '', carregando: true, ignorados: new Set(), depois: depois || null, min: !!opc.auto, auto: !!opc.auto };
         renderRevisao();
         r.revisor = revisorDe(rc);
+        if (c.texto.length >= 30) { try { c.ctxAtend = await contextoAtendimento(c); } catch (e) { c.ctxAtend = ''; } }
         if (c.texto.length >= 30) {
             const motores = REV_MODOS[modo].motores;
             const triar = !forcar && rc.triagem !== false && motores.includes('jev') && (opc.auto || !!depois);
@@ -3958,6 +4029,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             }
         }
         r.carregando = false;
+        try { revNuvemReg(achadosAtuais(r).map(a => linhaAchado(r, a, 'apontado'))); } catch (e) { /* ok */ }
         const reg = { t: Date.now(), tipo: c.tipo, modo, n: c.texto.length, nR: r.regras.length, erros: Object.keys(r.err).join(''), triagem: r.triagem || 'completa', auto: !!opc.auto };
         Object.entries(r.res).forEach(([m, x]) => { if (x) Object.assign(reg, { [m + 'Ms']: Math.round(x.ms), [m + 'In']: x.tin, [m + 'Out']: x.tout, [m + 'N']: x.achados.length }); });
         revLog(reg);
