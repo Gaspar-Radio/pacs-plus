@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.33.0
+// @version      1.33.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1379,7 +1379,13 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const m = urgMsg(g, motivo === 'liberado' ? 'fimLiberado' : 'fimRemovido');
         urgTela(m.titulo, m.tela, 'info', gsid(g));
         if (!celOn()) return;
+        // v1.33.1: apaga do celular os avisos JÁ ENTREGUES deste exame (🚨 novo, lembretes que já tocaram) — antes ficavam
+        // fixos na bandeja depois de liberado. Usa g.enviados/g.agenda (salvos no estado, valem mesmo se outro PC assumiu).
+        const agoraF = Date.now(), jaEnt = new Set(g.entregues || []);
+        Object.keys(g.enviados || {}).forEach(t => jaEnt.add(gsid(g) + '-' + t));
+        Object.entries(g.agenda || {}).forEach(([sid, em]) => { if (em <= agoraF) jaEnt.add(sid); });
         await urgCancelarAgenda(g);
+        for (const sid of jaEnt) if (!/-fim$/.test(sid)) await ntfyAcao(sid, 'delete');
         g.entregues = []; // v1.23: não marca como lidas no celular (cada "clear" gasta 1 mensagem da cota)
         await ntfyEnviar({ sid: gsid(g) + '-fim', titulo: m.titulo, msg: m.msg, prio: m.prio, tags: m.tags });
         await poCancelar(gsid(g));
@@ -1969,7 +1975,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (em - Date.now() > 3 * 86400000 - 120000) { e.vigiaPara = 0; return; } // ntfy agenda até 3 dias
         if (e.vigiaPara === em) return;
         const ok = await chegNtfy({ sid: 'pc-inicio', em, titulo: '⚠ Monitor de chegada não iniciou',
-            msg: `Às ${hm(em)} o computador de casa ainda não tinha lido o PACS (Mac dormindo, Chrome/PACS fechado, sem internet ou sessão expirada). Você não será avisado do 1º paciente desta janela.`, prio: 4, tags: 'warning' });
+            msg: `Às ${hm(em)} o computador de casa ainda não tinha lido o PACS (Mac dormindo, Chrome/PACS fechado, sem internet ou sessão expirada). Você não será avisado do 1º paciente desta janela.`, prio: 4, vibrar: true, tags: 'warning' });
         if (ok) e.vigiaPara = em;
     }
     async function chegCancelarVigia(e) {
@@ -2033,7 +2039,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                 if (err && err.code === 'login' && !e.sessaoAvisada) {
                     e.sessaoAvisada = true;
                     chegTela('⚠ Monitor de chegada parado', 'Sessão do PACS expirada — faça login.', 'pc-sessao');
-                    await chegNtfy({ titulo: '⚠ PACS pediu login (computador de casa)', msg: `O monitor do 1º paciente (${j.txt}) está parado até alguém fazer login no PACS.`, prio: 4, tags: 'warning' });
+                    await chegNtfy({ titulo: '⚠ PACS pediu login (computador de casa)', msg: `O monitor do 1º paciente (${j.txt}) está parado até alguém fazer login no PACS.`, prio: 4, vibrar: true, tags: 'warning' });
                 }
             }
         } catch (err) {
