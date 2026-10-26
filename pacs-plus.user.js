@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.32.1
+// @version      1.32.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1860,7 +1860,9 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!t) return null;
         const p = new URLSearchParams();
         if (o.titulo) p.set('t', o.titulo);
-        p.set('p', String(Math.min(o.prio || 3, 2))); // v1.26: ≤ 2 = sem som/vibração no celular
+        // v1.26: ≤ 2 = sem som/vibração no celular. v1.32.2 (pedido 26/10): o aviso do 1º paciente vai com 3 (normal)
+        // para o celular vibrar — o som/vibração é escolhido no app ntfy do celular; os computadores continuam sem som.
+        p.set('p', String(o.vibrar ? 3 : Math.min(o.prio || 3, 2)));
         if (o.tags) p.set('ta', o.tags);
         p.set('click', URG_LINK);
         if (o.sid) p.set('sid', o.sid);
@@ -1985,7 +1987,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             chegSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
             chegHistSalvar(e.dia, j.periodo, p.ficha);
             chegTela(m.titulo, m.tela, sid);
-            if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, tags: 'stethoscope' }));
+            if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, vibrar: true, tags: 'stethoscope' }));
         } else if (agora >= fimJanela(new Date(agora), j)) {
             Object.assign(per, { estado: 'nenhum', avisadoEm: agora });
             chegSalvar(e);
