@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.36.0
+// @version      1.36.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -654,13 +654,15 @@ ${C} #pp-btn { top: 6px; }`;
             if (iConv) css += `${cell(iConv)} { white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }\n`;
             const iAc = idx('acoes');
             // Ações (do estilo do Mac): largura fixa para os botões + botão extra (Horos/RadiAnt); menu ⋮ sempre na mesma linha, à direita
-            const A = `${S} td:nth-child(${iAc})`, EXTRA = '[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"], [data-pp-com="true"]';
-            if (iAc) css += `${cell(iAc)} { width: 184px !important; min-width: 184px !important; max-width: 184px !important; box-sizing: border-box !important; white-space: nowrap !important; overflow: visible !important; }
+            const A = `${S} td:nth-child(${iAc})`, EXTRA = '[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"], [data-pp-com="true"], [data-pp-hl]';
+            const wAc = 184 + (on('historicoLista') ? 24 : 0); // v1.36.1: +1 ícone (🕘) sem empurrar RadiAnt/Horos para fora
+            if (iAc) css += `${cell(iAc)} { width: ${wAc}px !important; min-width: ${wAc}px !important; max-width: ${wAc}px !important; box-sizing: border-box !important; white-space: nowrap !important; overflow: visible !important; }
 ${S} th:nth-child(${iAc}) { padding-left: 4px !important; padding-right: 2px !important; text-align: left !important; }
 ${A} { position: relative !important; padding: 0 28px 0 2px !important; text-align: left !important; font-size: 0 !important; }
 ${A} .v-btn.v-btn--icon, ${A} :is(${EXTRA}) { display: inline-flex !important; flex: 0 0 22px !important; width: 22px !important; min-width: 22px !important; max-width: 22px !important; height: 22px !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; vertical-align: middle !important; overflow: visible !important; }
 ${A} .v-btn.v-btn--icon .v-icon, ${A} :is(${EXTRA}) .v-icon { display: inline-flex !important; width: 17px !important; height: 17px !important; font-size: 17px !important; line-height: 17px !important; margin: 0 !important; padding: 0 !important; }
-${A} :is(${EXTRA}) { color: #64b5f6 !important; }
+${A} :is(${EXTRA}):not([data-pp-hl]) { color: #64b5f6 !important; }
+${A} [data-pp-hl] { justify-content: center !important; align-items: center !important; font-size: 18px !important; line-height: 22px !important; color: #a78bfa !important; }
 ${A} > :is(button, .v-btn):has(:is(.mdi-dots-vertical, .mdi-dots-horizontal)), ${A} :is(.v-menu, .v-menu__activator):has(:is(.mdi-dots-vertical, .mdi-dots-horizontal)) { position: absolute !important; top: 50% !important; margin-top: -11px !important; right: 4px !important; left: auto !important; transform: none !important; z-index: 3 !important; }
 ${S} td:nth-child(1) .v-input, ${S} td:nth-child(1) .v-input__control, ${S} td:nth-child(1) .v-input__slot { margin: 0 !important; padding: 0 !important; min-height: 0 !important; }
 ${S} td:nth-child(1) .v-input--selection-controls__input { margin: 0 auto !important; }
@@ -3535,7 +3537,24 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 td.appendChild(b);
             }
             if (b.dataset.pac !== String(ex.pac_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; }
+            // v1.36.1: fica ANTES dos botões de outros scripts (RadiAnt / Horos), que continuam por último
+            const ext = td.querySelector('[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"]');
+            if (ext && ext.parentNode && (ext.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) ext.parentNode.insertBefore(b, ext);
         });
+        // v1.36.1: nome do exame mais curto na lista — SEM CONTRASTE → SC, COM CONTRASTE → CC (só a tela)
+        const iEx = f.names.indexOf('exame');
+        if (iEx >= 0 && on('historicoLista')) linhas.forEach(tr => { const td = tr.children[iEx]; if (td) abreviarNo(td); });
+    }
+    function abreviarExame(t) {
+        return String(t)
+            .replace(/\b(SEM\s+E\s+COM|S\/?\s*E\s+C\/)\s*CONTRASTES?\b/gi, 'SC+CC')
+            .replace(/\b(SEM|S\/)\s*CONTRASTES?\b/gi, 'SC')
+            .replace(/\b(COM|C\/)\s*CONTRASTES?\b/gi, 'CC');
+    }
+    function abreviarNo(el) {
+        const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let n = w.nextNode(); n; n = w.nextNode()) { if (/CONTRASTE/i.test(n.nodeValue)) { const v = abreviarExame(n.nodeValue); if (v !== n.nodeValue) n.nodeValue = v; } }
+        if (el.title && /CONTRASTE/i.test(el.title)) el.title = abreviarExame(el.title);
     }
     setInterval(() => { try { if (cfg.master) { hlIconesLista(); sitMarcar(); } } catch (e) { /* segue */ } }, 1500);
     // ---------- v1.36: trocar a situação (Aberto ↔ Digitado ↔ Revisar) clicando na lista ----------
@@ -3644,7 +3663,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             const lib = String(x.exa_situacao || '').toUpperCase() === 'LIBERADO', img = !!x.exa_idnexecutadopacs;
             const sit = String(x.exa_situacao || '').toUpperCase();
             return `<div class="hl-l${x.exa_codigo === exaAtual ? ' atual' : ''}" data-i="${i}">
-<span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '—')}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
+<span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc(abreviarExame((x.tipoexame && x.tipoexame.tpe_descricao) || '—'))}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
 <span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
 <span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
 <span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
