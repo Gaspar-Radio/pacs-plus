@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.33.1
+// @version      1.34.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -37,6 +37,7 @@
     const BLOCKS = [
         ['historico', 'Histórico de exames', 'Tabela de histórico compacta (fonte 12 px), só Exame, Data/Hora, Situação e Ações'],
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
+        ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
@@ -3477,6 +3478,91 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         });
     }
     setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
+    // ---------- v1.34: 🕘 histórico do paciente direto da lista (GET /backend/api/paciente/{pac_codigo} → exames) ----------
+    // Mesma fonte do "Histórico de exames" do laudo (buscaHistoricoExamesPaciente). Ações chamam os métodos nativos da lista:
+    // abrirVisualizador(item,'HISTORICOPACIENTE') e imprimirLaudo(item); 📄 lê o texto (GET exame/{id}); 💬 diálogo nativo.
+    function hlIconesLista() {
+        const f = findListTable(), comp = f && componenteLista();
+        if (!f || !comp) return;
+        const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        linhas.forEach((tr, i) => {
+            const ex = comp.exames[i], td = tr.children[iAc]; if (!td || !ex) return;
+            let b = td.querySelector(':scope [data-pp-hl]');
+            if (!on('historicoLista')) { if (b) b.remove(); return; }
+            if (!b) {
+                b = document.createElement('i'); b.setAttribute('data-pp-hl', '1');
+                b.className = 'v-icon notranslate mdi mdi-history theme--dark pp-hl-ico'; b.title = 'Histórico de exames do paciente';
+                b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); hlAbrir(Number(b.dataset.pac), Number(b.dataset.exa)); });
+                td.appendChild(b);
+            }
+            if (b.dataset.pac !== String(ex.pac_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; }
+        });
+    }
+    setInterval(() => { try { if (cfg.master) hlIconesLista(); } catch (e) { /* segue */ } }, 1500);
+    setCss('pp-hl-css', `
+.pp-hl-ico { cursor: pointer; font-size: 19px !important; color: #a78bfa !important; margin-left: 2px; border-radius: 4px; }
+.pp-hl-ico:hover { background: rgba(167,139,250,.18); }
+#pp-hl { position: fixed; z-index: 2147483000; top: 90px; right: 24px; width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 110px); display: flex; flex-direction: column; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
+#pp-hl .hl-top { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #3f3f46; }
+#pp-hl .hl-top b { font-size: 14px; } #pp-hl .hl-top .hl-sub { color: #9ca3af; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pp-hl .hl-x { background: none; border: 0; color: #9ca3af; font-size: 18px; cursor: pointer; }
+#pp-hl .hl-lista { overflow: auto; padding: 4px 0; }
+#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 112px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
+#pp-hl .hl-l.atual { background: rgba(167,139,250,.10); }
+#pp-hl .hl-ex { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } #pp-hl .hl-mod { color: #9ca3af; font-weight: 700; font-size: 12px; }
+#pp-hl .hl-sit { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; text-align: center; background: #3f3f46; } #pp-hl .hl-sit.LIBERADO { background: #2e7d32; color: #fff; }
+#pp-hl .hl-ac { display: flex; gap: 2px; justify-content: flex-end; } #pp-hl .hl-ac .v-icon { cursor: pointer; font-size: 19px !important; width: 24px; height: 24px; border-radius: 4px; }
+#pp-hl .hl-ac .v-icon:hover { background: rgba(127,127,127,.2); } #pp-hl .hl-ac .v-icon.off { opacity: .35; cursor: default; }
+#pp-hl .hl-txt { grid-column: 1 / -1; white-space: pre-wrap; background: #111; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; margin: 4px 0 6px; max-height: 320px; overflow: auto; font-size: 12.5px; user-select: text; }
+#pp-hl .hl-msg { padding: 14px; color: #9ca3af; }`);
+    async function hlAbrir(pac, exaAtual) {
+        let p = document.getElementById('pp-hl');
+        if (!p) {
+            p = document.createElement('div'); p.id = 'pp-hl'; document.body.appendChild(p);
+            document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('pp-hl')) document.getElementById('pp-hl').remove(); });
+        }
+        if (typeof arrAplicar === 'function') arrAplicar(p);
+        p.innerHTML = `<div class="hl-top"><b>🕘 Histórico de exames</b><span class="hl-sub">carregando…</span><button class="hl-x" title="Fechar (Esc)">✕</button></div><div class="hl-lista"><div class="hl-msg">⏳ Buscando no PACS…</div></div>`;
+        p.querySelector('.hl-x').onclick = () => p.remove();
+        let d;
+        try { d = await pacsGet('paciente/' + pac); } catch (e) { p.querySelector('.hl-lista').innerHTML = `<div class="hl-msg">⚠ ${esc(e.message)}</div>`; return; }
+        if (!document.body.contains(p)) return;
+        const quando = x => String(x.exa_data || '').slice(0, 10) + ' ' + String(x.exa_hora || '');
+        const exs = (d && Array.isArray(d.exames) ? d.exames : []).slice().sort((a, b) => quando(b).localeCompare(quando(a)));
+        const nomePac = (() => { try { const comp = componenteLista(); const ex = comp && comp.exames.find(x => x.exa_codigo === exaAtual); return ex && ex.paciente ? ex.paciente.pac_nome : ''; } catch (e) { return ''; } })();
+        p.querySelector('.hl-sub').textContent = `(${exs.length})${nomePac ? ' · ' + nomePac : ''}`;
+        p.dataset.pac = pac;
+        const lista = p.querySelector('.hl-lista');
+        if (!exs.length) { lista.innerHTML = '<div class="hl-msg">Nenhum exame encontrado.</div>'; return; }
+        lista.innerHTML = exs.map((x, i) => {
+            const lib = String(x.exa_situacao || '').toUpperCase() === 'LIBERADO', img = !!x.exa_idnexecutadopacs;
+            const sit = String(x.exa_situacao || '').toUpperCase();
+            return `<div class="hl-l${x.exa_codigo === exaAtual ? ' atual' : ''}" data-i="${i}">
+<span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '—')}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
+<span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
+<span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
+<span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
+<span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
+        }).join('');
+        lista.onclick = async ev => {
+            const el = ev.target.closest('[data-a]'); if (!el || el.classList.contains('off')) return;
+            const linha = el.closest('.hl-l'), x = exs[Number(linha.dataset.i)], comp = componenteLista();
+            const a = el.dataset.a;
+            try {
+                if (a === 'img') { if (comp && comp.abrirVisualizador) comp.abrirVisualizador(x, 'HISTORICOPACIENTE'); }
+                else if (a === 'imp') { if (comp && comp.imprimirLaudo) comp.imprimirLaudo(x); }
+                else if (a === 'com') document.querySelector('#app').__vue__.$store.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: x.exa_codigo }, callBackClose: () => {} });
+                else if (a === 'ler') {
+                    const ja = linha.querySelector('.hl-txt'); if (ja) { ja.remove(); return; }
+                    const box = document.createElement('div'); box.className = 'hl-txt'; box.textContent = '⏳ carregando…'; linha.appendChild(box);
+                    const e2 = await comExameApi(x.exa_codigo);
+                    box.textContent = htmlParaTexto((e2.laudo && e2.laudo.lau_laudo) || '').trim() || '(laudo sem texto — pode ser laudo anexo; use 🖨)';
+                }
+            } catch (e) { const m = document.createElement('div'); m.className = 'hl-txt'; m.textContent = '⚠ PACS: ' + e.message; linha.appendChild(m); setTimeout(() => m.remove(), 6000); }
+        };
+    }
     // v1.28.2 — exames antigos ainda têm o bloco [FICHA TC HAMC … /FICHA TC] dentro da Anamnese (Anamnese TC ≤ 1.8).
     // Só na TELA: esconde o bloco no cabeçalho do laudo (o PACS não é alterado; a ficha está nos Comentários/PDF).
     const RE_FICHA_TELA = /\s*\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/gi;
@@ -3508,7 +3594,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     // Arrastar: segure o cabeçalho (barra de abas do Plus, título da Revisão/Comunicação/Trecho) e arraste.
     // Duplo clique no cabeçalho = volta à posição padrão. A posição fica guardada neste navegador.
     const ARR_KEY = 'pp_arrastar_v1';
-    const ARR_ALCA = { 'pp-panel': '.pp-tabs', 'pp-rev': '.pr-top', 'pp-com': 'h3', 'pp-sel-pop': '.ps-top' };
+    const ARR_ALCA = { 'pp-panel': '.pp-tabs', 'pp-rev': '.pr-top', 'pp-com': 'h3', 'pp-sel-pop': '.ps-top', 'pp-hl': '.hl-top' };
     let arrPos = {}; try { arrPos = JSON.parse(localStorage.getItem(ARR_KEY) || '{}') || {}; } catch (e) { arrPos = {}; }
     function arrSalvar() { try { localStorage.setItem(ARR_KEY, JSON.stringify(arrPos)); } catch (e) { /* ok */ } }
     function arrAplicar(el) {
@@ -3542,7 +3628,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         }
     }, true);
     setInterval(() => { Object.keys(ARR_ALCA).forEach(id => { const el = document.getElementById(id); if (el && arrPos[id]) arrAplicar(el); }); }, 700);
-    setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top { cursor: move; user-select: none; }');
+    setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top, #pp-hl .hl-top { cursor: move; user-select: none; }');
 
     // ---- Trecho selecionado no laudo: mini-barra ✍ Reescrever · 🛡 Revisar · 🧮 Volume · 💬 Pedir ----
     const SEL_CSS = `#pp-sel .ps-l{display:flex;gap:2px} #pp-sel .ps-mais{display:none;border-top:1px solid #334155;margin-top:3px;padding-top:3px} #pp-sel.mais .ps-mais{display:flex}
