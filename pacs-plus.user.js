@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.34.0
+// @version      1.35.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -390,6 +390,9 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #datatableExamesHistorico td:nth-child(10) .v-icon { font-size: 17px !important; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha { position: relative; cursor: pointer; font-size: 17px !important; width: 20px; height: 20px; line-height: 20px; text-align: center; color: #808080; border-radius: 4px; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha:hover { background: rgba(127,127,127,.18); }
+#datatableExamesHistorico .pp-hist-acoes .pp-ha[data-tipo="ler"] { color: #60a5fa !important; }
+#datatableExamesHistorico tr.pp-hist-txt > td { padding: 4px 8px 8px !important; height: auto !important; }
+#datatableExamesHistorico .pp-hist-txt-c { white-space: pre-wrap; background: #111; color: #e5e7eb; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; max-height: 320px; overflow: auto; font-size: 12.5px; line-height: 1.4; user-select: text; text-align: left; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha[data-on="anexo"] { color: #2196f3 !important; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha[data-on="roxo"] { color: #c50ec5 !important; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha[data-n]::after { content: attr(data-n); position: absolute; top: -6px; right: -7px; min-width: 13px; height: 13px; padding: 0 2px; border-radius: 7px; background: #4caf50; color: #fff; font: 700 9px/13px Roboto, Arial, sans-serif; text-align: center; }
@@ -2167,7 +2170,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             box.innerHTML =
                 (vm.btnListarAnexosExame !== false ? ico('anexos', 'mdi-paperclip', 'Anexos') : '') +
                 (vm.btnComentarioExame !== false ? ico('comentarios', 'mdi-chat', 'Comentários') : '') +
-                (vm.btnListarAnamneseExame !== false ? ico('anamnese', 'mdi-file-document', 'Anamnese') : '');
+                (vm.btnListarAnamneseExame !== false ? ico('anamnese', 'mdi-file-document', 'Anamnese') : '') +
+                (String(it.exa_situacao || '').toUpperCase() === 'LIBERADO' ? ico('ler', 'mdi-text-box-outline', 'Ler o texto do laudo aqui (clique de novo para fechar)') : '');
             box.addEventListener('click', ev => {
                 const el = ev.target.closest('.pp-ha');
                 if (!el) return;
@@ -2221,6 +2225,17 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                     pintarHistAcoes();
                 }
             });
+        } else if (tipo === 'ler') {
+            const box = document.querySelector(`#datatableExamesHistorico .pp-hist-acoes[data-exa="${exa}"]`), tr = box && box.closest('tr');
+            if (!tr) return;
+            const prox = tr.nextElementSibling;
+            if (prox && prox.classList.contains('pp-hist-txt')) { prox.remove(); return; }
+            const n = tr.children.length, linha = document.createElement('tr'); linha.className = 'pp-hist-txt';
+            linha.innerHTML = `<td colspan="${n}"><div class="pp-hist-txt-c">⏳ carregando…</div></td>`;
+            tr.after(linha);
+            const c = linha.querySelector('.pp-hist-txt-c');
+            pacsGet('exame/' + exa).then(e => { c.textContent = htmlParaTexto((e.laudo && e.laudo.lau_laudo) || '').trim() || '(laudo sem texto — pode ser laudo anexo; use 🖨)'; })
+                .catch(er => { c.textContent = '⚠ ' + er.message; });
         } else if (tipo === 'anexos') {
             // exame do laudo aberto: o diálogo nativo é seguro (é o mesmo objeto) e permite anexar
             if (atual && typeof vm.abrirListaArquivos === 'function') { vm.abrirListaArquivos(vm.exame); return; }
@@ -3419,7 +3434,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     function comBotoesLaudo() {
         const crit = caixaCritico(true);
         let b = document.querySelector('.pp-com-btn');
-        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); return; }
+        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); const a0 = document.querySelector('.pp-anam-btn'); if (a0) a0.remove(); return; }
         setCss('pp-com-ico-css', COM_ICON_CSS);
         if (!crit.hasAttribute('data-pp-crit')) { crit.setAttribute('data-pp-crit', ''); crit.title = 'Resultado crítico'; }
         const lab = crit.querySelector('.v-label');
@@ -3449,6 +3464,27 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             });
             b.after(c);
         }
+        // v1.35: 📄 Anamnese do exame aberto (diálogo nativo); roxo = preenchida
+        let an = document.querySelector('.pp-anam-btn');
+        if (!an || an.previousElementSibling !== c) {
+            if (an) an.remove();
+            an = comIcone('pp-anam-btn', 'mdi-file-document', '#9ca3af', 'Anamnese deste exame', () => {
+                const v2 = laudoComp(); if (!v2 || !v2.exame || typeof v2.abrirEditarAnamnese !== 'function') return;
+                const exa = v2.exame.exa_codigo;
+                v2.abrirEditarAnamnese({ item: { exa_codigo: exa }, callBackClose: async () => {
+                    try { // mantém a anamnese nova na memória do laudo (senão salvar o laudo regravaria a antiga)
+                        const e = await pacsGet('exame/' + exa);
+                        if (v2.exame && v2.exame.exa_codigo === exa) { if (v2.$set) v2.$set(v2.exame, 'exa_anamnese', e.exa_anamnese); else v2.exame.exa_anamnese = e.exa_anamnese; }
+                    } catch (er) { /* só a cor fica desatualizada */ }
+                } });
+            });
+            c.after(an);
+        }
+        const v3 = laudoComp(), txtAn = v3 && v3.exame ? String(v3.exame.exa_anamnese || '').replace(/\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/gi, '').trim() : '';
+        const icA = an.querySelector('.v-icon'), corA = txtAn ? '#c50ec5' : '#808080';
+        if (icA && icA.style.color !== corA && icA.dataset.cor !== corA) { icA.style.color = corA; icA.dataset.cor = corA; }
+        const titA = txtAn ? 'Anamnese: ' + txtAn.slice(0, 160).replace(/\s+/g, ' ') + (txtAn.length > 160 ? '…' : '') : 'Anamnese deste exame (vazia) — clique para preencher';
+        if (an.title !== titA) an.title = titA;
     }
     // ícone 📣 na coluna Ações da lista: só exames LIBERADOS marcados como "Resultado crítico"; ✓ verde quando já registrado
     function comIconesLista() {
