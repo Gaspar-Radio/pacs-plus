@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.35.0
+// @version      1.36.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -37,6 +37,7 @@
     const BLOCKS = [
         ['historico', 'Histórico de exames', 'Tabela de histórico compacta (fonte 12 px), só Exame, Data/Hora, Situação e Ações'],
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
+        ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -3536,7 +3537,74 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             if (b.dataset.pac !== String(ex.pac_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; }
         });
     }
-    setInterval(() => { try { if (cfg.master) hlIconesLista(); } catch (e) { /* segue */ } }, 1500);
+    setInterval(() => { try { if (cfg.master) { hlIconesLista(); sitMarcar(); } } catch (e) { /* segue */ } }, 1500);
+    // ---------- v1.36: trocar a situação (Aberto ↔ Digitado ↔ Revisar) clicando na lista ----------
+    // Mesmo caminho do botão do laudo (salvarLaudo): GET exame/{id} → laudo atual (ou laudo vazio padrão via limparLaudo
+    // da própria componente) → lau_situacao → POST /backend/api/laudo. Conferido com paciente TESTE em 27/10/2026.
+    const SIT_TROCA = ['ABERTO', 'DIGITADO', 'REVISAR'];
+    const SIT_NOME = { ABERTO: 'Aberto', DIGITADO: 'Digitado', REVISAR: 'Revisar' };
+    function sitMarcar() {
+        const f = findListTable(), comp = f && componenteLista();
+        if (!f || !comp) return;
+        const iS = f.names.indexOf('situacao'); if (iS < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        linhas.forEach((tr, i) => {
+            const td = tr.children[iS], ex = comp.exames[i]; if (!td || !ex) return;
+            const ok = on('situacaoRapida') && SIT_TROCA.includes(String(ex.exa_situacao || '').toUpperCase()) && ex.exa_idnnecessitalaudo !== false;
+            if (ok && td.dataset.ppSit !== String(ex.exa_codigo)) { td.dataset.ppSit = ex.exa_codigo; td.title = 'Clique para trocar a situação (Aberto / Digitado / Revisar)'; }
+            else if (!ok && td.dataset.ppSit) { delete td.dataset.ppSit; td.removeAttribute('title'); }
+        });
+    }
+    setCss('pp-sit-css', `
+.v-data-table[data-pp-lista] td[data-pp-sit] .v-chip { cursor: pointer !important; }
+.v-data-table[data-pp-lista] td[data-pp-sit] .v-chip:hover { filter: brightness(1.25); outline: 2px solid rgba(255,255,255,.35); }
+#pp-sit-menu { position: fixed; z-index: 2147483001; background: #1e1e1e; border: 1px solid #3f3f46; border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.55); padding: 6px; display: flex; flex-direction: column; gap: 4px; min-width: 130px; font: 13px Roboto, Arial, sans-serif; }
+#pp-sit-menu button { border: 0; border-radius: 14px; padding: 5px 12px; font-weight: 700; color: #fff; cursor: pointer; text-align: center; }
+#pp-sit-menu button[disabled] { opacity: .35; cursor: default; } #pp-sit-menu .st { color: #9ca3af; font-size: 11.5px; text-align: center; padding: 2px 0; }`);
+    document.addEventListener('click', ev => {
+        const menu = document.getElementById('pp-sit-menu');
+        if (menu && !menu.contains(ev.target)) menu.remove();
+        const td = ev.target.closest && ev.target.closest('td[data-pp-sit]');
+        if (!td || !ev.target.closest('.v-chip') || !on('situacaoRapida')) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const comp = componenteLista(), exa = Number(td.dataset.ppSit), ex = comp && comp.exames.find(x => x.exa_codigo === exa);
+        if (!ex) return;
+        const atual = String(ex.exa_situacao || '').toUpperCase();
+        const cor = k => { try { return comp.corDescricaoStatusLaudo(k).cor; } catch (e) { return '#555'; } };
+        const m = document.createElement('div'); m.id = 'pp-sit-menu';
+        m.innerHTML = SIT_TROCA.map(k => `<button data-s="${k}" style="background:${cor(k)}" ${k === atual ? 'disabled' : ''}>${SIT_NOME[k]}</button>`).join('') + '<div class="st"></div>';
+        document.body.appendChild(m);
+        const r = ev.target.closest('.v-chip').getBoundingClientRect();
+        m.style.left = Math.min(r.left, window.innerWidth - m.offsetWidth - 8) + 'px';
+        m.style.top = Math.min(r.bottom + 4, window.innerHeight - m.offsetHeight - 8) + 'px';
+        m.onclick = async e2 => {
+            e2.stopPropagation();
+            const b = e2.target.closest('button[data-s]'); if (!b || b.disabled) return;
+            m.querySelectorAll('button').forEach(x => { x.disabled = true; }); m.querySelector('.st').textContent = '⏳ salvando…';
+            try { await sitTrocar(comp, exa, b.dataset.s); m.remove(); try { comp.$toast.success(`Situação: ${SIT_NOME[b.dataset.s]}`); } catch (x) { /* ok */ } comp.getExames(); }
+            catch (er) { m.querySelector('.st').textContent = '⚠ ' + er.message; setTimeout(() => m.remove(), 5000); }
+        };
+    }, true);
+    async function sitTrocar(comp, exa, sit) {
+        if (!SIT_TROCA.includes(sit)) throw new Error('situação inválida');
+        if (comp.dialogLaudo && comp.exame && comp.exame.exa_codigo === exa) throw new Error('o laudo deste exame está aberto');
+        const e = await pacsGet('exame/' + exa);
+        const sitAgora = String((e.laudo && e.laudo.lau_situacao) || e.exa_situacao || '').toUpperCase();
+        if (sitAgora === 'LIBERADO' || String(e.exa_situacao || '').toUpperCase() === 'LIBERADO') throw new Error('já está liberado — não muda');
+        if (e.exa_idnnecessitalaudo === false) throw new Error('exame não necessita de laudo');
+        let lau;
+        if (e.laudo) lau = Object.assign({}, e.laudo);
+        else {
+            const tmp = { laudo: JSON.parse(JSON.stringify(comp.laudo || {})), exame: { tipoexame: {} }, usu_codigo_radiologista: null };
+            comp.$options.methods.limparLaudo.call(tmp);
+            lau = tmp.laudo; lau.exa_codigo = exa; lau.lau_tipolaudo = lau.lau_tipolaudo || 'PADRAO';
+        }
+        lau.lau_situacao = sit;
+        const r = await fetch('/backend/api/laudo', { method: 'POST', headers: { 'x-access-token': localStorage.getItem('lwtoken') || '', 'Content-Type': 'application/json' }, body: JSON.stringify(lau) });
+        if (r.status === 401 || r.status === 403) throw new Error('sessão do PACS expirada');
+        if (!r.ok) throw new Error('PACS respondeu HTTP ' + r.status);
+    }
     setCss('pp-hl-css', `
 .pp-hl-ico { cursor: pointer; font-size: 19px !important; color: #a78bfa !important; margin-left: 2px; border-radius: 4px; }
 .pp-hl-ico:hover { background: rgba(167,139,250,.18); }
