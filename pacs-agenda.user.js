@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.3.4
+// @version      9.3.5
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -38,11 +38,13 @@
         .btn-urg { opacity: .35; filter: grayscale(1); }
         .btn-urg.on { opacity: 1; filter: none; background: #fee2e2 !important; border-color: #dc2626 !important; }
         .badge-saiu { background: #fef3c7 !important; color: #92400e !important; border: 1px solid #f59e0b !important; }
-        #agenda-top-bar { background: #0f172a !important; color: #fff !important; padding: 7px 12px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; border-bottom: 1px solid #334155 !important; flex-shrink: 0 !important; gap: 6px; }
-        .btn-top-action { border: none !important; border-radius: 5px !important; padding: 4px 8px !important; font-size: 10.5px !important; font-weight: 700 !important; cursor: pointer !important; transition: opacity 0.15s !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; }
+        #agenda-top-bar { background: #0f172a !important; color: #fff !important; padding: 7px 12px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; border-bottom: 1px solid #334155 !important; flex-shrink: 0 !important; gap: 6px; flex-wrap: wrap !important; }
+        #agenda-top-bar > div { flex-wrap: wrap; row-gap: 4px; }
+        #agenda-top-bar > div:last-child { justify-content: flex-end; margin-left: auto; }
+        .btn-top-action { border: none !important; border-radius: 5px !important; padding: 4px 8px !important; font-size: 10.5px !important; font-weight: 700 !important; cursor: pointer !important; transition: opacity 0.15s !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; white-space: nowrap !important; flex-shrink: 0 !important; }
         .btn-top-action:hover { opacity: 0.88; }
-        .zoom-control-group { display: inline-flex; align-items: center; background: #1e293b; border: 1px solid #475569; border-radius: 5px; overflow: hidden; }
-        .btn-zoom { background: transparent; color: #f8fafc; border: none; padding: 3px 6px; font-size: 10px; font-weight: bold; cursor: pointer; line-height: 1; }
+        .zoom-control-group { display: inline-flex !important; align-items: center; background: #1e293b; border: 1px solid #475569; border-radius: 5px; overflow: hidden; flex-shrink: 0 !important; white-space: nowrap !important; }
+        .btn-zoom { background: transparent; color: #f8fafc; border: none; padding: 3px 6px; font-size: 10px; font-weight: bold; cursor: pointer; line-height: 1; display: inline-block !important; min-width: 22px; flex-shrink: 0 !important; }
         .btn-zoom:hover { background: #334155; }
         #labelZoomVal { font-size: 9.5px; font-weight: 700; color: #60a5fa; padding: 0 4px; user-select: none; min-width: 34px; text-align: center; }
         #agenda-body-scroll { flex: 1 !important; overflow-y: auto !important; padding: 8px 12px 14px 12px !important; transform-origin: top left; }
