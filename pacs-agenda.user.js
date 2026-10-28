@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.4.0
+// @version      9.4.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -118,7 +118,8 @@
         #modalDocs.open { display: flex !important; }
         #modalDocs .docs-topo { background: #0f172a; color: #fff; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-shrink: 0; }
         #modalDocs .docs-topo button { background: #334155; color: #fff; border: 1px solid #475569; border-radius: 5px; padding: 3px 9px; font-weight: 700; font-size: 10.5px; cursor: pointer; }
-        #modalDocs .docs-topo select { font-size: 10.5px; border-radius: 4px; padding: 2px 4px; }
+        #modalDocs .docs-topo select { font-size: 11px !important; font-weight: 700 !important; border-radius: 4px; padding: 3px 6px !important; background: #ffffff !important; color: #0f172a !important; border: 1px solid #94a3b8 !important; cursor: pointer; -webkit-text-fill-color: #0f172a !important; opacity: 1 !important; }
+        #modalDocs .docs-topo select option { background: #ffffff !important; color: #0f172a !important; }
         #docsAviso { display: none; background: #fef3c7; color: #78350f; padding: 5px 12px; font-size: 10.5px; border-bottom: 1px solid #f59e0b; }
         #modalDocs .docs-corpo { flex: 1; display: flex; min-height: 0; }
         #modalDocs .docs-lado { width: 300px; flex-shrink: 0; border-right: 1px solid #e2e8f0; overflow-y: auto; padding: 8px; background: #fff; }
