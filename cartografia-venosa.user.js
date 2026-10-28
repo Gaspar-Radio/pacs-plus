@@ -394,10 +394,30 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
     String(txt).split(/\s+/).forEach(p => { const t = cur ? cur + ' ' + p : p; if (g.measureText(t).width > larg && cur) { linhas.push(cur); cur = p; } else cur = t; });
     if (cur) linhas.push(cur); return linhas;
   }
+  // v1.5.0: um lado só → aproxima as 3 vistas (corta o branco entre elas, pela leitura dos pixels) para o desenho
+  // crescer até a altura útil da página. Bilateral não ganha com isso (o limite é a altura), fica como está.
+  function aproximarVistas(img) {
+    const w = img.width, h = img.height, c = document.createElement('canvas'); c.width = w; c.height = h;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(0, 0, w, h).data, col = new Uint16Array(w);
+    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (px[i] < 225 || px[i + 1] < 225 || px[i + 2] < 225) col[x]++; }
+    const terco = w / 3, mg = Math.round(w * 0.012), gap = Math.round(w * 0.03), faixas = [];
+    for (let k = 0; k < 3; k++) {
+      let a = -1, b = -1; for (let x = Math.round(k * terco); x < Math.round((k + 1) * terco); x++) if (col[x] >= 2) { if (a < 0) a = x; b = x; }
+      if (a < 0) return null; faixas.push([Math.max(0, a - mg), Math.min(w, b + mg)]);
+    }
+    const larg = faixas.reduce((t, [a, b]) => t + (b - a), 0) + gap * 2;
+    if (larg > w * 0.92) return null; // pouco branco para ganhar
+    const o = document.createElement('canvas'); o.width = larg; o.height = h;
+    const go = o.getContext('2d'); go.fillStyle = '#fff'; go.fillRect(0, 0, larg, h);
+    let x0 = 0; faixas.forEach(([a, b]) => { go.drawImage(c, a, 0, b - a, h, x0, 0, b - a, h); x0 += b - a + gap; });
+    return o;
+  }
   async function comporImagem(estado, imgs) {
     const lados = estado.lado === 'bilateral' ? ['MID', 'MIE'] : [estado.lado];
     const W = 1480, PAD = 16, HTIT = 58, HT = lados.length > 1 ? 36 : 0;
     const ims = {}; for (const l of lados) if (imgs[l]) ims[l] = await carregaImg(imgs[l]);
+    if (lados.length === 1 && ims[lados[0]]) { try { const ap = aproximarVistas(ims[lados[0]]); if (ap) ims[lados[0]] = ap; } catch (e) { /* usa o original */ } }
     const hDes = l => ims[l] ? Math.round(W * ims[l].height / ims[l].width) : 0;
     const itens = [['Competente', 'linha', '#2563eb', 3], ['Incompetente', 'linha', '#dc2626', 6], ['Ausente', 'linha', '#475569', 3], ['Trombose', 'linha', '#000', 6],
       ['Hipoplásica', 'linha', '#cbd5e1', 3], ['Perfurante inc.', 'ponto', '#dc2626'], ['Varizes', 'onda', '#7c3aed', 2]];
