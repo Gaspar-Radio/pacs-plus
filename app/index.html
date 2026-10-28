@@ -55,7 +55,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 .b.on-falta{background:#fda4af;color:#881337;border-color:#e11d48}
 .vazio{text-align:center;color:var(--mut);padding:30px 10px}
 .fab{position:fixed;right:16px;bottom:calc(76px + env(safe-area-inset-bottom));width:56px;height:56px;border-radius:50%;background:var(--pri);color:#fff;font-size:28px;box-shadow:0 6px 18px rgba(0,0,0,.25);z-index:6}
-.tabs{position:fixed;left:0;right:0;bottom:0;z-index:7;display:grid;grid-template-columns:repeat(5,1fr);background:var(--card);border-top:1px solid var(--ln);padding-bottom:env(safe-area-inset-bottom)}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:7;display:grid;grid-template-columns:repeat(6,1fr);background:var(--card);border-top:1px solid var(--ln);padding-bottom:env(safe-area-inset-bottom)}
 .tabs button{padding:8px 0 6px;font-size:11px;color:var(--mut);display:flex;flex-direction:column;align-items:center;gap:2px}
 .tabs button b{font-size:20px;font-weight:400}
 .tabs button.on{color:var(--pri);font-weight:700}
@@ -105,7 +105,7 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.1.2';
+const VERSAO = '1.2.0';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -458,7 +458,7 @@ function render() {
 <header><div class="top"><button class="nav" id="ant" aria-label="Dia anterior">‹</button><h1 id="titulo"></h1><button class="nav" id="prox" aria-label="Próximo dia">›</button></div><div class="sync" id="sync"></div></header>
 <div id="tela"></div>
 <button class="fab" id="fab" aria-label="Lançar encaixe">+</button>
-<nav class="tabs">${[['agenda', '📅', 'Agenda'], ['semana', '🗓', 'Semana'], ['analytics', '📊', 'Faltas'], ['consulta', '📚', 'Consulta'], ['ajustes', '⚙️', 'Ajustes']].map(([k, i, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><b>${i}</b>${n}</button>`).join('')}</nav>`;
+<nav class="tabs">${[['agenda', '📅', 'Agenda'], ['semana', '🗓', 'Semana'], ['analytics', '📊', 'Faltas'], ['laudos', '📝', 'Laudos'], ['consulta', '📚', 'Consulta'], ['ajustes', '⚙️', 'Ajustes']].map(([k, i, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><b>${i}</b>${n}</button>`).join('')}</nav>`;
     $('#ant').onclick = () => irDia(somaDias(S.dia, -1));
     $('#prox').onclick = () => irDia(somaDias(S.dia, 1));
     $('#titulo').onclick = () => irDia(hojeIso());
@@ -472,8 +472,8 @@ function pintarTela() {
     const ehAgenda = S.tab === 'agenda';
     if (hdr) { $('#ant').style.visibility = $('#prox').style.visibility = ehAgenda ? 'visible' : 'hidden'; }
     fab.style.display = ehAgenda ? 'block' : 'none';
-    t.innerHTML = ehAgenda ? `${S.dia === hojeIso() ? 'Hoje' : fmtDia(S.dia)}<small>${fmtDia(S.dia)} · toque para voltar a hoje</small>` : { semana: 'Próximos dias', analytics: 'Faltas e espera', consulta: 'Consulta', ajustes: 'Ajustes' }[S.tab];
-    if (ehAgenda) pintarAgenda(); else if (S.tab === 'semana') telaSemana(); else if (S.tab === 'analytics') telaAnalytics(); else if (S.tab === 'consulta') telaConsulta(); else telaAjustes();
+    t.innerHTML = ehAgenda ? `${S.dia === hojeIso() ? 'Hoje' : fmtDia(S.dia)}<small>${fmtDia(S.dia)} · toque para voltar a hoje</small>` : { semana: 'Próximos dias', analytics: 'Faltas e espera', laudos: 'Laudos pendentes', consulta: 'Consulta', ajustes: 'Ajustes' }[S.tab];
+    if (ehAgenda) pintarAgenda(); else if (S.tab === 'semana') telaSemana(); else if (S.tab === 'analytics') telaAnalytics(); else if (S.tab === 'laudos') telaLaudos(); else if (S.tab === 'consulta') telaConsulta(); else telaAjustes();
     pintarSync();
 }
 function pintarSync() {
@@ -598,6 +598,29 @@ ${barras((dia || []).map(r => ({ k: r.dia, f: r.faltas, t: r.agendados, p: r.tax
 ${urgHtml}
 <div class="note">Faltas: dias encerrados (até ontem). Urgências: exames realizados; SUS hospitalar conta automaticamente, os demais pelo PACS ou marcados à mão. Espera = só eletivos (urgência não entra na média nem no SLA). Mesmo cálculo dos PCs (views do banco).</div></main>`;
         $('#pdfan').onclick = () => pdfAnalytics();
+    } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
+}
+// v1.2.0 — 📝 Laudos pendentes (US e TC): tabela laudos_pendentes, alimentada pelo PACS Plus dos computadores (só números/datas)
+async function telaLaudos() {
+    const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
+    try {
+        const rows = await api('laudos_pendentes?select=*');
+        if (S.tab !== 'laudos') return;
+        const dm = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}` : '—'; };
+        const sem = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'][new Date(+m[1], m[2] - 1, +m[3]).getDay()] : ''; };
+        const hojeK = hojeIso();
+        const bloco = m => {
+            const r = (rows || []).find(x => x.modalidade === m), nome = m === 'US' ? '🔊 Ultrassom' : '🩻 Tomografia';
+            if (!r) return `<h2><span>${nome}</span></h2><div class="vazio">Sem dados ainda — abra o PACS num computador com o PACS Plus 1.37+.</div>`;
+            const idade = Math.round((Date.now() - new Date(r.atualizado_em).getTime()) / 60000);
+            const quando = idade < 1 ? 'agora' : idade < 120 ? `há ${idade} min` : new Date(r.atualizado_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            const linhas = (r.por_dia || []).map(e => { const venc = e.venc || e.prazo < hojeK, hoje = !venc && e.prazo === hojeK;
+                return `<tr style="${venc ? 'background:var(--erbg);font-weight:700' : hoje ? 'background:var(--wabg);font-weight:700' : ''}"><td>${venc ? '⚠ venceu' : hoje ? 'HOJE' : ''} ${sem(e.prazo)} ${dm(e.prazo)}</td><td class="num"><b>${e.n}</b></td><td class="num" style="color:var(--mut)">${e.rev || 0}/${e.dig || 0}</td><td style="color:var(--mut)">${dm(e.d0)}${e.d1 && e.d1 !== e.d0 ? '–' + dm(e.d1) : ''}</td></tr>`; }).join('');
+            return `<h2><span>${nome}</span></h2><div class="kpis"><div class="kpi"><b>${r.total}</b><span>pendentes</span></div><div class="kpi"><b style="color:${r.vencidos ? 'var(--er)' : 'inherit'}">${r.vencidos}</b><span>vencidos</span></div><div class="kpi"><b style="color:${r.hoje ? 'var(--wa)' : 'inherit'}">${r.hoje}</b><span>vencem hoje</span></div><div class="kpi"><b style="font-size:15px;color:${idade > 30 ? 'var(--er)' : 'inherit'}">${quando}</b><span>atualizado${r.pc ? ' · ' + esc(r.pc) : ''}</span></div></div>
+${linhas ? `<table class="tbl"><tr><th>Prazo</th><th class="num">Laudos</th><th class="num">Rev/Dig</th><th>Exames de</th></tr>${linhas}</table>` : '<div class="vazio">Nenhum laudo pendente ✓</div>'}`;
+        };
+        tela.innerHTML = `<main>${bloco('US')}${bloco('CT')}<div class="note">Revisar + Digitado, eletivos (sem urgentes). Prazo: US 3 e TC 5 dias úteis desde o exame (feriados fora). Atualiza a cada 10 min enquanto algum computador estiver com o PACS aberto e logado. Puxe para baixo ou toque na aba de novo para reler.</div></main>`;
+        clearTimeout(S.lpT); S.lpT = setTimeout(() => { if (S.tab === 'laudos' && !document.hidden) telaLaudos(); }, 60000);
     } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
 }
 async function telaConsulta() {

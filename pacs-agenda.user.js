@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.3.5
+// @version      9.4.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2248,6 +2248,7 @@
                     </div>
                     <button id="btnToggleTheme" class="btn-top-action" style="background:#334155; color:#f8fafc; border:1px solid #475569;">🌙 Escuro</button>
                     <button id="btnOpenDashboard" class="btn-top-action" style="background:#6366f1; color:#fff;">📊 Dashboard & Faltas</button>
+                    <button id="btnOpenLaudos" class="btn-top-action" style="background:#b45309; color:#fff;" title="Laudos pendentes de US e TC por dia de prazo (enviados pelo PACS Plus)">📝 Laudos</button>
                     <button id="btnOpenDocs" class="btn-top-action" style="background:#0d9488; color:#fff;" title="Escalas do mês, POPs e manuais">📚 Consulta</button>
                     <button id="btnPrintPDF" class="btn-top-action" style="background:#0284c7; color:#fff;">🖨️ Imprimir</button>
                     <button id="btnImportPref" class="btn-top-action" style="background:#16a34a; color:#fff;" title="Sincroniza a agenda da Prefeitura a partir da planilha (de hoje em diante)">📥 Prefeitura</button>
@@ -2387,6 +2388,7 @@
                     <div style="display:flex; gap:4px;">
                         <button id="tabDashHoje" style="background:#2563eb; color:#fff; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📅 Dia Selecionado</button>
                         <button id="tabDashNuvem" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📊 Analytics (nuvem)</button>
+                        <button id="tabDashLaudos" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📝 Laudos pendentes</button>
                     </div>
                 </div>
                 <button id="btnCloseModalDash" style="background:none; border:none; color:#fff; font-size:15px; cursor:pointer;">✕</button>
@@ -2401,6 +2403,7 @@
         $('btnToggleTheme').onclick = toggleTheme;
         $('tabDashHoje').onclick = () => renderDashboardAba(1);
         $('tabDashNuvem').onclick = () => renderDashboardAba(2);
+        $('tabDashLaudos').onclick = () => renderDashboardAba(3);
         $('btnZoomIn').onclick = () => changeZoom(1);
         $('btnZoomOut').onclick = () => changeZoom(-1);
         $('indicatorNuvem').onclick = () => { errorAlertShown = false; loadDayFromCloud(selectedDate); };
@@ -2481,6 +2484,7 @@
         ['encHora', 'encPaciente', 'encExame'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') handleAddEncaixe(); }));
         $('btnOpenDashboard').onclick = openDashboard;
         $('btnOpenDocs').onclick = openDocs;
+        $('btnOpenLaudos').onclick = () => { document.getElementById('modalDashboard').classList.add('open'); renderDashboardAba(3); };
         $('btnPrintPDF').onclick = printPDF;
 
         const bodyScroll = $('agenda-body-scroll');
@@ -2812,10 +2816,39 @@
     }
 
     function renderDashboardAba(n) {
-        const b1 = document.getElementById('tabDashHoje'), b2 = document.getElementById('tabDashNuvem');
+        const bs = [document.getElementById('tabDashHoje'), document.getElementById('tabDashNuvem'), document.getElementById('tabDashLaudos')];
         const on = b => { b.style.background = '#2563eb'; b.style.color = '#fff'; };
         const off = b => { b.style.background = '#334155'; b.style.color = '#cbd5e1'; };
-        if (n === 1) { on(b1); off(b2); renderDashboardHoje(); } else { on(b2); off(b1); renderDashboardNuvemFaltas(); }
+        bs.forEach((b, i) => b && (i === n - 1 ? on(b) : off(b)));
+        if (n === 1) renderDashboardHoje(); else if (n === 2) renderDashboardNuvemFaltas(); else renderLaudosPendentes();
+    }
+
+    // v9.4 — 📝 Laudos pendentes (US e TC) — tabela laudos_pendentes, alimentada pelo PACS Plus 1.37+ (só números/datas)
+    async function renderLaudosPendentes() {
+        const content = document.getElementById('contentDashboard');
+        if (!getSupabaseConfig()) { content.innerHTML = '<div style="padding:20px; color:#f59e0b;">Configure a nuvem (⚙️ API) e faça login para ver os laudos pendentes.</div>'; return; }
+        content.innerHTML = '<div style="text-align:center; padding:30px; color:#60a5fa;">⏳ Carregando laudos pendentes...</div>';
+        try {
+            const rows = await requestSupabase('laudos_pendentes?select=*', 'GET');
+            const dm = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}` : '—'; };
+            const sem = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'][new Date(+m[1], m[2] - 1, +m[3]).getDay()] : ''; };
+            const hojeK = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+            const bloco = m => {
+                const r = (rows || []).find(x => x.modalidade === m), nome = m === 'US' ? '🔊 Ultrassom' : '🩻 Tomografia';
+                if (!r) return `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;"><b>${nome}</b><div style="color:#64748b; margin-top:6px;">Sem dados ainda — abra o PACS com o PACS Plus 1.37+ em algum computador.</div></div>`;
+                const idade = Math.round((Date.now() - new Date(r.atualizado_em).getTime()) / 60000);
+                const linhas = (r.por_dia || []).map(e => {
+                    const venc = e.venc || e.prazo < hojeK, hoje = !venc && e.prazo === hojeK;
+                    return `<tr style="${venc ? 'background:#fee2e2; color:#991b1b; font-weight:bold;' : hoje ? 'background:#fef3c7; color:#92400e; font-weight:bold;' : ''}"><td style="padding:3px 6px;">${venc ? '⚠ venceu' : hoje ? 'vence HOJE' : 'vence'} ${sem(e.prazo)} ${dm(e.prazo)}</td><td style="padding:3px 6px; text-align:right;">${e.n}</td><td style="padding:3px 6px; text-align:right; color:#64748b;">${e.rev || 0} / ${e.dig || 0}</td><td style="padding:3px 6px; color:#64748b;">${dm(e.d0)}${e.d1 && e.d1 !== e.d0 ? '–' + dm(e.d1) : ''}</td></tr>`;
+                }).join('');
+                return `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+                    <div style="display:flex; gap:10px; align-items:baseline; margin-bottom:6px;"><b style="font-size:12.5px;">${nome}</b><span style="font-size:18px; font-weight:bold;">${r.total}</span><span style="color:#64748b;">pendente(s)</span>${r.vencidos ? `<span style="color:#dc2626; font-weight:bold;">⚠ ${r.vencidos} vencido(s)</span>` : ''}${r.hoje ? `<span style="color:#d97706; font-weight:bold;">${r.hoje} vence(m) hoje</span>` : ''}<span style="margin-left:auto; color:${idade > 30 ? '#dc2626' : '#94a3b8'}; font-size:10px;">atualizado há ${idade < 1 ? 'menos de 1' : idade} min${r.pc ? ' · ' + escapeHtml(r.pc) : ''}</span></div>
+                    ${linhas ? `<table style="width:100%; border-collapse:collapse; font-size:10.5px;"><tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Prazo</th><th style="text-align:right; padding:3px 6px;">Laudos</th><th style="text-align:right; padding:3px 6px;">Revisar / Digitado</th><th style="text-align:left; padding:3px 6px;">Data dos exames</th></tr>${linhas}</table>` : '<div style="color:#16a34a;">Nenhum laudo pendente ✓</div>'}</div>`;
+            };
+            content.innerHTML = bloco('US') + bloco('CT') + '<div style="color:#94a3b8; font-size:10px;">Revisar + Digitado · eletivos (sem urgentes) · prazo US 3 / TC 5 dias úteis · atualiza a cada 10 min enquanto algum computador estiver com o PACS aberto · para filtrar, use 📝 na barra do PACS.</div>';
+        } catch (err) {
+            content.innerHTML = `<div style="padding:20px; color:#dc2626;">Não consegui ler os laudos pendentes: ${escapeHtml(err.message || String(err))}</div>`;
+        }
     }
 
     function box(value, label, color) {

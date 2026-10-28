@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.36.1
+// @version      1.37.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -37,6 +37,7 @@
     const BLOCKS = [
         ['historico', 'Histórico de exames', 'Tabela de histórico compacta (fonte 12 px), só Exame, Data/Hora, Situação e Ações'],
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
+        ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
@@ -3601,10 +3602,151 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             e2.stopPropagation();
             const b = e2.target.closest('button[data-s]'); if (!b || b.disabled) return;
             m.querySelectorAll('button').forEach(x => { x.disabled = true; }); m.querySelector('.st').textContent = '⏳ salvando…';
-            try { await sitTrocar(comp, exa, b.dataset.s); m.remove(); try { comp.$toast.success(`Situação: ${SIT_NOME[b.dataset.s]}`); } catch (x) { /* ok */ } comp.getExames(); }
+            try { await sitTrocar(comp, exa, b.dataset.s); lpEm = 0; m.remove(); try { comp.$toast.success(`Situação: ${SIT_NOME[b.dataset.s]}`); } catch (x) { /* ok */ } comp.getExames(); }
             catch (er) { m.querySelector('.st').textContent = '⚠ ' + er.message; setTimeout(() => m.remove(), 5000); }
         };
     }, true);
+    // ---------- v1.37: 📝 LAUDOS PENDENTES (US e TC) — barra do topo + filtro rápido + resumo na nuvem ----------
+    // Conta exames em REVISAR/DIGITADO, eletivos (sem urgente) e que precisam de laudo, por modalidade (US 35 · CT 7),
+    // agrupados pelo DIA DO PRAZO (mesma regra do prazo próprio: US 3 / TC 5 dias úteis desde exa_data, feriados fora).
+    // Nuvem: tabela laudos_pendentes — SÓ números e datas (sem nome, prontuário, exame ou código).
+    const LP_SIT = ['REVISAR', 'DIGITADO'], LP_MOD = { US: 35, CT: 7 }, LP_NOME = { US: 'US', CT: 'TC' };
+    const LP_CADA = 10 * 60000;
+    let lpDados = null, lpEm = 0, lpRodando = false, lpFiltroAntes = null, lpNuvemEm = 0, lpNuvemSig = '';
+    const lpDM = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}` : '—'; };
+    const lpSem = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'][new Date(+m[1], m[2] - 1, +m[3]).getDay()] : ''; };
+    async function lpBuscar(cod) {
+        const tok = localStorage.getItem('lwtoken'); if (!tok) throw new Error('PACS sem login');
+        const rows = [];
+        for (let off = 0; off < 1500; off += 300) {
+            const q = new URLSearchParams({ offset: off, limit: 300, tela: 'EXAMES', pac_nome: '', pac_pacs_codigo: '', data_codigo: 1, data_inicial: '', data_final: '', exa_idnsomenteassinador: false, exa_dataparam: '$exame.exa_data$' });
+            LP_SIT.forEach(x => q.append('exa_situacao[]', x)); q.append('mod_codigo[]', cod);
+            const r = await fetch('/backend/api/exame?' + q, { headers: { 'x-access-token': tok } });
+            if (r.status === 401 || r.status === 403) throw new Error('sessão do PACS expirada');
+            if (!r.ok) throw new Error('PACS HTTP ' + r.status);
+            const j = await r.json(), lote = Array.isArray(j) ? j : (j.rows || []);
+            rows.push(...lote);
+            if (lote.length < 300) break;
+        }
+        return rows;
+    }
+    function lpResumir(rows, m, agora) {
+        const nd = diasPorModalidade(cfg.sla)[m] || (m === 'US' ? 3 : 5), g = {};
+        rows.forEach(x => {
+            const sit = String(x && x.exa_situacao || '').toUpperCase();
+            if (!x || modDe(x) !== m || x.exa_idnurgente || x.exa_idnnecessitalaudo === false || !LP_SIT.includes(sit)) return;
+            const v = prazoDiasUteis(x.exa_data, nd, cfg.sla), k = v ? chaveDia(v) : '';
+            const d = String(x.exa_data || '').slice(0, 10);
+            const e = g[k] || (g[k] = { prazo: k, n: 0, rev: 0, dig: 0, d0: d, d1: d, venc: !!(v && v.getTime() < agora) });
+            e.n++; if (sit === 'REVISAR') e.rev++; else e.dig++;
+            if (d && d < e.d0) e.d0 = d; if (d && d > e.d1) e.d1 = d;
+        });
+        const por_dia = Object.values(g).sort((a, b) => a.prazo.localeCompare(b.prazo)), hojeK = chaveDia(new Date(agora));
+        return { total: por_dia.reduce((t, e) => t + e.n, 0), vencidos: por_dia.filter(e => e.venc).reduce((t, e) => t + e.n, 0),
+            hoje: por_dia.filter(e => !e.venc && e.prazo === hojeK).reduce((t, e) => t + e.n, 0), por_dia };
+    }
+    async function lpAtualizar(forcar) {
+        if (lpRodando || (!forcar && Date.now() - lpEm < LP_CADA)) return lpDados;
+        if (!on('laudosPendentes') || ehViewer() || !localStorage.getItem('lwtoken')) return lpDados;
+        lpRodando = true;
+        try {
+            const agora = Date.now(), res = { em: agora };
+            for (const [m, cod] of Object.entries(LP_MOD)) res[m] = lpResumir(await lpBuscar(cod), m, agora);
+            lpDados = res; lpEm = agora; lpErro = '';
+            lpNuvem(res);
+        } catch (e) { lpErro = e.message; lpEm = Date.now() - LP_CADA + 2 * 60000; } // falhou → tenta em 2 min
+        finally { lpRodando = false; lpDock(); if (document.getElementById('pp-lp')) lpPainel(); }
+        return lpDados;
+    }
+    let lpErro = '';
+    function lpNuvem(res) {
+        const n = sessaoNuvemPlus(); if (!n) return;
+        const linhas = Object.keys(LP_MOD).map(m => ({ modalidade: m, total: res[m].total, vencidos: res[m].vencidos, hoje: res[m].hoje, por_dia: res[m].por_dia,
+            atualizado_em: new Date(res.em).toISOString(), pc: String((cfg.urg && cfg.urg.nomePc) || '').slice(0, 40) }));
+        const sig = JSON.stringify(linhas.map(l => [l.modalidade, l.total, l.vencidos, l.hoje, l.por_dia]));
+        if (sig === lpNuvemSig && Date.now() - lpNuvemEm < 30 * 60000) return; // nada mudou: só renova a cada 30 min
+        fetch(n.url + '/rest/v1/laudos_pendentes?on_conflict=modalidade', { method: 'POST', headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok, Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(linhas) })
+            .then(r => { if (r.ok) { lpNuvemSig = sig; lpNuvemEm = Date.now(); } else console.warn('[PACS Plus] laudos_pendentes HTTP', r.status); })
+            .catch(e => console.warn('[PACS Plus] laudos_pendentes', e));
+    }
+    function lpDock() {
+        const d = document.getElementById('pp-dock');
+        let c = document.getElementById('ppd-laudos');
+        if (!d || !on('laudosPendentes')) { if (c) c.remove(); const p = document.getElementById('pp-lp'); if (p && !on('laudosPendentes')) p.remove(); return; }
+        if (!c) {
+            c = document.createElement('button'); c.type = 'button'; c.id = 'ppd-laudos'; c.className = 'ppd-laudos';
+            c.addEventListener('click', e => { e.stopPropagation(); const p = document.getElementById('pp-lp'); if (p) { p.remove(); return; } lpPainel(); if (Date.now() - lpEm > 2 * 60000) lpAtualizar(true); });
+            const z = document.getElementById('ppd-zlista'); if (z && z.parentElement === d) d.insertBefore(c, z); else d.appendChild(c);
+        } else if (c.parentElement !== d) d.appendChild(c);
+        const parte = m => { const x = lpDados && lpDados[m]; if (!x) return `${LP_NOME[m]} <b>…</b>`; return `<span class="lp-m${x.vencidos ? ' venc' : x.hoje ? ' hoje' : ''}">${LP_NOME[m]} <b>${x.total}</b>${x.vencidos ? `<i>⚠${x.vencidos}</i>` : x.hoje ? `<i class="h">hoje ${x.hoje}</i>` : ''}</span>`; };
+        const html = `📝 ${parte('US')}<span class="lp-s">·</span>${parte('CT')}`;
+        if (c.innerHTML !== html) c.innerHTML = html;
+        const tit = lpErro ? 'Laudos pendentes — ⚠ ' + lpErro : `Laudos pendentes (Revisar + Digitado, eletivos) — atualizado ${lpDados ? hm(lpDados.em) : '…'} · clique para ver por dia e filtrar`;
+        if (c.title !== tit) c.title = tit;
+    }
+    function lpPainel() {
+        let p = document.getElementById('pp-lp');
+        if (!p) {
+            p = document.createElement('div'); p.id = 'pp-lp'; document.body.appendChild(p);
+            const c = document.getElementById('ppd-laudos'); if (c) { const r = c.getBoundingClientRect(); p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 470)) + 'px'; }
+            p.addEventListener('click', lpClique);
+        }
+        const sec = m => {
+            const x = lpDados && lpDados[m];
+            if (!x) return `<div class="lp-sec"><h4>${LP_NOME[m]}</h4><div class="lp-msg">${lpRodando ? '⏳ contando…' : '—'}</div></div>`;
+            const linhas = x.por_dia.map(e => `<div class="lp-l${e.venc ? ' venc' : e.prazo === chaveDia(new Date()) ? ' hoje' : ''}"><span class="lp-p">${e.venc ? '⚠ venceu' : 'vence'} ${lpSem(e.prazo)} ${lpDM(e.prazo)}</span><span class="lp-n"><b>${e.n}</b> ${e.n === 1 ? 'laudo' : 'laudos'}${e.dig ? ` <small>(${e.dig} dig.)</small>` : ''}</span><span class="lp-d">exames ${lpDM(e.d0)}${e.d1 !== e.d0 ? '–' + lpDM(e.d1) : ''}</span><button class="lp-f" data-m="${m}" data-d0="${e.d0}" data-d1="${e.d1}" title="Filtrar a lista: ${LP_NOME[m]}, Revisar/Digitado, exames de ${lpDM(e.d0)}${e.d1 !== e.d0 ? ' a ' + lpDM(e.d1) : ''}">Filtrar ›</button></div>`).join('');
+            return `<div class="lp-sec"><h4>${LP_NOME[m]} <span>${x.total} pendente(s)${x.vencidos ? ` · <b class="r">${x.vencidos} vencido(s)</b>` : ''}${x.hoje ? ` · <b class="a">${x.hoje} vence(m) hoje</b>` : ''}</span>${x.por_dia.length ? `<button class="lp-f lp-old" data-m="${m}" data-d0="${x.por_dia[0].d0}" data-d1="${x.por_dia[0].d1}">⏪ Mais atrasados</button>` : ''}</h4>${linhas || '<div class="lp-msg">Nenhum laudo pendente ✓</div>'}</div>`;
+        };
+        p.innerHTML = `<div class="lp-top"><b>📝 Laudos pendentes</b><span class="lp-at">${lpErro ? '⚠ ' + esc(lpErro) : lpDados ? 'atualizado ' + hm(lpDados.em) : ''}</span><button class="lp-b" data-a="atual" title="Contar de novo agora">🔄</button>${lpFiltroAntes ? '<button class="lp-b" data-a="volta" title="Voltar ao filtro que estava antes">↺ Filtro anterior</button>' : ''}<button class="lp-x" data-a="fechar">✕</button></div>${sec('US')}${sec('CT')}<div class="lp-rod">Revisar + Digitado · eletivos · prazo US ${diasPorModalidade(cfg.sla).US || 3} / TC ${diasPorModalidade(cfg.sla).CT || 5} dias úteis</div>`;
+    }
+    function lpClique(ev) {
+        const b = ev.target.closest('button'); if (!b) return;
+        ev.stopPropagation();
+        if (b.dataset.a === 'fechar') { document.getElementById('pp-lp').remove(); return; }
+        if (b.dataset.a === 'atual') { lpAtualizar(true); lpPainel(); return; }
+        if (b.dataset.a === 'volta') { lpVoltarFiltro(); return; }
+        if (b.dataset.m) lpFiltrar(b.dataset.m, b.dataset.d0, b.dataset.d1);
+    }
+    function lpFiltrar(m, d0, d1) {
+        const comp = componenteLista();
+        if (!comp || !comp.filtro) { alertaCurto('Abra a página Exames para filtrar.'); return; }
+        if (!lpFiltroAntes) lpFiltroAntes = JSON.parse(JSON.stringify(comp.filtro));
+        const f = comp.filtro, set = (k, v) => (comp.$set ? comp.$set(f, k, v) : (f[k] = v));
+        set('exa_situacao', LP_SIT.slice()); set('mod_codigo', [LP_MOD[m]]); set('data_codigo', 1); set('data_inicial', d0); set('data_final', d1);
+        set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
+        if ('page' in comp) comp.page = 1;
+        // se a modalidade estiver oculta pelo 👁 da barra, mostra de novo (senão a lista filtrada ficaria vazia)
+        try { const o = cfg.ocultarLista; if (o && o.mods && o.mods.includes(m)) { o.mods = o.mods.filter(x => x !== m); saveCfg(); ocultarLinhasLista(); } } catch (e) { /* ok */ }
+        comp.getExames();
+        const p = document.getElementById('pp-lp'); if (p) p.remove();
+    }
+    function lpVoltarFiltro() {
+        const comp = componenteLista(); if (!comp || !lpFiltroAntes) return;
+        Object.entries(lpFiltroAntes).forEach(([k, v]) => (comp.$set ? comp.$set(comp.filtro, k, v) : (comp.filtro[k] = v)));
+        lpFiltroAntes = null; if ('page' in comp) comp.page = 1; comp.getExames();
+        const p = document.getElementById('pp-lp'); if (p) p.remove();
+    }
+    function alertaCurto(t) { const d = document.createElement('div'); d.className = 'pp-lp-aviso'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 3500); }
+    document.addEventListener('click', ev => { const p = document.getElementById('pp-lp'); if (p && !p.contains(ev.target) && !ev.target.closest('#ppd-laudos')) p.remove(); });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') { const p = document.getElementById('pp-lp'); if (p) p.remove(); } });
+    setInterval(() => { try { if (cfg.master) { lpDock(); lpAtualizar(false); } } catch (e) { /* segue */ } }, 20000);
+    setTimeout(() => { try { if (cfg.master) { lpDock(); lpAtualizar(false); } } catch (e) { /* segue */ } }, 4000);
+    setCss('pp-lp-css', `
+#pp-dock .ppd-laudos { height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 6px; background: #2c3036; color: #e3e6ea; border: 1px solid #3a3f46; border-bottom: 2px solid #f59e0b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
+#pp-dock .ppd-laudos:hover { background: #363b42; } #pp-dock .ppd-laudos b { color: #fff; } #pp-dock .ppd-laudos .lp-s { color: #6b7280; }
+#pp-dock .ppd-laudos i { font-style: normal; margin-left: 3px; padding: 0 4px; border-radius: 8px; background: #dc2626; color: #fff; font-size: 11px; } #pp-dock .ppd-laudos i.h { background: #d97706; }
+#pp-lp { position: fixed; top: 38px; left: 300px; z-index: 2147483000; width: 460px; max-height: calc(100vh - 60px); overflow: auto; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
+#pp-lp .lp-top { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #3f3f46; position: sticky; top: 0; background: #1e1e1e; }
+#pp-lp .lp-at { flex: 1; color: #9ca3af; font-size: 11.5px; } #pp-lp .lp-b { background: #2c3036; border: 1px solid #3a3f46; color: #e5e7eb; border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
+#pp-lp .lp-x { background: none; border: 0; color: #9ca3af; font-size: 17px; cursor: pointer; }
+#pp-lp .lp-sec { padding: 6px 10px 8px; border-bottom: 1px solid #2a2a2a; } #pp-lp h4 { margin: 2px 0 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+#pp-lp h4 span { flex: 1; font-weight: 400; color: #9ca3af; font-size: 12px; } #pp-lp .r { color: #f87171; } #pp-lp .a { color: #fbbf24; }
+#pp-lp .lp-l { display: grid; grid-template-columns: 128px 92px 1fr auto; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 6px; }
+#pp-lp .lp-l:nth-child(odd) { background: #242424; } #pp-lp .lp-l.venc { background: rgba(220,38,38,.18); } #pp-lp .lp-l.venc .lp-p { color: #fca5a5; font-weight: 700; } #pp-lp .lp-l.hoje .lp-p { color: #fbbf24; font-weight: 700; }
+#pp-lp .lp-d { color: #9ca3af; font-size: 11.5px; } #pp-lp .lp-n small { color: #9ca3af; }
+#pp-lp .lp-f { background: #1d4ed8; color: #fff; border: 0; border-radius: 12px; padding: 2px 9px; cursor: pointer; font-size: 11.5px; font-weight: 700; } #pp-lp .lp-f:hover { background: #2563eb; }
+#pp-lp .lp-old { background: #b45309; } #pp-lp .lp-msg { color: #9ca3af; padding: 4px 6px; } #pp-lp .lp-rod { color: #6b7280; font-size: 11px; padding: 6px 10px; }
+.pp-lp-aviso { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 2147483001; background: #1f2937; color: #fff; padding: 8px 14px; border-radius: 8px; font: 13px Roboto, Arial, sans-serif; }`);
     async function sitTrocar(comp, exa, sit) {
         if (!SIT_TROCA.includes(sit)) throw new Error('situação inválida');
         if (comp.dialogLaudo && comp.exame && comp.exame.exa_codigo === exa) throw new Error('o laudo deste exame está aberto');
