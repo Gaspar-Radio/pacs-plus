@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Cartografia Venosa MMII
 // @namespace    hamc-rt
-// @version      1.5.0
+// @version      1.5.1
 // @description  Cartografia (desenho) do Doppler venoso de MMII dentro do Laudo Web: botão só nos exames de Doppler venoso de membro inferior com imagem, nome e data puxados do exame, desfazer/refazer, uni ou bilateral, pré-desenho a partir do laudo (Claude pela nuvem com o login da Agenda, ou chave local) e PDF anexado ao exame. Desde 1.4.0: botão 🦵 CV no editor do laudo — lê o texto digitado e insere o desenho no fim do próprio laudo (assinatura digital única).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -17,7 +17,7 @@
   if (window.__cvMMIILoaded) return;
   window.__cvMMIILoaded = true;
 
-  const VERSAO = '1.5.0';
+  const VERSAO = '1.5.1';
   const API = '/backend/api';
   const P = 'cvmmii';                       // prefixo de ids/classes
   const PREFIXO_ANEXO = 'Cartografia Venosa MMII';
@@ -25,7 +25,7 @@
 
   // ---------------- configuração (só neste computador) ----------------
   const CFG_KEY = 'cv_cfg';
-  const MODELO_PADRAO = 'claude-sonnet-5-5';
+  const MODELO_PADRAO = 'claude-opus-5-5'; // v1.5.1: pré-desenho com Opus (pedido do usuário, 27/10/2026)
   function cfg() { try { return Object.assign({ chave: '', modelo: MODELO_PADRAO, teste: false }, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { return { chave: '', modelo: MODELO_PADRAO, teste: false }; } }
   function salvaCfg(c) { try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) { /* sem armazenamento */ } }
 
@@ -333,6 +333,8 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
 
   async function chamarClaude(texto) {
     const c = cfg();
+    // v1.5.1: o Sonnet salvo como padrão nas configurações antigas passa a ser Opus; outro modelo escolhido à mão é respeitado
+    const modelo = c.modelo && c.modelo !== 'claude-sonnet-5-5' ? c.modelo : MODELO_PADRAO;
     // tool_choice "auto": os modelos atuais recusam "tool"/"any" (erro 400) — a instrução manda chamar a ferramenta
     const corpo = { max_tokens: 8000, system: SISTEMA + '\nResponda SEMPRE chamando a ferramenta "cartografia" uma única vez, sem texto adicional.', tools: [TOOL], tool_choice: { type: 'auto' },
       messages: [{ role: 'user', content: 'Laudo:\n\n' + texto + '\n\nChame a ferramenta cartografia com os dados deste laudo.' }] };
@@ -343,7 +345,7 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
         const r = await fetch(n.url + '/functions/v1/ia-proxy', {
           method: 'POST',
           headers: { 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok },
-          body: JSON.stringify(Object.assign({ acao: 'claude_mensagem' }, corpo))
+          body: JSON.stringify(Object.assign({ acao: 'claude_mensagem', modelo, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } }, corpo))
         });
         const d = await r.json().catch(() => ({}));
         if (r.ok) j = d; else erroNuvem = 'nuvem ' + r.status + ' ' + String(d.detalhe || d.erro || '').slice(0, 120);
@@ -354,7 +356,7 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-api-key': c.chave, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-        body: JSON.stringify(Object.assign({ model: c.modelo || MODELO_PADRAO }, corpo))
+        body: JSON.stringify(Object.assign({ model: modelo, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } }, corpo))
       });
       j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((erroNuvem ? erroNuvem + ' · ' : '') + 'API ' + r.status + ' ' + ((j.error && j.error.message) || '').slice(0, 140));
