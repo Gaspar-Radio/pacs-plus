@@ -400,7 +400,7 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
     const w = img.width, h = img.height, c = document.createElement('canvas'); c.width = w; c.height = h;
     const g = c.getContext('2d'); g.drawImage(img, 0, 0);
     const px = g.getImageData(0, 0, w, h).data, col = new Uint16Array(w);
-    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (px[i] < 225 || px[i + 1] < 225 || px[i + 2] < 225) col[x]++; }
+    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; if (px[i] < 238 || px[i + 1] < 238 || px[i + 2] < 238) col[x]++; }
     const terco = w / 3, mg = Math.round(w * 0.012), gap = Math.round(w * 0.03), faixas = [];
     for (let k = 0; k < 3; k++) {
       let a = -1, b = -1; for (let x = Math.round(k * terco); x < Math.round((k + 1) * terco); x++) if (col[x] >= 2) { if (a < 0) a = x; b = x; }
