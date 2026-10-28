@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Cartografia Venosa MMII
 // @namespace    hamc-rt
-// @version      1.4.0
+// @version      1.5.0
 // @description  Cartografia (desenho) do Doppler venoso de MMII dentro do Laudo Web: botão só nos exames de Doppler venoso de membro inferior com imagem, nome e data puxados do exame, desfazer/refazer, uni ou bilateral, pré-desenho a partir do laudo (Claude pela nuvem com o login da Agenda, ou chave local) e PDF anexado ao exame. Desde 1.4.0: botão 🦵 CV no editor do laudo — lê o texto digitado e insere o desenho no fim do próprio laudo (assinatura digital única).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -17,7 +17,7 @@
   if (window.__cvMMIILoaded) return;
   window.__cvMMIILoaded = true;
 
-  const VERSAO = '1.4.0';
+  const VERSAO = '1.5.0';
   const API = '/backend/api';
   const P = 'cvmmii';                       // prefixo de ids/classes
   const PREFIXO_ANEXO = 'Cartografia Venosa MMII';
@@ -371,9 +371,10 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
   // ---------------- v1.4.0: cartografia DENTRO do laudo (CKEditor do PACS) ----------------
   // Testado em 21/10/2026 (paciente TESTE): imagem em data URI JPEG no laudo é salva (POST laudo) e sai no PDF do PACS.
   // ⚠ Largura em % (width:100%) derruba o gerador de PDF do PACS (502 por ~1–2 min) → sempre largura em px.
-  // Após uma quebra de página cabem ~680 px de altura (com cabeçalho e assinatura); imagem mais alta some do PDF.
+  // Medido em 27/10/2026 (paciente TESTE, PDF do PACS): após a quebra de página a imagem cabe até 720 px de altura
+  // (740 já cria 3ª página); largura útil do papel 716 px. Desde 1.5.0 só a imagem vai ao laudo → 712 × 710 de folga.
   const CV_TITULO = 'CARTOGRAFIA VENOSA';
-  const CV_LARG_MAX = 700, CV_ALT_MAX = 640;
+  const CV_LARG_MAX = 710, CV_ALT_MAX = 712;
   function editorAberto() {
     const el = document.querySelector('.v-dialog__content .ck-editor__editable');
     const ed = el && el.ckeditorInstance; if (!ed) return null;
@@ -384,58 +385,87 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
   }
   const elegivelEditor = e => !!e && (ehDopplerVenosoMMII(e) || (cfg().teste && ehTeste(e) && mod(e) === 'US'));
   const carregaImg = src => new Promise((ok, er) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => er(new Error('imagem do desenho')); i.src = src; });
+  // v1.5.0: TUDO dentro da imagem — título (bilateral ou do lado), desenhos, legenda (quebra em linhas) e ressalva.
+  // No laudo entra só a imagem (alt = título), maior, aproveitando a página (assinatura digital fica sob o nome).
+  const tituloCv = lado => lado === 'MID' ? CV_TITULO + ' DO MEMBRO INFERIOR DIREITO' : lado === 'MIE' ? CV_TITULO + ' DO MEMBRO INFERIOR ESQUERDO' : CV_TITULO + ' DOS MEMBROS INFERIORES';
+  const AVISO_LAUDO = 'Representação esquemática, sem escala; localizações, extensões e calibres aproximados. O laudo descritivo prevalece em caso de divergência.';
+  function quebrarTexto(g, txt, larg) {
+    const linhas = []; let cur = '';
+    String(txt).split(/\s+/).forEach(p => { const t = cur ? cur + ' ' + p : p; if (g.measureText(t).width > larg && cur) { linhas.push(cur); cur = p; } else cur = t; });
+    if (cur) linhas.push(cur); return linhas;
+  }
   async function comporImagem(estado, imgs) {
     const lados = estado.lado === 'bilateral' ? ['MID', 'MIE'] : [estado.lado];
-    const W = 1480, HT = 50, HLEG = 96;
+    const W = 1480, PAD = 16, HTIT = 58, HT = lados.length > 1 ? 36 : 0;
     const ims = {}; for (const l of lados) if (imgs[l]) ims[l] = await carregaImg(imgs[l]);
     const hDes = l => ims[l] ? Math.round(W * ims[l].height / ims[l].width) : 0;
-    const H = lados.reduce((t, l) => t + HT + hDes(l), 0) + HLEG;
+    const itens = [['Competente', 'linha', '#2563eb', 3], ['Incompetente', 'linha', '#dc2626', 6], ['Ausente', 'linha', '#475569', 3], ['Trombose', 'linha', '#000', 6],
+      ['Hipoplásica', 'linha', '#cbd5e1', 3], ['Perfurante inc.', 'ponto', '#dc2626'], ['Varizes', 'onda', '#7c3aed', 2]];
+    const ANAT = 'JSF – junção safeno-femoral  ·  JSP – junção safeno-poplítea  ·  VSM – veia safena magna  ·  VSP – veia safena parva';
+    const FL = 'px Helvetica, Arial, sans-serif', interno = W - 2 * PAD - 20;
+    // legenda: tenta caber numa linha diminuindo a letra (24 → 19); se não couber, quebra em linhas
+    const m = document.createElement('canvas').getContext('2d');
+    let fs = 24, rot = 0, lin = [];
+    for (; fs >= 19; fs--) {
+      m.font = 'bold ' + fs + FL; rot = m.measureText('PADRÃO VISUAL:').width + 14; m.font = fs + FL;
+      lin = []; let row = [], x = rot;
+      itens.forEach(it => { const w = 40 + m.measureText(it[0]).width + 20; if (x + w > interno && row.length) { lin.push(row); row = []; x = 0; } row.push([it, x]); x += w; });
+      lin.push(row); if (lin.length === 1) break;
+    }
+    fs = Math.max(fs, 19);
+    const fa = fs - 2; m.font = 'italic ' + fa + FL; const aviso = quebrarTexto(m, AVISO_LAUDO, interno);
+    m.font = fa + FL; const anat = quebrarTexto(m, ANAT, interno - 140);
+    const LH = fs + 12, LA = fa + 10;
+    const HLEG = 12 + lin.length * LH + anat.length * LA + aviso.length * LA + 10;
+    const H = HTIT + lados.reduce((t, l) => t + HT + hDes(l), 0) + HLEG + 4;
     const c = document.createElement('canvas'); c.width = W; c.height = H;
-    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-    let y = 0;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.textBaseline = 'alphabetic';
+    // título (dentro da imagem: bilateral ou do lado)
+    g.fillStyle = '#0f172a'; g.font = 'bold 38' + FL; g.textAlign = 'center'; g.fillText(tituloCv(estado.lado), W / 2, 42); g.textAlign = 'left';
+    g.fillStyle = '#1e293b'; g.fillRect(0, HTIT - 6, W, 2);
+    let y = HTIT;
     lados.forEach(l => {
-      g.fillStyle = '#0f172a'; g.font = 'bold 30px Helvetica, Arial, sans-serif'; g.textBaseline = 'alphabetic';
-      g.fillText(l === 'MID' ? 'MEMBRO INFERIOR DIREITO (MID)' : 'MEMBRO INFERIOR ESQUERDO (MIE)', 6, y + 36);
-      g.fillStyle = '#1e293b'; g.fillRect(0, y + 44, W, 2);
-      y += HT;
+      if (HT) { g.fillStyle = '#0f172a'; g.font = 'bold 25' + FL; g.fillText(l === 'MID' ? 'MEMBRO INFERIOR DIREITO (MID)' : 'MEMBRO INFERIOR ESQUERDO (MIE)', 6, y + 27); y += HT; }
       if (ims[l]) g.drawImage(ims[l], 0, y, W, hDes(l));
       y += hDes(l);
     });
-    // legenda (mesmo padrão do PDF)
-    g.strokeStyle = '#cbd5e1'; g.lineWidth = 2; g.strokeRect(1, y + 8, W - 2, HLEG - 10);
-    const itens = [['Competente', 'linha', '#2563eb', 3], ['Incompetente', 'linha', '#dc2626', 6], ['Ausente', 'linha', '#475569', 3], ['Trombose', 'linha', '#000', 6],
-      ['Hipoplásica', 'linha', '#cbd5e1', 3], ['Perfurante inc.', 'ponto', '#dc2626'], ['Varizes', 'onda', '#7c3aed', 2]];
-    let x = 16; const yl = y + 42;
-    g.font = 'bold 24px Helvetica, Arial, sans-serif'; g.fillStyle = '#0f172a'; g.fillText('PADRÃO VISUAL:', x, yl); x += g.measureText('PADRÃO VISUAL:').width + 16;
-    g.font = '24px Helvetica, Arial, sans-serif';
-    itens.forEach(([tx, tipo, cor, lw]) => {
-      g.strokeStyle = cor; g.fillStyle = cor;
-      if (tipo === 'linha') { g.lineWidth = lw; g.beginPath(); g.moveTo(x, yl - 8); g.lineTo(x + 34, yl - 8); g.stroke(); }
-      else if (tipo === 'ponto') { g.beginPath(); g.arc(x + 17, yl - 8, 6, 0, 2 * Math.PI); g.fill(); }
-      else { g.lineWidth = lw; g.beginPath(); for (let i = 0; i <= 12; i++) { const px = x + 34 * i / 12, py = yl - 8 + Math.sin(i * Math.PI / 3) * 4; if (i) g.lineTo(px, py); else g.moveTo(px, py); } g.stroke(); }
-      x += 42; g.fillStyle = '#0f172a'; g.fillText(tx, x, yl); x += g.measureText(tx).width + 22;
+    // caixa: padrão visual + anatomia + ressalva
+    g.strokeStyle = '#cbd5e1'; g.lineWidth = 2; g.strokeRect(1, y + 2, W - 2, HLEG);
+    let yl = y + 4 + LH - 4;
+    lin.forEach((row, ri) => {
+      if (!ri) { g.font = 'bold ' + fs + FL; g.fillStyle = '#0f172a'; g.fillText('PADRÃO VISUAL:', PAD + 10, yl); }
+      g.font = fs + FL;
+      row.forEach(([[tx, tipo, cor, lw], x0]) => {
+        const x = PAD + 10 + x0, ym = yl - Math.round(fs * 0.33); g.strokeStyle = cor; g.fillStyle = cor;
+        if (tipo === 'linha') { g.lineWidth = lw; g.beginPath(); g.moveTo(x, ym); g.lineTo(x + 32, ym); g.stroke(); }
+        else if (tipo === 'ponto') { g.beginPath(); g.arc(x + 16, ym, 6, 0, 2 * Math.PI); g.fill(); }
+        else { g.lineWidth = lw; g.beginPath(); for (let i = 0; i <= 12; i++) { const px = x + 32 * i / 12, py = ym + Math.sin(i * Math.PI / 3) * 4; if (i) g.lineTo(px, py); else g.moveTo(px, py); } g.stroke(); }
+        g.fillStyle = '#0f172a'; g.fillText(tx, x + 40, yl);
+      });
+      yl += LH;
     });
-    g.font = 'bold 22px Helvetica, Arial, sans-serif'; g.fillText('ANATOMIA:', 16, y + 78);
-    g.font = '22px Helvetica, Arial, sans-serif';
-    g.fillText('JSF – junção safeno-femoral  ·  JSP – junção safeno-poplítea  ·  VSM – veia safena magna  ·  VSP – veia safena parva', 16 + g.measureText('ANATOMIA: ').width + 8, y + 78);
+    yl -= 4;
+    anat.forEach((t, k) => { if (!k) { g.font = 'bold ' + fa + FL; g.fillStyle = '#0f172a'; g.fillText('ANATOMIA:', PAD + 10, yl); } g.font = fa + FL; g.fillStyle = '#334155'; g.fillText(t, PAD + 150, yl); yl += LA; });
+    g.font = 'italic ' + fa + FL; g.fillStyle = '#334155';
+    aviso.forEach(t => { g.fillText(t, PAD + 10, yl); yl += LA; });
     const larg = Math.min(CV_LARG_MAX, Math.floor(CV_ALT_MAX * W / H));
-    return { uri: c.toDataURL('image/jpeg', 0.85), larg };
+    return { uri: c.toDataURL('image/jpeg', 0.88), larg, W, H };
   }
-  const tituloCv = lado => lado === 'MID' ? CV_TITULO + ' DO MEMBRO INFERIOR DIREITO' : lado === 'MIE' ? CV_TITULO + ' DO MEMBRO INFERIOR ESQUERDO' : CV_TITULO + ' DOS MEMBROS INFERIORES';
-  const AVISO_LAUDO = 'Representação esquemática, sem escala; localizações, extensões e calibres aproximados. O laudo descritivo prevalece em caso de divergência.';
   // remove a cartografia inserida antes (título + imagem + aviso + quebra de página anterior)
   function removerCartografiaAntiga(ed, w) {
     const root = ed.model.document.getRoot();
     const filhos = [...root.getChildren()];
     const txt = el => el.is('element') ? [...el.getChildren()].map(n => n.data || '').join('') : '';
-    const i = filhos.findIndex(el => el.is('element', 'paragraph') && txt(el).trim().startsWith(CV_TITULO));
+    const altCv = n => n && n.is && (n.is('element', 'imageBlock') || n.is('element', 'imageInline')) && String(n.getAttribute('alt') || '').startsWith(CV_TITULO);
+    const ehImgCv = el => altCv(el) || (el.is('element') && [...el.getChildren()].some(altCv)); // v1.5: só a imagem, título no alt
+    const i = filhos.findIndex(el => (el.is('element', 'paragraph') && txt(el).trim().startsWith(CV_TITULO)) || ehImgCv(el));
     if (i < 0) return false;
     let ini = i, fim = i;
     if (ini > 0 && filhos[ini - 1].is('element', 'pageBreak')) ini--;
     while (fim + 1 < filhos.length) {
       const nx = filhos[fim + 1];
       const temImg = nx.is('element', 'imageBlock') || (nx.is('element') && [...nx.getChildren()].some(n => n.is('element', 'imageInline')));
-      if (temImg || (nx.is('element', 'paragraph') && (txt(nx).startsWith('Representação esquemática') || !txt(nx).trim()))) fim++; else break;
+      if ((temImg && !ehImgCv(filhos[i]) && fim === i) || (nx.is('element', 'paragraph') && (txt(nx).startsWith('Representação esquemática') || (!txt(nx).trim() && !temImg && fim + 2 >= filhos.length)))) fim++; else break;
     }
     w.remove(w.createRange(w.createPositionBefore(filhos[ini]), w.createPositionAfter(filhos[fim])));
     return true;
@@ -450,18 +480,14 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
     ed.model.change(w => {
       trocou = removerCartografiaAntiga(ed, w);
       if (ed.model.schema.isRegistered('pageBreak')) w.append(w.createElement('pageBreak'), root);
-      const pt = w.createElement('paragraph', { alignment: 'center' });
-      w.append(pt, root); w.insertText(tituloCv(estado.lado), { bold: true }, pt, 0);
       alvo = w.createElement('paragraph', { alignment: 'center' }); w.append(alvo, root);
-      const pa = w.createElement('paragraph'); w.append(pa, root);
-      w.insertText(AVISO_LAUDO, { italic: true }, pa, 0);
       w.setSelection(alvo, 0);
     });
     ed.execute('insertImage', { source: uri });
     let img = null;
     for (const v of ed.model.createRangeIn(root).getWalker()) if (v.item.is && (v.item.is('element', 'imageInline') || v.item.is('element', 'imageBlock'))) img = v.item; // a última imagem = a recém-inserida
     if (!img) throw new Error('o editor não aceitou a imagem');
-    ed.model.change(w => w.setSelection(img, 'on'));
+    ed.model.change(w => { try { w.setAttribute('alt', tituloCv(estado.lado), img); } catch (e) { /* sem alt */ } w.setSelection(img, 'on'); });
     try { ed.execute('resizeImage', { width: larg + 'px' }); } catch (e) { ed.model.change(w => w.setAttribute('width', larg + 'px', img)); }
     const html = ed.getData();
     if (/width:\s*\d+%/.test(html.slice(html.lastIndexOf('<img')))) throw new Error('largura em % (o PDF do PACS falharia)');
