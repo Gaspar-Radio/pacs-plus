@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.7.0
+// @version      1.8.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -19,6 +19,7 @@
 // @connect      outlook.office.com
 // @connect      calendar.google.com
 // @connect      docs.google.com
+// @connect      supabase.co
 // @connect      googleusercontent.com
 // @connect      *
 // @run-at       document-start
@@ -1050,17 +1051,22 @@ Regras obrigatórias:
   const rowName = row => { const s = row.querySelector('span[title]'); return s ? s.getAttribute('title').trim() : ''; };
   const ROWS = '#pane-side [role="listitem"], #pane-side [role="row"]';
 
-  function clickRow(row) {
-    const o = { bubbles: true, cancelable: true, view: window };
-    row.dispatchEvent(new MouseEvent('mousedown', o));
-    row.dispatchEvent(new MouseEvent('mouseup', o));
-    row.dispatchEvent(new MouseEvent('click', o));
+  // o WhatsApp escuta o clique num elemento interno da linha: o clique é disparado no próprio nome
+  // (o mais interno possível), e sobe por todos os elementos até a linha
+  function clickRow(target) {
+    const r = target.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, buttons: 1,
+      clientX: r.left + Math.min(10, r.width / 2), clientY: r.top + r.height / 2 };
+    target.dispatchEvent(new PointerEvent('pointerdown', { ...o, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    target.dispatchEvent(new MouseEvent('mousedown', o));
+    target.dispatchEvent(new PointerEvent('pointerup', { ...o, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    target.dispatchEvent(new MouseEvent('mouseup', { ...o, buttons: 0 }));
+    target.dispatchEvent(new MouseEvent('click', { ...o, buttons: 0 }));
   }
 
   function findChatRow(name) {
     for (const s of document.querySelectorAll('#pane-side span[title]')) {
-      if (s.getAttribute('title').trim() === name)
-        return s.closest('[role="listitem"],[role="row"],[role="gridcell"]') || s;
+      if (s.getAttribute('title').trim() === name) return s;
     }
     return null;
   }
@@ -1489,6 +1495,9 @@ Regras obrigatórias:
       sec('Privacidade'),
       chk('Recuperar mensagens apagadas (só na memória da aba)', () => ui.antiDelete !== false, v => { ui.antiDelete = v; saveUi(); }),
       chk('Desfocar conversas e mensagens (passe o mouse para ver) · Alt+P', () => ui.privacy, v => { ui.privacy = v; saveUi(); renderUiCss(); }),
+
+      sec('Sincronizar os 3 computadores (Supabase)'),
+      syncSettingsBox(),
 
       sec('Base de referência (protocolos, respostas padrão)'),
       kbSettingsBox(),
@@ -2121,5 +2130,163 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   }
   setTimeout(() => { try { loadKb(); } catch (_) {} }, 4000);
   setInterval(() => { try { loadKb(); } catch (_) {} }, 30 * 60e3);
+
+
+  // =====================================================================
+  // 14. SINCRONIZAÇÃO ENTRE COMPUTADORES (Supabase, só o usuário logado)  (v1.8)
+  //   Tabela public.wa_suite_config (RLS: auth.uid() = user_id). Credenciais só no navegador.
+  // =====================================================================
+  const SYNC_KEYS = ['gemini_key', 'cal_sources', 'kb_sources', 'reminders', 'ui_cfg', 'kb_off', 'use_ctx', 'hide_fab'];
+  const LOCAL_LAYOUT = ['layoutOn', 'sideW', 'sideZoom', 'headZoom', 'headMain', 'railZoom', 'sideHidden'];
+  const getSb = () => GM_getValue('sb_conn', null);
+  const setSb = v => GM_setValue('sb_conn', v);
+  let syncState = { busy: false, last: 0, err: '' };
+
+  function sbReq(method, path, body, token) {
+    const sb = getSb();
+    return new Promise(res => GM_xmlhttpRequest({
+      method, url: sb.url.replace(/\/+$/, '') + path, timeout: 20000,
+      headers: Object.assign({ apikey: sb.key, 'Content-Type': 'application/json' },
+        token ? { Authorization: 'Bearer ' + token } : {},
+        method === 'POST' && path.startsWith('/rest/') ? { Prefer: 'resolution=merge-duplicates,return=minimal' } : {}),
+      data: body ? JSON.stringify(body) : undefined,
+      onload: r => { let j = null; try { j = r.responseText ? JSON.parse(r.responseText) : null; } catch (_) {} res({ status: r.status, json: j }); },
+      onerror: () => res({ status: 0, json: null }), ontimeout: () => res({ status: 0, json: null }),
+    }));
+  }
+
+  async function sbToken() {
+    const sb = getSb();
+    if (!sb || !sb.refresh) throw new Error('não conectado');
+    if (sb.access && sb.exp - Date.now() > 60e3) return sb.access;
+    const r = await sbReq('POST', '/auth/v1/token?grant_type=refresh_token', { refresh_token: sb.refresh });
+    if (r.status !== 200 || !r.json || !r.json.access_token) throw new Error('sessão expirada — conecte de novo (' + r.status + ')');
+    setSb(Object.assign({}, getSb(), { access: r.json.access_token, refresh: r.json.refresh_token, exp: Date.now() + r.json.expires_in * 1000, uid: r.json.user && r.json.user.id }));
+    return r.json.access_token;
+  }
+
+  async function sbLogin(url, key, email, password) {
+    setSb({ url, key, email });
+    const r = await sbReq('POST', '/auth/v1/token?grant_type=password', { email, password });
+    if (r.status !== 200 || !r.json || !r.json.access_token) {
+      setSb(null);
+      throw new Error((r.json && (r.json.error_description || r.json.msg || r.json.message)) || ('falha ' + r.status));
+    }
+    setSb({ url, key, email, access: r.json.access_token, refresh: r.json.refresh_token, exp: Date.now() + r.json.expires_in * 1000, uid: r.json.user.id });
+    GM_setValue('sync_meta', {}); // primeiro contato: o que já está na nuvem prevalece; o que só existe aqui sobe
+  }
+
+  const snapOf = k => {
+    let v = GM_getValue(k, null);
+    if (k === 'ui_cfg' && v && GM_getValue('layout_local', false)) { v = Object.assign({}, v); LOCAL_LAYOUT.forEach(x => delete v[x]); }
+    return JSON.stringify(v);
+  };
+
+  function markLocalChanges() {
+    if (!getSb()) return;
+    const meta = GM_getValue('sync_meta', {}), snap = GM_getValue('sync_snap', {});
+    let ch = false;
+    for (const k of SYNC_KEYS) {
+      const s = snapOf(k);
+      if (snap[k] === undefined) { snap[k] = s; ch = true; continue; }       // linha de base, sem data (perde para a nuvem)
+      if (snap[k] !== s) { snap[k] = s; meta[k] = Date.now(); ch = true; }
+    }
+    if (ch) { GM_setValue('sync_snap', snap); GM_setValue('sync_meta', meta); }
+  }
+
+  function applyPulled(k, v) {
+    if (k === 'ui_cfg') {
+      const cur = GM_getValue('ui_cfg', {}) || {};
+      const merged = Object.assign({}, v || {});
+      if (GM_getValue('layout_local', false)) LOCAL_LAYOUT.forEach(x => { if (x in cur) merged[x] = cur[x]; });
+      GM_setValue('ui_cfg', merged);
+      ui = Object.assign({}, UI_DEF, merged);
+      try { renderUiCss(); applyRail(); renderPinSec(true); } catch (_) {}
+    } else GM_setValue(k, v);
+    if (k === 'cal_sources') calCache.at = 0;
+    if (k === 'kb_sources' || k === 'kb_off') { kbCache.at = 0; loadKb(true); }
+  }
+
+  async function syncNow(silent) {
+    if (!getSb() || syncState.busy) return;
+    syncState.busy = true;
+    try {
+      markLocalChanges();
+      const tok = await sbToken();
+      const r = await sbReq('GET', '/rest/v1/wa_suite_config?select=data,updated_at', null, tok);
+      if (r.status !== 200) throw new Error('leitura ' + r.status);
+      const remote = (r.json && r.json[0] && r.json[0].data) || {};
+      const meta = GM_getValue('sync_meta', {}), snap = GM_getValue('sync_snap', {});
+      const out = Object.assign({}, remote);
+      let push = false;
+      for (const k of SYNC_KEYS) {
+        const rv = remote[k], lt = meta[k] || 0;
+        if (rv && rv.t > lt) {                       // nuvem mais nova → aplica aqui
+          applyPulled(k, rv.v);
+          meta[k] = rv.t; snap[k] = snapOf(k);
+        } else if (!rv || lt > rv.t) {               // local mais novo (ou só existe aqui) → sobe
+          const v = GM_getValue(k, null);
+          if (v === null && !rv) continue;
+          let val = v;
+          if (k === 'ui_cfg' && v && GM_getValue('layout_local', false) && rv) {
+            val = Object.assign({}, v); LOCAL_LAYOUT.forEach(x => { if (rv.v && x in rv.v) val[x] = rv.v[x]; else delete val[x]; });
+          }
+          const t = lt || Date.now();
+          out[k] = { v: val, t }; meta[k] = t; push = true;
+        }
+      }
+      GM_setValue('sync_meta', meta); GM_setValue('sync_snap', snap);
+      if (push) {
+        const sb = getSb();
+        const w = await sbReq('POST', '/rest/v1/wa_suite_config?on_conflict=user_id', { user_id: sb.uid, data: out, updated_at: new Date().toISOString() }, tok);
+        if (w.status >= 300) throw new Error('gravação ' + w.status);
+      }
+      syncState.last = Date.now(); syncState.err = '';
+      if (!silent) toast('☁️ Sincronizado.', 1500);
+    } catch (e) {
+      syncState.err = e.message || String(e);
+      if (!silent) toast('☁️ Sincronização: ' + syncState.err, 5000);
+    } finally { syncState.busy = false; }
+  }
+
+  function syncSettingsBox() {
+    const box = el('div', {});
+    const draw = () => {
+      box.textContent = '';
+      const sb = getSb();
+      if (sb && sb.refresh) {
+        box.append(el('div', { cls: 'gz-note', text: `Conectado como ${sb.email} · ${syncState.last ? 'última sincronização ' + hm(new Date(syncState.last)) : 'aguardando primeira sincronização'}${syncState.err ? ' · ⚠️ ' + syncState.err : ''}` }));
+        box.append(chkInline('Manter largura/zoom/barra só neste computador (o resto sincroniza)', () => GM_getValue('layout_local', false), v => { GM_setValue('layout_local', v); }));
+        box.append(el('div', { cls: 'gz-row' },
+          el('button', { cls: 'gz-b pri', text: '☁️ Sincronizar agora', onclick: async () => { await syncNow(false); draw(); } }),
+          el('button', { cls: 'gz-b', text: 'Desconectar', onclick: () => { setSb(null); draw(); } })));
+        box.append(el('div', { cls: 'gz-note', text: 'Sincroniza: chave Gemini, calendários, base de referência, lembretes, fixadas e ajustes. Não sincroniza: mensagens apagadas e transcrições (ficam só na aba).' }));
+        return;
+      }
+      const url = el('input', { cls: 'gz-in', placeholder: 'Endereço do projeto (https://xxxx.supabase.co)' });
+      const key = el('input', { cls: 'gz-in', placeholder: 'Chave pública (anon / publishable) — a mesma da Agenda' });
+      const em = el('input', { cls: 'gz-in', placeholder: 'E-mail do login do Supabase', type: 'email' });
+      const pw = el('input', { cls: 'gz-in', placeholder: 'Senha (não fica salva)', type: 'password' });
+      const msg = el('div', { cls: 'gz-note' });
+      box.append(el('div', { style: 'display:grid;gap:6px' }, url, key, em, pw,
+        el('button', { cls: 'gz-b pri', text: 'Conectar e sincronizar', onclick: async () => {
+          if (!/^https:\/\/[\w-]+\.supabase\.co\/?$/i.test(url.value.trim())) return (msg.textContent = 'Endereço inválido (formato https://xxxx.supabase.co).');
+          msg.textContent = 'Conectando…';
+          try {
+            await sbLogin(url.value.trim(), key.value.trim(), em.value.trim(), pw.value);
+            pw.value = '';
+            await syncNow(false); draw();
+          } catch (e) { msg.textContent = '⚠️ ' + e.message; }
+        } }), msg,
+        el('div', { cls: 'gz-note', text: 'Uma vez em cada computador. A tabela só aceita o seu usuário logado; a senha não é guardada (só um token de sessão renovável).' })));
+    };
+    draw();
+    return box;
+  }
+
+  GM_registerMenuCommand('Sincronizar agora (Supabase)', () => syncNow(false));
+  setTimeout(() => syncNow(true), 3000);
+  setInterval(() => { if (getSb()) syncNow(true); }, 60e3);
+  setInterval(() => { try { markLocalChanges(); } catch (_) {} }, 5000);
 
 })();
