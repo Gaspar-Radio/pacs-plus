@@ -415,7 +415,8 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
   }
   async function comporImagem(estado, imgs) {
     const lados = estado.lado === 'bilateral' ? ['MID', 'MIE'] : [estado.lado];
-    const W = 1480, PAD = 16, HTIT = 58, HT = lados.length > 1 ? 36 : 0;
+    const k = lados.length > 1 ? 1.2 : 1; // bilateral sai menor na página → letras 20% maiores para continuarem legíveis
+    const W = 1480, PAD = 16, HTIT = Math.round(58 * k), HT = lados.length > 1 ? Math.round(36 * k) : 0;
     const ims = {}; for (const l of lados) if (imgs[l]) ims[l] = await carregaImg(imgs[l]);
     if (lados.length === 1 && ims[lados[0]]) { try { const ap = aproximarVistas(ims[lados[0]]); if (ap) ims[lados[0]] = ap; } catch (e) { /* usa o original */ } }
     const hDes = l => ims[l] ? Math.round(W * ims[l].height / ims[l].width) : 0;
@@ -425,7 +426,7 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
     const FL = 'px Helvetica, Arial, sans-serif', interno = W - 2 * PAD - 20;
     // legenda: tenta caber numa linha diminuindo a letra (24 → 19); se não couber, quebra em linhas
     const m = document.createElement('canvas').getContext('2d');
-    let fs = 24, rot = 0, lin = [];
+    let fs = Math.round(24 * k), rot = 0, lin = [];
     for (; fs >= 19; fs--) {
       m.font = 'bold ' + fs + FL; rot = m.measureText('PADRÃO VISUAL:').width + 14; m.font = fs + FL;
       lin = []; let row = [], x = rot;
@@ -434,18 +435,18 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
     }
     fs = Math.max(fs, 19);
     const fa = fs - 2; m.font = 'italic ' + fa + FL; const aviso = quebrarTexto(m, AVISO_LAUDO, interno);
-    m.font = fa + FL; const anat = quebrarTexto(m, ANAT, interno - 140);
+    m.font = 'bold ' + fa + FL; const rotA = Math.round(m.measureText('ANATOMIA:').width + 14); m.font = fa + FL; const anat = quebrarTexto(m, ANAT, interno - rotA);
     const LH = fs + 12, LA = fa + 10;
     const HLEG = 12 + lin.length * LH + anat.length * LA + aviso.length * LA + 10;
     const H = HTIT + lados.reduce((t, l) => t + HT + hDes(l), 0) + HLEG + 4;
     const c = document.createElement('canvas'); c.width = W; c.height = H;
     const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.textBaseline = 'alphabetic';
     // título (dentro da imagem: bilateral ou do lado)
-    g.fillStyle = '#0f172a'; g.font = 'bold 38' + FL; g.textAlign = 'center'; g.fillText(tituloCv(estado.lado), W / 2, 42); g.textAlign = 'left';
+    g.fillStyle = '#0f172a'; g.font = 'bold ' + Math.round(38 * k) + FL; g.textAlign = 'center'; g.fillText(tituloCv(estado.lado), W / 2, Math.round(42 * k)); g.textAlign = 'left';
     g.fillStyle = '#1e293b'; g.fillRect(0, HTIT - 6, W, 2);
     let y = HTIT;
     lados.forEach(l => {
-      if (HT) { g.fillStyle = '#0f172a'; g.font = 'bold 25' + FL; g.fillText(l === 'MID' ? 'MEMBRO INFERIOR DIREITO (MID)' : 'MEMBRO INFERIOR ESQUERDO (MIE)', 6, y + 27); y += HT; }
+      if (HT) { g.fillStyle = '#0f172a'; g.font = 'bold ' + Math.round(25 * k) + FL; g.fillText(l === 'MID' ? 'MEMBRO INFERIOR DIREITO (MID)' : 'MEMBRO INFERIOR ESQUERDO (MIE)', 6, y + Math.round(27 * k)); y += HT; }
       if (ims[l]) g.drawImage(ims[l], 0, y, W, hDes(l));
       y += hDes(l);
     });
@@ -465,7 +466,7 @@ Sistema profundo não entra na cartografia (fica no laudo descritivo): ignore-o.
       yl += LH;
     });
     yl -= 4;
-    anat.forEach((t, k) => { if (!k) { g.font = 'bold ' + fa + FL; g.fillStyle = '#0f172a'; g.fillText('ANATOMIA:', PAD + 10, yl); } g.font = fa + FL; g.fillStyle = '#334155'; g.fillText(t, PAD + 150, yl); yl += LA; });
+    anat.forEach((t, ia) => { if (!ia) { g.font = 'bold ' + fa + FL; g.fillStyle = '#0f172a'; g.fillText('ANATOMIA:', PAD + 10, yl); } g.font = fa + FL; g.fillStyle = '#334155'; g.fillText(t, PAD + 10 + rotA, yl); yl += LA; });
     g.font = 'italic ' + fa + FL; g.fillStyle = '#334155';
     aviso.forEach(t => { g.fillText(t, PAD + 10, yl); yl += LA; });
     const larg = Math.min(CV_LARG_MAX, Math.floor(CV_ALT_MAX * W / H));
