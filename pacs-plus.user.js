@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.0
+// @version      1.39.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -249,29 +249,35 @@ html { --pp-g-bg:#1b1d21; --pp-g-bg2:#23262b; --pp-g-bg3:#2c3036; --pp-g-line:#3
 html[data-pp-papel="suave"] .ck.ck-content.ck-editor__editable { background: #e9e8e4 !important; color: #16181b !important; border-color: #4a5058 !important; box-shadow: 0 0 0 1px #000, 0 6px 24px rgba(0,0,0,.5) !important; }
 html[data-pp-papel="escuro"] .ck.ck-content.ck-editor__editable { filter: invert(.9) hue-rotate(180deg); background: #fff !important; border-color: transparent !important; box-shadow: 0 0 0 1px #555 !important; }`,
         barraUnica: `
-#pp-dock { position: fixed; top: 0; left: 204px; height: 36px; z-index: 150; display: flex; align-items: center; gap: 6px; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; pointer-events: none; }
+#pp-dock { position: fixed; top: 0; left: 56px; max-width: calc(100vw - 210px); height: 36px; z-index: 150; display: flex; align-items: center; gap: 4px; overflow: hidden; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; pointer-events: none; }
+#pp-dock > * { flex-shrink: 0; }
+header.v-app-bar .v-toolbar__content > img.mx-2 { visibility: hidden !important; }
 html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-dock > * { pointer-events: auto; }
 #pp-dock .ppd-sep { width: 1px; height: 18px; background: #4a5058; margin: 0 2px; }
 #pp-dock > #btn-agenda-flutuante, #pp-dock > #pp-btn, #pp-dock > #ge-btn, #pp-dock > #hamctc-top {
   position: static !important; inset: auto !important; transform: none !important; margin: 0 !important; opacity: 1 !important;
-  height: 26px !important; padding: 0 10px !important; border-radius: 6px !important; box-shadow: none !important;
-  font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif !important; line-height: 24px !important; display: inline-flex !important; align-items: center; gap: 5px;
+  height: 28px !important; width: 30px !important; min-width: 30px !important; padding: 0 !important; border-radius: 6px !important; box-shadow: none !important;
+  font: 600 0px -apple-system,"Segoe UI",Roboto,sans-serif !important; line-height: 26px !important; display: inline-flex !important; align-items: center; justify-content: center; gap: 0;
   background: #2c3036 !important; color: #e3e6ea !important; border: 1px solid #3a3f46 !important; border-bottom-width: 2px !important; cursor: pointer; white-space: nowrap; }
+#pp-dock > #btn-agenda-flutuante::before, #pp-dock > #pp-btn::before, #pp-dock > #ge-btn::before, #pp-dock > #hamctc-top::before { content: attr(data-pp-ico); font-size: 15px; line-height: 1; }
+#pp-dock > #btn-agenda-flutuante > *, #pp-dock > #pp-btn > *, #pp-dock > #ge-btn > *, #pp-dock > #hamctc-top > * { display: none !important; }
 #pp-dock > #btn-agenda-flutuante { border-bottom-color: #3b82f6 !important; }
 #pp-dock > #pp-btn { border-bottom-color: #14b8a6 !important; }
 #pp-dock > #hamctc-top { border-bottom-color: #7cc4c9 !important; }
 #pp-dock > #ge-btn { border-bottom-color: #8b5cf6 !important; }
 #pp-dock > button:hover { background: #363b42 !important; }
-#pp-dock .ppd-chip { height: 22px; padding: 0 8px; border-radius: 11px; display: inline-flex; align-items: center; gap: 4px; background: #23262b; border: 1px solid #3a3f46; color: #a9b0b8; font-weight: 600; font-size: 11px; cursor: default; white-space: nowrap; }
+#pp-dock .ppd-chip { height: 22px; padding: 0 7px; border-radius: 11px; display: inline-flex; align-items: center; gap: 4px; background: #23262b; border: 1px solid #3a3f46; color: #a9b0b8; font-weight: 600; font-size: 11px; cursor: default; white-space: nowrap; }
 #pp-dock .ppd-chip[hidden] { display: none; }
 #pp-dock .ppd-chip.ok { color: #34d399; } #pp-dock .ppd-chip.warn { color: #fbbf24; } #pp-dock .ppd-chip.err { color: #f87171; border-color: #7f1d1d; }
 #pp-dock .ppd-chip.urg { color: #fff; background: #b91c1c; border-color: #ef4444; cursor: pointer; }
 #pp-dock .ppd-chip.urg.azul { background: #1d4ed8; border-color: #3b82f6; } #pp-dock .ppd-chip.urg.laranja { background: #c2410c; border-color: #f97316; }
-#pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; }
+#pp-dock .ppd-papel { cursor: pointer; color: #e3e6ea; font-size: 14px; padding: 0; min-width: 24px; justify-content: center; }
+#pp-dock #ppd-nuvem.ok { padding: 0 5px; font-size: 13px; }
+#pp-dock .ppd-chip.urg:not([hidden]) { max-width: 230px; overflow: hidden; text-overflow: ellipsis; display: inline-block; line-height: 20px; }
 #pp-dock .ppd-oc { display: inline-flex; align-items: center; gap: 3px; }
 #pp-dock .ppd-oc[hidden] { display: none; }
-#pp-dock .ppd-oc .ppd-chip { cursor: pointer; padding: 0 7px; }
+#pp-dock .ppd-oc .ppd-chip { cursor: pointer; padding: 0 5px; font-size: 10.5px; }
 #pp-dock .ppd-oc .ppd-chip.on { background: #7f1d1d; border-color: #ef4444; color: #fecaca; text-decoration: line-through; }
 #pp-dock .ppd-oc .ppd-n { color: #fbbf24; font-size: 11px; font-weight: 700; min-width: 0; }
 .v-data-table tbody > tr[data-pp-oc] { display: none !important; }`,
@@ -2401,7 +2407,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // o botão pelo id). No visualizador e com o ajuste desligado, devolve tudo.
     // =====================================================================
     const DOCK_IDS = ['btn-agenda-flutuante', 'pp-btn', 'ge-btn', 'hamctc-top'];
-    const PAPEIS = [['normal', '◐ Papel branco'], ['suave', '◐ Papel suave'], ['escuro', '◐ Papel escuro']];
+    const PAPEIS = [['normal', '○', 'Papel branco'], ['suave', '◐', 'Papel suave'], ['escuro', '●', 'Papel escuro']];
     function aplicarPapel() {
         const v = on('temaGrafite') ? (cfg.papel || 'suave') : 'normal';
         if (document.documentElement.getAttribute('data-pp-papel') !== v) document.documentElement.setAttribute('data-pp-papel', v);
@@ -2436,6 +2442,27 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         DOCK_IDS.forEach(id => { const b = document.getElementById(id); if (b && b.parentElement !== d) d.insertBefore(b, sep); });
         // ordem fixa: Agenda, Plus, Anamnese
         DOCK_IDS.forEach(id => { const b = document.getElementById(id); if (b && b.parentElement === d) d.insertBefore(b, sep); });
+        // v1.39.1 — botões quadrados: só o emoji (o nome vai para a dica)
+        DOCK_IDS.forEach(id => {
+            const b = document.getElementById(id); if (!b || b.parentElement !== d) return;
+            const t = (b.textContent || '').trim(); if (!t || b.dataset.ppTxt === t) return;
+            b.dataset.ppTxt = t;
+            const m = t.match(/^(\S+)\s+(.+)$/);
+            b.dataset.ppIco = m ? m[1] : t;
+            const nome = m ? m[2] : t;
+            if (!b.title) b.title = nome; else if (!b.title.startsWith(nome)) b.title = nome + ' — ' + b.title;
+        });
+        // v1.39.1 — logo LADI escondido: a barra começa logo depois do ☰ e para antes dos ícones da direita
+        const tbar = document.querySelector('header.v-app-bar .v-toolbar__content');
+        if (tbar) {
+            const nav = tbar.querySelector('.v-app-bar__nav-icon');
+            const L = nav && nav.getBoundingClientRect().width ? Math.round(nav.getBoundingClientRect().right) + 4 : 56;
+            const dir = [...tbar.children].filter(e => e !== nav && e.tagName !== 'IMG').map(e => e.getBoundingClientRect()).filter(r => r.width && r.left > window.innerWidth * 0.5);
+            const R = dir.length ? Math.min(...dir.map(r => r.left)) : window.innerWidth - 8;
+            const ls = L + 'px', mw = Math.max(200, Math.round(R - L - 8)) + 'px';
+            if (d.style.left !== ls) d.style.left = ls;
+            if (d.style.maxWidth !== mw) d.style.maxWidth = mw;
+        }
         // menu do Guia abre embaixo do botão (que agora fica na barra)
         const gb = document.getElementById('ge-btn'), gm = document.getElementById('ge-menu');
         if (gb && gm && gb.parentElement === d) { const l = Math.round(gb.getBoundingClientRect().left) + 'px'; if (gm.style.left !== l) gm.style.left = l; if (gm.style.top !== '40px') gm.style.top = '40px'; }
@@ -2445,20 +2472,23 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             const t = (ind.textContent || '').replace('Nuvem ', '').trim();
             const c = ind.style.color || '';
             const cls = 'ppd-chip ' + (/34d399|52, 211, 153/.test(c) ? 'ok' : /f87171|248, 113, 113/.test(c) ? 'err' : 'warn');
-            if (nv.textContent !== t) nv.textContent = t;
+            const ok = / ok\b|ok$/.test(cls) || /^ok/i.test(t);
+            const tv = ok ? (t.includes('⚡') ? '⚡' : '☁') : '☁ ' + t; // v1.39.1 — funcionando = só o raio (tempo real) ou a nuvem
+            if (nv.textContent !== tv) nv.textContent = tv;
             if (nv.className !== cls) nv.className = cls;
             if (nv.title !== 'Agenda: ' + ind.title) nv.title = 'Agenda: ' + ind.title;
             nv.hidden = !t;
         } else nv.hidden = true;
         // TC urgente
         const ug = d.querySelector('#ppd-urg');
-        let txt = '', cor = '';
+        let txt = '', cor = '', urgTit = '';
         if (urgLigado()) {
             const e = urgEstado(), agora = Date.now();
             const gs = (e.dia === chaveDia(new Date()) ? Object.values(e.grupos || {}) : []).filter(g => g.aberto).sort((a, b) => (a.vence || 9e15) - (b.vence || 9e15));
             if (gs.length) {
                 const f = gs[0].vence ? gs[0].vence - agora : null;
-                txt = `🚨 ${gs.length} TC urgente${gs.length > 1 ? 's' : ''} · ${f == null ? 'aguardando confirmação' : f <= 0 ? 'vencido' : faltaTxt(f)}`;
+                txt = `🚨 ${gs.length} TC · ${f == null ? 'aguard.' : f <= 0 ? 'vencido' : faltaTxt(f)}`;
+                urgTit = `${gs.length} TC urgente${gs.length > 1 ? 's' : ''} na sua escala · ${f == null ? 'aguardando confirmação' : f <= 0 ? 'prazo vencido' : 'faltam ' + faltaTxt(f)} — clique para ver os cartões`;
                 cor = f == null ? 'azul' : f <= 30 * 60000 ? '' : f <= 60 * 60000 ? 'laranja' : 'azul';
             }
         }
@@ -2466,6 +2496,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const ucl = 'ppd-chip urg' + (cor ? ' ' + cor : '');
         if (ug.className !== ucl) ug.className = ucl;
         ug.hidden = !txt;
+        if (urgTit && ug.title !== urgTit) ug.title = urgTit;
         // v1.18 — ocultar linhas (só na lista de exames)
         const oc = d.querySelector('#ppd-oc'), o = cfg.ocultarLista || { lib: false, mods: [] };
         oc.hidden = !findListTable();
@@ -2478,8 +2509,10 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         // papel
         const pp = d.querySelector('#ppd-papel');
         pp.hidden = !on('temaGrafite');
-        const rot = (PAPEIS.find(x => x[0] === (cfg.papel || 'suave')) || PAPEIS[1])[1];
-        if (pp.textContent !== rot) pp.textContent = rot;
+        const rot = PAPEIS.find(x => x[0] === (cfg.papel || 'suave')) || PAPEIS[1];
+        if (pp.textContent !== rot[1]) pp.textContent = rot[1];
+        const ptit = `Cor do papel do laudo (só na tela): ${rot[2]} — clique para trocar`;
+        if (pp.title !== ptit) pp.title = ptit;
     }
 
     // Botões de situação que não são usados (Assinar, Analisar, Pré-Laudo): marcados pelo TEXTO
@@ -3764,7 +3797,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     setInterval(() => { try { if (cfg.master) { lpDock(); lpAtualizar(false); } } catch (e) { /* segue */ } }, 20000);
     setTimeout(() => { try { if (cfg.master) { lpDock(); lpAtualizar(false); } } catch (e) { /* segue */ } }, 4000);
     setCss('pp-lp-css', `
-#pp-dock .ppd-laudos { height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 6px; background: #2c3036; color: #e3e6ea; border: 1px solid #3a3f46; border-bottom: 2px solid #f59e0b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
+#pp-dock .ppd-laudos { height: 28px; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 6px; background: #2c3036; color: #e3e6ea; border: 1px solid #3a3f46; border-bottom: 2px solid #f59e0b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
 #pp-dock .ppd-laudos:hover { background: #363b42; } #pp-dock .ppd-laudos b { color: #fff; } #pp-dock .ppd-laudos .lp-s { color: #6b7280; }
 #pp-dock .ppd-laudos i { font-style: normal; margin-left: 3px; padding: 0 4px; border-radius: 8px; background: #dc2626; color: #fff; font-size: 11px; } #pp-dock .ppd-laudos i.h { background: #d97706; }
 #pp-lp { position: fixed; top: 38px; left: 300px; z-index: 2147483000; width: 460px; max-height: calc(100vh - 60px); overflow: auto; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
@@ -4551,7 +4584,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             const ref = document.getElementById('ppd-oc'); if (ref && ref.parentElement === d) d.insertBefore(b, ref); else d.appendChild(b);
         }
         const on = !!cfg.plantao.on, n = oculStat.nPl || 0;
-        const html = !on ? '🏥 Plantão' : plPausa ? '🏥 Plantão ⏸' : `🏥 Plantão ✓${n ? ` <small>−${n}</small>` : ''} <span class="pl-ontem${cfg.plantao.ontem ? ' on' : ''}" title="Incluir ontem (pendências lançadas no dia anterior). Desligado = só hoje, mais leve.">+ontem</span>`;
+        const html = !on ? '🏥' : plPausa ? '🏥⏸' : `🏥✓${n ? ` <small>−${n}</small>` : ''} <span class="pl-ontem${cfg.plantao.ontem ? ' on' : ''}" title="Incluir ontem (pendências lançadas no dia anterior). Desligado = só hoje, mais leve.">+1d</span>`;
         if (b.innerHTML !== html) b.innerHTML = html;
         const cl = 'ppd-plantao' + (on ? (plPausa ? ' pausa' : ' on') : '');
         if (b.className !== cl) b.className = cl;
@@ -4561,12 +4594,12 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     }
     setInterval(() => { try { plantaoTick(); } catch (e) { /* segue */ } }, 1500);
     setCss('pp-plantao-css', `
-#pp-dock .ppd-plantao { height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border-radius: 6px; background: #2c3036; color: #cbd5e1; border: 1px solid #3a3f46; border-bottom: 2px solid #64748b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
+#pp-dock .ppd-plantao { height: 28px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border-radius: 6px; background: #2c3036; color: #cbd5e1; border: 1px solid #3a3f46; border-bottom: 2px solid #64748b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
 #pp-dock .ppd-plantao:hover { background: #363b42; }
 #pp-dock .ppd-plantao.on { color: #fff; background: #065f46; border-color: #10b981; border-bottom-color: #34d399; }
 #pp-dock .ppd-plantao.pausa { color: #fde68a; border-bottom-color: #f59e0b; }
 #pp-dock .ppd-plantao small { color: #a7f3d0; font-size: 11px; }
-#pp-dock .ppd-plantao .pl-ontem { padding: 1px 6px; border-radius: 9px; border: 1px solid #6ee7b7; color: #d1fae5; font-size: 10.5px; }
+#pp-dock .ppd-plantao .pl-ontem { padding: 1px 4px; border-radius: 9px; border: 1px solid #6ee7b7; color: #d1fae5; font-size: 10.5px; }
 #pp-dock .ppd-plantao .pl-ontem.on { background: #fbbf24; border-color: #fbbf24; color: #1f2937; }`);
 
     // v1.32 — zoom só da LISTA de exames (nome, idade, exame, data…), sem mexer no zoom do Chrome. Controle A− % A+ na barra do topo.
@@ -4581,7 +4614,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!d) { if (w) w.remove(); return; }
         if (w) { const v = w.querySelector('.pz-v'), t = (cfg.zoomLista || 100) + '%'; if (v.textContent !== t) v.textContent = t; if (w.parentElement !== d) d.appendChild(w); return; }
         w = document.createElement('span'); w.id = 'ppd-zlista'; w.className = 'pp-zoom-laudo pp-zoom-lista'; w.title = 'Tamanho da letra da lista de exames';
-        w.innerHTML = '<span class="pz-l">Lista</span><button type="button" class="pz-b" data-d="-10" title="Diminuir a lista">A−</button><button type="button" class="pz-v" title="Voltar a 100%"></button><button type="button" class="pz-b" data-d="10" title="Aumentar a lista">A+</button>';
+        w.innerHTML = '<button type="button" class="pz-b" data-d="-10" title="Diminuir a lista">A−</button><button type="button" class="pz-v" title="Voltar a 100%"></button><button type="button" class="pz-b" data-d="10" title="Aumentar a lista">A+</button>';
         w.querySelector('.pz-v').textContent = (cfg.zoomLista || 100) + '%';
         w.addEventListener('click', e => {
             const b = e.target.closest('button'); if (!b) return;
@@ -4591,7 +4624,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             w.querySelector('.pz-v').textContent = cfg.zoomLista + '%'; zoomListaCss();
         });
         d.appendChild(w);
-        setCss('pp-zoom-lista-ui', '#pp-dock .pp-zoom-lista { display: inline-flex; align-items: center; gap: 0; height: 26px; border: 1px solid #4a5058; border-radius: 6px; padding: 0 2px; background: #1f2937; } #pp-dock .pp-zoom-lista .pz-l { color: #94a3b8; font-size: 11px; padding: 0 4px; } #pp-dock .pp-zoom-lista button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 700 12px -apple-system,"Segoe UI",Roboto,sans-serif; padding: 2px 5px; border-radius: 4px; } #pp-dock .pp-zoom-lista button:hover { background: rgba(148,163,184,.2); } #pp-dock .pp-zoom-lista .pz-v { min-width: 38px; color: #93c5fd; }');
+        setCss('pp-zoom-lista-ui', '#pp-dock .pp-zoom-lista { display: inline-flex; align-items: center; gap: 0; height: 26px; border: 1px solid #4a5058; border-radius: 6px; padding: 0 2px; background: #1f2937; } #pp-dock .pp-zoom-lista .pz-l { color: #94a3b8; font-size: 11px; padding: 0 4px; } #pp-dock .pp-zoom-lista button { background: none; border: 0; color: #e2e8f0; cursor: pointer; font: 700 12px -apple-system,"Segoe UI",Roboto,sans-serif; padding: 2px 5px; border-radius: 4px; } #pp-dock .pp-zoom-lista button:hover { background: rgba(148,163,184,.2); } #pp-dock .pp-zoom-lista .pz-v { min-width: 34px; color: #93c5fd; padding: 2px 2px; }');
     }
     setInterval(() => { try { if (cfg.master) zoomListaCtl(); } catch (e) { /* segue */ } }, 1500);
     function zoomLaudoCss() {
