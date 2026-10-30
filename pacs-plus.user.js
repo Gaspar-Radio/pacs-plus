@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.37.2
+// @version      1.38.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2989,6 +2989,31 @@ ${c.texto}`;
     const JEV_LADO = { direito: 'lado direito', esquerdo: 'lado esquerdo', bilateral: 'ambos os lados', nenhum: 'sem achado anormal lateralizado, ou exame sem lado' };
     const ladoDoNome = ex => { const n = norm(ex); const d = /direit|\b(mid|msd)\b/.test(n), e = /esquerd|\b(mie|mse)\b/.test(n); return d && !e ? 'direito' : e && !d ? 'esquerdo' : null; };
     const aLado = l => l === 'direito' ? 'à direita' : 'à esquerda';
+    // v1.38 — checklist em DUPLA: Jev (TypeSafe) + Luna (OpenAI Decisions API, gpt-6-luna) com as MESMAS perguntas.
+    // Probabilidade final = média das que responderam (uma falhou → vale a outra). Luna sem chave → some até recarregar.
+    let lunaSemChave = false;
+    async function checklist(state, questions) {
+        const pedidos = [iaProxy({ acao: 'jev', state, questions })];
+        const usaLuna = !lunaSemChave && !(cfg.rev && cfg.rev.luna === false);
+        if (usaLuna) pedidos.push(iaProxy({ acao: 'decisions', state, questions }));
+        const [rj, rl] = await Promise.allSettled(pedidos);
+        if (rl && rl.status === 'rejected' && /OPENAI_API_KEY|nuvem 400 acao/.test(String(rl.reason && rl.reason.message))) lunaSemChave = true; // sem chave ou proxy antigo: para de tentar até recarregar
+        const dj = rj.status === 'fulfilled' ? rj.value : null, dl = rl && rl.status === 'fulfilled' ? rl.value : null;
+        if (!dj && !dl) throw (rj.reason || new Error('checklist sem resposta'));
+        const aj = (dj && dj.answers) || {}, al = (dl && dl.answers) || {}, answers = {}, det = {};
+        new Set([...Object.keys(aj), ...Object.keys(al)]).forEach(k => {
+            const j = aj[k], l = al[k];
+            const pj = j && typeof j.noul === 'number' ? j.noul : null, pl = l && typeof l.noul === 'number' ? l.noul : null;
+            if (pj != null || pl != null) { const v = [pj, pl].filter(x => x != null); answers[k] = { noul: v.reduce((a, b) => a + b, 0) / v.length }; det[k] = { jev: pj, luna: pl }; return; }
+            const cj = j && j.choice ? j : null, cl = l && l.choice ? l : null;
+            if (cj && cl) answers[k] = cj.choice === cl.choice ? { choice: cj.choice, confidence: (cj.confidence + cl.confidence) / 2 } : (cj.confidence >= cl.confidence ? cj : cl);
+            else if (cj || cl) answers[k] = cj || cl;
+        });
+        const u1 = (dj && dj.usage) || {}, u2 = (dl && dl.usage) || {};
+        return { answers, det, usage: { input_tokens: (u1.input_tokens || 0) + (u2.input_tokens || 0), output_tokens: (u1.output_tokens || 0) + (u2.output_tokens || 0) },
+            model: [dj ? 'jev' : '', dl ? 'luna' : ''].filter(Boolean).join('+'), erroLuna: rl && rl.status === 'rejected' ? String(rl.reason && rl.reason.message || '') : '' };
+    }
+    const probTxt = (d, k, p) => { const x = d.det && d.det[k]; return x && x.jev != null && x.luna != null ? `Jev ${fmt(x.jev, 2)} · Luna ${fmt(x.luna, 2)}` : `${x && x.luna != null && x.jev == null ? 'Luna' : 'Jev'} ${fmt(p, 2)}`; };
     async function revJev(c) {
         const t0 = performance.now();
         const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {}, c.tipo !== 'TC' && ehUro(c) ? JEV_ESP.URO : {});
@@ -2999,17 +3024,17 @@ ${c.texto}`;
         if (!c.critico) questions.critico_presente = { type: 'noul', instructions: JEV_CRITICO };
         questions.lado_corpo_ch = { type: 'choice', instructions: 'No CORPO (descrição) do laudo, de que lado está o principal achado anormal?', criteria: JEV_LADO };
         questions.lado_conc_ch = { type: 'choice', instructions: 'Na IMPRESSÃO/CONCLUSÃO do laudo, de que lado está o principal achado anormal?', criteria: JEV_LADO };
-        const d = await iaProxy({ acao: 'jev', state: revMensagem(c), questions });
+        const d = await checklist(revMensagem(c), questions);
         const ans = d.answers || {};
         const achados = [], probs = {};
         Object.entries(ans).forEach(([k, a]) => {
             const p = a && typeof a.noul === 'number' ? a.noul : null;
             if (p == null) return;
             probs[k] = p;
-            if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (Jev ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
+            if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (${probTxt(d, k, p)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: ['jev'], prob: p }); return; }
             const m = mapa[k];
             if (!m || p < JEV_LIM.mostrar) return;
-            achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (Jev ${fmt(p, 2)})`, sugestao: '', fontes: ['jev'], prob: p });
+            achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (${probTxt(d, k, p)})`, sugestao: '', fontes: ['jev'], prob: p });
         });
         // v1.23: lados por escolha (só com confiança ≥ 0,75)
         const lc = ans.lado_corpo_ch, lk = ans.lado_conc_ch, lado = x => x && x.confidence >= 0.75 && ['direito', 'esquerdo'].includes(x.choice) ? x.choice : null;
@@ -4190,7 +4215,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         return cr.obs ? '💬 aguardando sua resposta' : 'sem troca';
     }
     const MOTORES = {
-        jev: { nome: 'Jev', fn: c => revJev(c) },
+        jev: { nome: 'Jev+Luna', fn: c => revJev(c) },
         haiku: { nome: 'Haiku', fn: c => revHaiku(c) },
         sonnet: { nome: 'Sonnet', fn: c => revSonnet(c) },
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
@@ -4241,7 +4266,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         lista.forEach((a, i) => { questions['v' + i] = { type: 'noul', instructions: `É verdade que o laudo contém este erro (${CAT_NOME[a.categoria] || a.categoria})? ${a.explicacao}${a.trecho ? ` — trecho citado: “${a.trecho}”` : ''}` }; });
         const t0 = performance.now();
         try {
-            const d = await iaProxy({ acao: 'jev', state: revMensagem(r.ctx), questions });
+            const d = await checklist(revMensagem(r.ctx), questions);
             lista.forEach((a, i) => { const x = (d.answers || {})['v' + i]; if (x && typeof x.noul === 'number') r.juiz[chaveAchado(a)] = x.noul; });
             r.juizMs = Math.round(performance.now() - t0);
         } catch (e) { r.juizErro = e.message; }
