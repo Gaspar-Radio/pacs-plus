@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.37.0
+// @version      1.37.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -328,6 +328,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-pedb { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
 #pp-rev .pr-pedb label { display: flex; align-items: center; gap: 4px; color: #cbd5e1; font-size: 11.5px; }
 #pp-rev .pr-pd { margin-top: 6px; }
+#pp-rev .pr-outra { margin-top: 3px; font-size: 12px; color: #94a3b8; border-left: 2px solid #475569; padding-left: 6px; }
 #pp-rev .pr-motivo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; padding: 5px 8px; border: 1px dashed #475569; border-radius: 7px; font-size: 11.5px; color: #cbd5e1; }
 #pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; }
 #pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2766,8 +2767,18 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const corpo = iImp >= 0 ? t.slice(0, iImp) : t, imp = iImp >= 0 ? t.slice(iImp) : '';
         const reVol = '(\\d+(?:[.,]\\d+)?)\\s*(?:ml|mL|cm³|cm3|cc)';
         const pre = new RegExp('pr[ée][- ]?miccional[^.\\n]{0,80}?' + reVol, 'i').exec(corpo);
-        const posTodos = [...corpo.matchAll(new RegExp('(?:p[óo]s[- ]?miccional|residual)[^.\\n]{0,80}?' + reVol, 'gi'))];
-        const pos = posTodos.length ? posTodos[posTodos.length - 1] : null; // várias tentativas: vale a última
+        // v1.37.1 (caso 29/10/2026): "sem resíduo pós-miccional mensurável, com eliminação de 337,5 mL" — o número depois de
+        // "pós-miccional" era o volume ELIMINADO, lido como resíduo → todas as contas erradas. Agora descarta o número se no meio
+        // houver eliminação/esvaziamento/percentual/volume inicial; "sem resíduo mensurável" / "esvaziamento completo" = resíduo 0;
+        // sem resíduo escrito mas com volume eliminado → resíduo = pré − eliminado.
+        const posTodos = [...corpo.matchAll(new RegExp('(?:p[óo]s[- ]?miccional|residual)([^.\\n]{0,80}?)' + reVol, 'gi'))]
+            .filter(m => !/elimina|esvazi|correspond|inicial|pr[ée][- ]?miccional|%/i.test(m[1]))
+            .map(m => { const r = [m[0], m[2]]; r.index = m.index; return r; });
+        const elimTxt = /elimina[çc][ãa]o de (?:aproximadamente |cerca de )?(\d+(?:[.,]\d+)?)\s*(?:ml|mL)/i.exec(corpo);
+        const semResiduo = /sem res[ií]duo(?: vesical)?(?: p[óo]s[- ]?miccional)? (?:mensur|significativ|detect|demonstr|caracteriz)|aus[êe]ncia de res[ií]duo|esvaziamento vesical (?:completo|total)/i.test(corpo);
+        let pos = posTodos.length ? posTodos[posTodos.length - 1] : null; // várias tentativas: vale a última
+        if (!pos && semResiduo) { pos = ['', '0']; pos.index = -1; }
+        else if (!pos && elimTxt && pre && numBR(elimTxt[1]) <= numBR(pre[1])) { const r = numBR(pre[1]) - numBR(elimTxt[1]); pos = ['', Number.isInteger(r) ? String(r) : fmt(r, 1)]; pos.index = -1; }
         const naoUrinou = /n[ãa]o consegui[ur] (realizar a etapa|urinar)|n[ãa]o realizou a etapa p[óo]s/i.test(t);
         const catRes = ml => ml <= 30 ? 'desprezível' : ml <= 80 ? 'pequeno' : ml <= 150 ? 'moderado' : ml <= 300 ? 'acentuado' : 'muito acentuado';
         if (naoUrinou && /incomplet/i.test(t)) add('padrao', 'grave', t.search(/incomplet/i), 'Paciente não urinou, mas o laudo classifica o esvaziamento como incompleto.', 'Usar “Estudo pós-miccional não realizado.” (padrão do serviço).');
@@ -2785,9 +2796,17 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                 const vPre = numBR(pre[1]);
                 if (vPre > 0 && vPos <= vPre) {
                     const elim = vPre - vPos, pct = Math.round(elim / vPre * 100), satisf = pct >= 80;
-                    const mP = /(?:cerca de|aproximadamente|~)?\s*(\d{1,3})\s*%/.exec(corpo);
-                    if (mP && Math.abs(Number(mP[1]) - pct) > 1) { const it = add('padrao', 'grave', mP.index, `Percentual eliminado: (${pre[1]} − ${pos[1]}) ÷ ${pre[1]} = ${pct}%, mas o laudo diz ${mP[1]}%.`, `Corrigir para ${pct}%.`); const bP = mP[0].slice(mP[0].indexOf(mP[1])); it.fix = { busca: bP, troca: bP.replace(mP[1], String(pct)) }; }
-                    const mE = /elimina[çc][ãa]o de (?:aproximadamente |cerca de )?(\d+(?:[.,]\d+)?)\s*(?:ml|mL)/i.exec(corpo);
+                    // percentual: só na frase do esvaziamento; se a frase fala do RESÍDUO (e não da eliminação), compara com o % residual
+                    let mP = null, pctAlvo = pct;
+                    for (const m of corpo.matchAll(/(?:cerca de|aproximadamente|~)?\s*(\d{1,3}(?:[.,]\d+)?)\s*%/g)) {
+                        const ini = Math.max(corpo.lastIndexOf('.', m.index) + 1, 0), fimF = corpo.indexOf('.', m.index + m[0].length), frase = corpo.slice(ini, fimF < 0 ? undefined : fimF);
+                        if (!/elimin|esvazi|volume (?:vesical )?inicial|pr[ée][- ]?miccional|res[ií]du/i.test(frase)) continue;
+                        const antes = corpo.slice(ini, m.index);
+                        pctAlvo = /res[ií]du/i.test(antes) && !/elimin/i.test(antes) ? 100 - pct : pct; mP = m; break;
+                    }
+                    if (mP) mP[1] = String(Math.round(numBR(mP[1])));
+                    if (mP && Math.abs(Number(mP[1]) - pctAlvo) > 1) { const it = add('padrao', 'grave', mP.index, pctAlvo === pct ? `Percentual eliminado: (${pre[1]} − ${pos[1]}) ÷ ${pre[1]} = ${pct}%, mas o laudo diz ${mP[1]}%.` : `Resíduo: ${pos[1]} ÷ ${pre[1]} = ${pctAlvo}% do volume inicial, mas o laudo diz ${mP[1]}%.`, `Corrigir para ${pctAlvo}%.`); const bP = mP[0].slice(mP[0].indexOf(mP[1])); it.fix = { busca: bP, troca: bP.replace(mP[1], String(pctAlvo)) }; }
+                    const mE = elimTxt;
                     if (mE && Math.abs(numBR(mE[1]) - elim) > 2) { const certo = Number.isInteger(elim) ? String(elim) : fmt(elim, 1); const it = add('padrao', 'grave', mE.index, `Volume eliminado: ${pre[1]} − ${pos[1]} = ${certo} mL, mas o laudo diz ${mE[1]} mL.`, `Corrigir para ${certo} mL.`); it.fix = { busca: mE[1], troca: certo, pos: mE.index + mE[0].indexOf(mE[1]) }; }
                     const mS = /esvaziamento vesical (satisfat[óo]rio|incompleto)/ig; let s;
                     while ((s = mS.exec(t))) {
@@ -3062,7 +3081,7 @@ ${c.texto}`;
         const out = [];
         listas.flat().forEach(a => {
             const igual = out.find(o => parecidos(o, a) && !(o.fontes.includes('regra') && a.fontes.includes('regra'))); // dois itens de regra nunca se fundem (cada um tem a sua correção)
-            if (igual) { a.fontes.forEach(f => { if (!igual.fontes.includes(f)) igual.fontes.push(f); }); if (a.gravidade === 'grave') igual.gravidade = 'grave'; if (!igual.sugestao && a.sugestao) igual.sugestao = a.sugestao; }
+            if (igual) { if (a.explicacao && norm(a.explicacao) !== norm(igual.explicacao)) (igual.outras = igual.outras || []).push({ fonte: a.fontes.join('+'), explicacao: a.explicacao }); a.fontes.forEach(f => { if (!igual.fontes.includes(f)) igual.fontes.push(f); }); if (a.gravidade === 'grave') igual.gravidade = 'grave'; if (!igual.sugestao && a.sugestao) igual.sugestao = a.sugestao; }
             else out.push(Object.assign({}, a, { fontes: a.fontes.slice() }));
         });
         const peso = a => (a.gravidade === 'grave' ? 10 : 0) + a.fontes.length * 3 + (a.fontes.includes('regra') ? 2 : 0);
@@ -4111,7 +4130,7 @@ ${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b 
 <div class="pr-lista">${todos.length ? todos.map((a, i) => mini.has(chaveAchado(a)) ? `<div class="pr-mini ${a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
-<div class="pr-ex">${esc(a.explicacao)}</div>${a.fraco ? `<div class="pr-fraco">provável falso alarme — Jev ${fmt(a.juiz, 2)}</div>` : ''}
+<div class="pr-ex">${esc(a.explicacao)}</div>${(a.outras || []).map(o => `<div class="pr-outra"><b>${esc(o.fonte.split('+').map(f => f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f).join(' + '))}:</b> ${esc(o.explicacao)}</div>`).join('')}${a.fraco ? `<div class="pr-fraco">provável falso alarme — Jev ${fmt(a.juiz, 2)}</div>` : ''}
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`).join('')
@@ -5317,5 +5336,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
