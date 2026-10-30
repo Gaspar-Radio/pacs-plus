@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.4.1
+// @version      9.5.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -180,7 +180,7 @@
     let agendaDatabase = safeJsonParse(localStorage.getItem(STORAGE_KEY_DB), {});
     let outbox = safeJsonParse(localStorage.getItem(OUTBOX_KEY), []);
     let selectedDate = getTodayIso();
-    let sectionState = { manha: true, tarde: true };
+    let sectionState = { manha: false, tarde: false }; // v9.5: períodos começam recolhidos (abrem no clique)
     let isDarkMode = localStorage.getItem(THEME_STORAGE_KEY) === 'dark';
     let zoomLevel = parseInt(localStorage.getItem(ZOOM_STORAGE_KEY), 10) || 100;
     let inflight = 0;
@@ -1577,15 +1577,18 @@
     // =====================================================================
     const ANTHROPIC_KEY_STORAGE = 'anthropic_api_key';
     const IA_PREF_STORAGE = 'ia_preferida'; // 'claude' | 'gemini'
-    const CLAUDE_MODEL = 'claude-sonnet-5-5';
+    // v9.5 — Opus 5.5 (esforço médio) é a IA principal; Sonnet 5.5 e Gemini ficam de reserva.
+    const CLAUDE_MODEL = 'claude-opus-5-5';
+    const CLAUDE_MODELOS = [{ id: 'claude-opus-5-5', nome: 'Claude Opus 5.5' }, { id: 'claude-sonnet-5-5', nome: 'Claude Sonnet 5.5' }];
 
-    function requestClaude(apiKey, content, maxTokens = 16000) {
+    function requestClaude(apiKey, content, maxTokens = 16000, modelo = CLAUDE_MODEL) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: 'https://api.anthropic.com/v1/messages',
                 headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-                data: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content }] }),
+                data: JSON.stringify(Object.assign({ model: modelo, max_tokens: maxTokens, messages: [{ role: 'user', content }] },
+                    modelo === 'claude-opus-5-5' ? { thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } } : {})),
                 timeout: 240000,
                 onload(res) {
                     let data = null;
@@ -1656,19 +1659,39 @@
             const nome = ia === 'claude' ? 'Claude' : 'Gemini';
             // 1) nuvem
             if (logado && iaNuvem[ia] !== false) {
-                try {
-                    const d = await requestProxyIA(ia === 'claude' ? { acao: 'claude', content } : { acao: 'gemini', parts });
-                    iaNuvem[ia] = true;
-                    return { texto: d.texto, ia: nome + ' ☁️' };
-                } catch (e) {
-                    if (e.codigo === 'sem_chave') iaNuvem[ia] = false;
-                    else erros.push(`${nome} (nuvem): ${e.message}`);
+                if (ia === 'claude') {
+                    // Opus 5.5 (esforço médio) → Sonnet 5.5, pelo proxy da nuvem (mesma chave dos Secrets)
+                    for (const m of CLAUDE_MODELOS) {
+                        try {
+                            const corpo = { acao: 'claude_mensagem', modelo: m.id, max_tokens: 16000, messages: [{ role: 'user', content }] };
+                            if (m.id === 'claude-opus-5-5') { corpo.thinking = { type: 'adaptive' }; corpo.output_config = { effort: 'medium' }; }
+                            const d = await requestProxyIA(corpo);
+                            const texto = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+                            if (!texto) throw new Error('resposta vazia' + (d.stop_reason ? ` (${d.stop_reason})` : ''));
+                            iaNuvem.claude = true;
+                            return { texto, ia: m.nome + ' ☁️' };
+                        } catch (e) {
+                            if (e.codigo === 'sem_chave') { iaNuvem.claude = false; break; }
+                            erros.push(`${m.nome} (nuvem): ${e.message}`);
+                        }
+                    }
+                } else {
+                    try {
+                        const d = await requestProxyIA({ acao: 'gemini', parts });
+                        iaNuvem.gemini = true;
+                        return { texto: d.texto, ia: nome + ' ☁️' };
+                    } catch (e) {
+                        if (e.codigo === 'sem_chave') iaNuvem.gemini = false;
+                        else erros.push(`${nome} (nuvem): ${e.message}`);
+                    }
                 }
             }
-            // 2) chave local deste computador (reserva)
+            // 2) chave local deste computador (reserva): Opus → Sonnet
             if (ia === 'claude' && kC) {
-                try { return { texto: await requestClaude(kC, content), ia: 'Claude' }; }
-                catch (e) { erros.push('Claude: ' + e.message); }
+                for (const m of CLAUDE_MODELOS) {
+                    try { return { texto: await requestClaude(kC, content, 16000, m.id), ia: m.nome }; }
+                    catch (e) { erros.push(`${m.nome}: ${e.message}`); }
+                }
             }
             if (ia === 'gemini' && kG) {
                 try {
@@ -2270,7 +2293,7 @@
                     <div style="display:grid; grid-template-columns:1fr; gap:6px;">
                         <div style="display:grid; grid-template-columns:2fr 1fr; gap:6px;">
                             <div>
-                                <label style="font-size:10px; font-weight:700;">🤖 Chave Anthropic (Claude Sonnet 5.5) — IA principal:</label>
+                                <label style="font-size:10px; font-weight:700;">🤖 Chave Anthropic (Claude Opus 5.5 · reserva Sonnet 5.5) — IA principal:</label>
                                 <input type="password" id="inputAnthropicKey" placeholder="sk-ant-..." style="width:100%; padding:3px 7px; border-radius:4px; border:1px solid #d97706; font-size:10.5px; box-sizing:border-box;">
                             </div>
                             <div>
@@ -2340,18 +2363,18 @@
 
                 <div class="agenda-card" id="cardManha">
                     <div id="headerManha" style="background:#d97706; color:#fff; padding:5px 8px; font-weight:bold; font-size:10.5px; display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none;">
-                        <span>☀️ PERÍODO DA MANHÃ (07:00 – 12:00)</span>
+                        <span><span id="setaManha" style="display:inline-block; width:12px;">▸</span> ☀️ PERÍODO DA MANHÃ (07:00 – 12:00)</span>
                         <span id="badgeCountManha" style="font-size:9px; background:rgba(0,0,0,0.25); padding:1px 5px; border-radius:6px;">0 pacientes</span>
                     </div>
-                    <div id="bodyManha"><table class="agenda-table">${thead}<tbody id="tbodyNativeManha"></tbody></table></div>
+                    <div id="bodyManha" style="display:none;"><table class="agenda-table">${thead}<tbody id="tbodyNativeManha"></tbody></table></div>
                 </div>
 
                 <div class="agenda-card" id="cardTarde">
                     <div id="headerTarde" style="background:#1d4ed8; color:#fff; padding:5px 8px; font-weight:bold; font-size:10.5px; display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none;">
-                        <span>🌤️ PERÍODO DA TARDE (12:00 – 19:00)</span>
+                        <span><span id="setaTarde" style="display:inline-block; width:12px;">▸</span> 🌤️ PERÍODO DA TARDE (12:00 – 19:00)</span>
                         <span id="badgeCountTarde" style="font-size:9px; background:rgba(0,0,0,0.25); padding:1px 5px; border-radius:6px;">0 pacientes</span>
                     </div>
-                    <div id="bodyTarde"><table class="agenda-table">${thead}<tbody id="tbodyNativeTarde"></tbody></table></div>
+                    <div id="bodyTarde" style="display:none;"><table class="agenda-table">${thead}<tbody id="tbodyNativeTarde"></tbody></table></div>
                 </div>
 
                 <div class="slim-panel-bar" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:6px 8px; margin-top:6px;">
@@ -2385,11 +2408,12 @@
         modalDash.innerHTML = `
             <div style="background:#0f172a; color:#fff; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155;">
                 <div style="display:flex; align-items:center; gap:12px;">
-                    <span style="font-weight:bold; font-size:12.5px;">📊 Painel Analítico & Gestão de Faltas (No-Show)</span>
+                    <span style="font-weight:bold; font-size:12.5px;">📊 Painel Analítico — Faltas, Espera e Produção</span>
                     <div style="display:flex; gap:4px;">
                         <button id="tabDashHoje" style="background:#2563eb; color:#fff; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📅 Dia Selecionado</button>
                         <button id="tabDashNuvem" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📊 Analytics (nuvem)</button>
                         <button id="tabDashLaudos" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📝 Laudos pendentes</button>
+                        <button id="tabDashProd" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📈 Produção</button>
                     </div>
                 </div>
                 <button id="btnCloseModalDash" style="background:none; border:none; color:#fff; font-size:15px; cursor:pointer;">✕</button>
@@ -2405,6 +2429,7 @@
         $('tabDashHoje').onclick = () => renderDashboardAba(1);
         $('tabDashNuvem').onclick = () => renderDashboardAba(2);
         $('tabDashLaudos').onclick = () => renderDashboardAba(3);
+        $('tabDashProd').onclick = () => renderDashboardAba(4);
         $('btnZoomIn').onclick = () => changeZoom(1);
         $('btnZoomOut').onclick = () => changeZoom(-1);
         $('indicatorNuvem').onclick = () => { errorAlertShown = false; loadDayFromCloud(selectedDate); };
@@ -2624,8 +2649,15 @@
 
     function toggleSection(p) {
         sectionState[p] = !sectionState[p];
-        const b = document.getElementById(p === 'manha' ? 'bodyManha' : 'bodyTarde');
-        if (b) b.style.display = sectionState[p] ? 'block' : 'none';
+        aplicarSecoes();
+    }
+    function aplicarSecoes() {
+        ['manha', 'tarde'].forEach(p => {
+            const b = document.getElementById(p === 'manha' ? 'bodyManha' : 'bodyTarde');
+            const s = document.getElementById(p === 'manha' ? 'setaManha' : 'setaTarde');
+            if (b) b.style.display = sectionState[p] ? 'block' : 'none';
+            if (s) s.textContent = sectionState[p] ? '▾' : '▸';
+        });
     }
 
     function setDate(dateStr) {
@@ -2817,11 +2849,11 @@
     }
 
     function renderDashboardAba(n) {
-        const bs = [document.getElementById('tabDashHoje'), document.getElementById('tabDashNuvem'), document.getElementById('tabDashLaudos')];
+        const bs = [document.getElementById('tabDashHoje'), document.getElementById('tabDashNuvem'), document.getElementById('tabDashLaudos'), document.getElementById('tabDashProd')];
         const on = b => { b.style.background = '#2563eb'; b.style.color = '#fff'; };
         const off = b => { b.style.background = '#334155'; b.style.color = '#cbd5e1'; };
         bs.forEach((b, i) => b && (i === n - 1 ? on(b) : off(b)));
-        if (n === 1) renderDashboardHoje(); else if (n === 2) renderDashboardNuvemFaltas(); else renderLaudosPendentes();
+        if (n === 1) renderDashboardHoje(); else if (n === 2) renderDashboardNuvemFaltas(); else if (n === 3) renderLaudosPendentes(); else renderProducao();
     }
 
     // v9.4 — 📝 Laudos pendentes (US e TC) — tabela laudos_pendentes, alimentada pelo PACS Plus 1.37+ (só números/datas)
@@ -2938,97 +2970,375 @@
         </div>`;
     }
 
+    // =====================================================================
+    // 16B. ANALYTICS POR PERÍODO (v9.5) — função analytics_periodo do banco
+    // ---------------------------------------------------------------------
+    // Mês a mês (para a direção), últimos 30 ou 90 dias. Faltas = só pacientes AGENDADOS
+    // (encaixe e SUS/urgência não "faltam"). Espera por categoria; SUS hospitalar/urgência
+    // sempre em conta à parte (feito quando o quadro permite, fora do SLA dos eletivos).
+    // =====================================================================
+    const CAT_NOME = { convenio_particular: 'Convênio / Particular / Social', prefeitura: 'Prefeitura (agendados)', encaixe: 'Encaixes (fora da agenda)', sus_urgencia: 'SUS hospitalar / urgência' };
+    const MES_NOME = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+    let anPeriodo = '30d', anUltimo = null, anIA = null;
+    const isoDe = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const mesNomeAno = m => { const [y, mo] = m.split('-').map(Number); return `${MES_NOME[mo - 1]}/${y}`; };
+    function mesesRecentes(n) {
+        const out = [], d = new Date(); d.setDate(1);
+        for (let i = 0; i < n; i++) { out.push(isoDe(d).slice(0, 7)); d.setMonth(d.getMonth() - 1); }
+        return out;
+    }
+    function periodoDatas(p) {
+        const hoje = new Date(), ontem = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - 1);
+        if (p === '30d' || p === '90d') {
+            const n = p === '30d' ? 30 : 90, ini = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() - n);
+            return { ini: isoDe(ini), fim: isoDe(ontem), rotulo: `últimos ${n} dias (${fmtBR(isoDe(ini))} a ${fmtBR(isoDe(ontem))})`, curto: `${n} dias` };
+        }
+        const [y, m] = p.split('-').map(Number), ult = new Date(y, m, 0);
+        const fim = ult < ontem ? ult : ontem, emCurso = ult >= ontem;
+        return { ini: `${p}-01`, fim: isoDe(fim), rotulo: `${mesNomeAno(p)}${emCurso ? ` (até ${fmtBR(isoDe(fim))}, mês em curso)` : ''}`, curto: mesNomeAno(p) };
+    }
+    function anSeletor(id, atual) {
+        const ops = [['30d', 'Últimos 30 dias'], ['90d', 'Últimos 90 dias'], ...mesesRecentes(12).map(m => [m, `Mês: ${mesNomeAno(m)}`])];
+        return `<select id="${id}" style="font-size:11px; font-weight:700; padding:3px 6px; border-radius:4px; border:1px solid #94a3b8; background:#fff; color:#0f172a;">${ops.map(([v, t]) => `<option value="${v}" ${v === atual ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
+    }
+    const espLinha = e => e ? `<td style="padding:3px 6px; text-align:right;">${e.atendidos}</td><td style="padding:3px 6px; text-align:right;">${e.com_tempo}</td><td style="padding:3px 6px; text-align:right;">${formatMinutes(e.media)}</td><td style="padding:3px 6px; text-align:right; font-weight:700;">${formatMinutes(e.mediana)}</td><td style="padding:3px 6px; text-align:right;">${formatMinutes(e.p90)}</td><td style="padding:3px 6px; text-align:right;">${e.acima_60}${e.com_tempo ? ` (${Math.round(e.acima_60 / e.com_tempo * 100)}%)` : ''}</td>`
+        : '<td colspan="6" style="padding:3px 6px; color:#94a3b8;">sem atendimentos no período</td>';
+    function anEletivos(r) { // média ponderada das duas categorias agendadas
+        const es = (r.espera || []).filter(e => e.cat === 'convenio_particular' || e.cat === 'prefeitura');
+        const n = es.reduce((a, e) => a + (e.com_tempo || 0), 0);
+        return { n, media: n ? Math.round(es.reduce((a, e) => a + (e.media || 0) * (e.com_tempo || 0), 0) / n) : null, acima: es.reduce((a, e) => a + (e.acima_60 || 0), 0) };
+    }
+
     async function renderDashboardNuvemFaltas() {
         const content = document.getElementById('contentDashboard');
         if (!getSupabaseConfig()) return renderDashboardNuvemFaltasLegado();
         content.innerHTML = `<div style="text-align:center; padding:30px; color:#60a5fa;">⏳ Carregando Analytics da nuvem...</div>`;
+        const per = periodoDatas(anPeriodo);
         try {
             await flushOutbox();
-            const d = new Date(); d.setDate(d.getDate() - 30);
-            const dataMin = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-            const [conv, hora, dia, espera] = await Promise.all([
-                requestSupabase('vw_noshow_convenio_30d?select=*', 'GET'),
-                requestSupabase('vw_noshow_horario_30d?select=*', 'GET'),
-                requestSupabase('vw_noshow_dia_semana_90d?select=*', 'GET'),
-                requestSupabase(`vw_espera_diaria?select=*&data_agenda=gte.${dataMin}`, 'GET')
-            ]);
-            // v9.3 — urgências (exames realizados), últimos 3 meses; se a view não existir, só não mostra
-            const m0 = new Date(); m0.setMonth(m0.getMonth() - 2); m0.setDate(1);
-            const mesMin = `${m0.getFullYear()}-${String(m0.getMonth() + 1).padStart(2, '0')}-01`;
-            const [urgM, urgS, urgT] = await Promise.all([
-                requestSupabase(`vw_urgencias_mes?select=*&mes=gte.${mesMin}&order=mes.desc`, 'GET').catch(() => []),
-                requestSupabase(`vw_urgencias_setor?select=*&mes=gte.${mesMin}&order=mes.desc,pacientes.desc`, 'GET').catch(() => []),
-                requestSupabase(`vw_espera_urgencia_mes?select=*&mes=gte.${mesMin}&order=mes.desc`, 'GET').catch(() => [])
-            ]);
-            const MES3 = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
-            const fmtMes = iso => { const [y, m] = String(iso).split('-').map(Number); return `${MES3[m - 1]}/${String(y).slice(2)}`; };
-            const FONTE = { sus: 'regra SUS', pacs: 'PACS', manual: 'à mão' };
-            const urgHtml = (urgM || []).length ? `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
-                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">🚨 Exames em caráter de urgência (realizados)</div>
-                    <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
-                        <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Mês</th><th style="text-align:right; padding:3px 6px;">Pacientes</th><th style="text-align:right; padding:3px 6px;">Urgências</th><th style="text-align:right; padding:3px 6px;">%</th><th style="text-align:right; padding:3px 6px;">Proc. urgência</th><th style="text-align:left; padding:3px 6px;">Por setor (origem da marcação)</th></tr>
-                        ${urgM.map(r => `<tr><td style="padding:3px 6px; font-weight:700;">${fmtMes(r.mes)}</td><td style="padding:3px 6px; text-align:right;">${r.pacientes}</td><td style="padding:3px 6px; text-align:right; color:#dc2626; font-weight:700;">${r.pacientes_urgencia}</td><td style="padding:3px 6px; text-align:right;">${r.pct_pacientes_urgencia ?? 0}%</td><td style="padding:3px 6px; text-align:right;">${r.procedimentos_urgencia}</td>
-                            <td style="padding:3px 6px; font-size:9.5px;">${(urgS || []).filter(x => x.mes === r.mes).map(x => `${escapeHtml(x.setor)} (${FONTE[x.fonte] || escapeHtml(x.fonte)}): ${x.pacientes}`).join(' · ') || '—'}</td></tr>`).join('')}
-                    </table>
-                    ${(urgT || []).length ? `<div style="font-size:10px; margin-top:6px;">⏱ Ficha → exame nas urgências (informativo, fora da média de espera): ${urgT.map(t => `${fmtMes(t.mes)} mediana ${formatMinutes(t.ficha_exame_mediana_min)} (n=${t.com_tempo}, ${t.ate_60min} em até 60 min)`).join(' · ')}</div>` : ''}
-                    <div style="font-size:9.5px; color:#94a3b8; margin-top:4px;">SUS hospitalar (PS, internado, UTI, maternidade) conta automaticamente; os demais pela marcação de urgência no PACS ou pelo botão 🚨 da agenda. Inclui o mês corrente.</div></div>` : '';
-            if (!Array.isArray(conv) || !conv.length) {
-                content.innerHTML = `<div style="text-align:center; padding:30px; color:#94a3b8;">Nenhum atendimento ou falta registrado nos últimos 30 dias.</div>`;
-                return;
-            }
-            const soma = (arr, c) => arr.reduce((a, r) => a + (Number(r[c]) || 0), 0);
-            const pacientes = soma(conv, 'pacientes'), faltas = soma(conv, 'faltas'), perdidos = soma(conv, 'procedimentos_perdidos');
-            const taxa = pacientes ? Math.round(faltas / pacientes * 100) : 0;
-
-            // espera: média ponderada pelo nº de atendidos com tempo; % acima de 60 min
-            const porTipo = {};
-            (espera || []).forEach(r => {
-                const t = r.tipo || 'N/I', n = Number(r.atendidos_com_tempo) || 0;
-                if (!porTipo[t]) porTipo[t] = { n: 0, soma: 0, acima: 0, max: 0 };
-                porTipo[t].n += n;
-                porTipo[t].soma += n * (Number(r.espera_media_min) || 0);
-                porTipo[t].acima += Number(r.acima_60min) || 0;
-                porTipo[t].max = Math.max(porTipo[t].max, Number(r.espera_max_min) || 0);
-            });
-            const nEsp = Object.values(porTipo).reduce((a, x) => a + x.n, 0);
-            const mediaEsp = nEsp ? Math.round(Object.values(porTipo).reduce((a, x) => a + x.soma, 0) / nEsp) : null;
-            const acimaEsp = Object.values(porTipo).reduce((a, x) => a + x.acima, 0);
-
-            const rowsConv = conv.map(r => ({ k: r.convenio, faltas: r.faltas, total: r.pacientes, pct: r.taxa_noshow_pct, extra: r.procedimentos_perdidos ? `−${r.procedimentos_perdidos} proc.` : '' }));
-            const rowsHora = (hora || []).map(r => ({ k: `${String(r.faixa || '').slice(0, 2)}h (${r.periodo || ''})`, faltas: r.faltas, total: r.agendados, pct: r.taxa_noshow_pct }));
-            const rowsDia = (dia || []).map(r => ({ k: r.dia, faltas: r.faltas, total: r.agendados, pct: r.taxa_noshow_pct }));
-            const tiposHtml = Object.entries(porTipo).sort((a, b) => b[1].n - a[1].n).map(([t, x]) => `
-                <tr><td style="padding:3px 6px; font-weight:700;">${escapeHtml(t)}</td>
-                    <td style="padding:3px 6px; text-align:right;">${x.n}</td>
-                    <td style="padding:3px 6px; text-align:right;">${x.n ? formatMinutes(Math.round(x.soma / x.n)) : '–'}</td>
-                    <td style="padding:3px 6px; text-align:right;">${x.acima} (${x.n ? Math.round(x.acima / x.n * 100) : 0}%)</td>
-                    <td style="padding:3px 6px; text-align:right;">${formatMinutes(Math.round(x.max))}</td></tr>`).join('');
-
+            const r = await requestSupabase('rpc/analytics_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim });
+            const m0 = new Date(); m0.setMonth(m0.getMonth() - 5); m0.setDate(1);
+            const urgM = await requestSupabase(`vw_urgencias_mes?select=*&mes=gte.${isoDe(m0)}&order=mes.desc`, 'GET').catch(() => []);
+            if (anUltimo && anUltimo.periodo !== anPeriodo) anIA = null;
+            anUltimo = { r, per, periodo: anPeriodo, urgM };
+            const el = anEletivos(r);
+            const espMap = Object.fromEntries((r.espera || []).map(e => [e.cat, e]));
+            const rowsCat = (r.por_categoria || []).map(c => ({ k: CAT_NOME[c.cat] || c.cat, faltas: c.faltas, total: c.pacientes, pct: c.taxa }));
+            const rowsConv = (r.noshow_convenio || []).map(c => ({ k: c.convenio, faltas: c.faltas, total: c.pacientes, pct: c.taxa, extra: c.perdidos ? `−${c.perdidos} proc.` : '' }));
+            const rowsHora = (r.noshow_horario || []).map(c => ({ k: `${String(c.faixa || '').slice(0, 2)}h (${c.periodo || ''})`, faltas: c.faltas, total: c.agendados, pct: c.taxa }));
+            const rowsDia = (r.noshow_dia || []).map(c => ({ k: c.dia, faltas: c.faltas, total: c.agendados, pct: c.taxa }));
+            const pctUrg = r.atendidos_pacientes ? Math.round(r.urgencias_pacientes / r.atendidos_pacientes * 1000) / 10 : 0;
+            const sus = espMap.sus_urgencia;
             content.innerHTML = `
-                <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:6px;">
-                    ${box(pacientes, 'Pacientes com desfecho (30d)', isDarkMode ? '#f1f5f9' : '#0f172a')}
-                    ${box(`${faltas} (${taxa}%)`, 'Faltas (No-Show)', '#e11d48')}
-                    ${box(perdidos, 'Procedimentos perdidos', '#f59e0b')}
-                    ${box(formatMinutes(mediaEsp), `Espera média eletivos (${acimaEsp} > 60 min)`, '#2563eb')}
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                    <b style="font-size:11.5px;">Período:</b> ${anSeletor('anPeriodoSel', anPeriodo)}
+                    <span style="color:#64748b; font-size:10.5px;">${escapeHtml(per.rotulo)}</span>
+                    <span style="margin-left:auto; display:flex; gap:6px;">
+                        <button id="btnAnIA" class="btn-top-action" style="background:#7c3aed; color:#fff;" title="Resumo e sugestões de ações com o Claude Opus 5.5 (só números agregados, sem pacientes)">🧠 Análise (Opus)</button>
+                        <button id="btnAnRel" class="btn-top-action" style="background:#0284c7; color:#fff;" title="Relatório do período para imprimir/salvar em PDF (direção)">🖨️ Relatório</button>
+                    </span>
                 </div>
-                <div style="font-size:10px; color:#94a3b8; margin-bottom:10px;">Últimos 30 dias encerrados (até ontem). Falta contada por paciente/dia; cancelados e quem saiu da planilha não entram. Calculado no banco — mesmo resultado nos 3 computadores.</div>
-                ${barrasHtml(rowsConv, '📊 No-Show por Convênio / Setor', 'Nomes de convênio padronizados (ex.: variações de SERPRAM somadas). Cinza = menos de 5 pacientes.')}
-                ${barrasHtml(rowsHora, '🕒 No-Show por Faixa Horária (30 dias, por exame)')}
-                ${barrasHtml(rowsDia, '📅 No-Show por Dia da Semana (90 dias, por exame)')}
-                ${tiposHtml ? `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
-                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:6px;">⏱ Tempo de espera — eletivos (chegada → atendimento, 30 dias)</div>
-                    <div style="font-size:9.5px; color:#94a3b8; margin-bottom:4px;">Urgências (internado/PS, SUS hospitalar, marcadas no PACS ou no 🚨) não entram: são feitas quando o quadro permite. Tempos acima de 12 h são tratados como erro de registro.</div>
+                <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:6px;">
+                    ${box(r.agendados, 'Pacientes agendados com desfecho', isDarkMode ? '#f1f5f9' : '#0f172a')}
+                    ${box(`${r.faltas} (${r.taxa ?? 0}%)`, 'Faltas (No-Show)', '#e11d48')}
+                    ${box(r.perdidos, 'Procedimentos perdidos', '#f59e0b')}
+                    ${box(formatMinutes(el.media), `Espera média — agendados (${el.acima} > 60 min)`, '#2563eb')}
+                </div>
+                <div style="font-size:10px; color:#94a3b8; margin-bottom:10px;">Faltas contadas por paciente/dia, só entre <b>agendados</b> (encaixes e SUS/urgência não entram). ${r.pendentes_sem_desfecho ? `⚠ ${r.pendentes_sem_desfecho} linha(s) do período ainda sem desfecho (pendente/em espera) ficaram fora. ` : ''}Calculado no banco — mesmo resultado nos 3 computadores e no iPhone.</div>
+                <div id="anIABox">${anIA ? anIAHtml(anIA) : ''}</div>
+                ${barrasHtml(rowsCat, '📊 Faltas por categoria')}
+                ${barrasHtml(rowsConv, '📊 Faltas por convênio / setor', 'Nomes padronizados. Cinza = menos de 5 pacientes.')}
+                ${barrasHtml(rowsHora, '🕒 Faltas por faixa horária (por exame)')}
+                ${barrasHtml(rowsDia, '📅 Faltas por dia da semana (por exame)')}
+                <div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:4px;">⏱ Tempo de espera por categoria (chegada → atendimento)</div>
                     <table style="width:100%; border-collapse:collapse; font-size:10.5px;">
-                        <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Tipo</th><th style="text-align:right; padding:3px 6px;">Atendidos</th><th style="text-align:right; padding:3px 6px;">Média</th><th style="text-align:right; padding:3px 6px;">&gt; 60 min</th><th style="text-align:right; padding:3px 6px;">Máximo</th></tr>
-                        ${tiposHtml}
-                    </table></div>` : ''}
-                ${urgHtml}`;
+                        <tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Categoria</th><th style="text-align:right; padding:3px 6px;">Atendidos</th><th style="text-align:right; padding:3px 6px;">Com tempo</th><th style="text-align:right; padding:3px 6px;">Média</th><th style="text-align:right; padding:3px 6px;">Mediana</th><th style="text-align:right; padding:3px 6px;">90% até</th><th style="text-align:right; padding:3px 6px;">&gt; 60 min</th></tr>
+                        ${['convenio_particular', 'prefeitura', 'encaixe'].map(c => `<tr><td style="padding:3px 6px; font-weight:700;">${CAT_NOME[c]}</td>${espLinha(espMap[c])}</tr>`).join('')}
+                        <tr><td colspan="7" style="padding:6px 6px 2px; font-size:9.5px; color:#94a3b8; text-transform:uppercase;">Conta à parte — não entra na média nem no SLA</td></tr>
+                        <tr style="color:#7c3aed;"><td style="padding:3px 6px; font-weight:700;">🚨 ${CAT_NOME.sus_urgencia} <span style="font-weight:400;">(ficha → exame)</span></td>${espLinha(sus)}</tr>
+                    </table>
+                    <div style="font-size:9.5px; color:#94a3b8; margin-top:4px;">Mediana = metade dos pacientes esperou até esse tempo (menos sensível a casos extremos). Tempos acima de 12 h (24 h no SUS/urgência) são erro de registro e ficam fora.</div>
+                </div>
+                <div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+                    <div style="font-weight:bold; font-size:11.5px; margin-bottom:4px;">🚨 Urgências (exames realizados no período)</div>
+                    <div style="font-size:11px;"><b>${r.urgencias_pacientes}</b> de ${r.atendidos_pacientes} pacientes atendidos (<b>${pctUrg}%</b>) · ${r.urgencias_procedimentos} procedimento(s)</div>
+                    <div style="font-size:10px; color:#475569; margin-top:4px;">${(r.urgencias_setor || []).map(x => `${escapeHtml(x.setor)}: <b>${x.pacientes}</b>`).join(' · ') || '—'}</div>
+                    ${(urgM || []).length ? `<div style="font-size:10px; color:#64748b; margin-top:6px;">Por mês: ${urgM.map(u => `${mesNomeAno(String(u.mes).slice(0, 7))} ${u.pacientes_urgencia}/${u.pacientes} (${u.pct_pacientes_urgencia ?? 0}%)`).join(' · ')}</div>` : ''}
+                </div>`;
+            document.getElementById('anPeriodoSel').onchange = e => { anPeriodo = e.target.value; anIA = null; renderDashboardNuvemFaltas(); };
+            document.getElementById('btnAnRel').onclick = relatorioAnalytics;
+            document.getElementById('btnAnIA').onclick = analiseIAAnalytics;
         } catch (err) {
             if (err.status === 404 || err.status === 400) return renderDashboardNuvemFaltasLegado();
-            if (err.status !== undefined) reportCloudError(err, 'Analytics', false); // erro HTTP; erro de desenho só aparece aqui
+            if (err.status !== undefined) reportCloudError(err, 'Analytics', false);
             else console.error('[Agenda Analytics]', err);
             content.innerHTML = `<div style="text-align:center; padding:20px; color:#e11d48;">Erro ao buscar dados na nuvem:<br>${escapeHtml(err.message)}</div>`;
         }
+    }
+
+    function anIAHtml(txt) {
+        return `<div class="dash-box" style="background:#f5f3ff; border:1px solid #c4b5fd; border-radius:7px; padding:10px; margin-bottom:10px; white-space:pre-wrap; font-size:11px; color:#1e1b4b;"><b>🧠 Análise (Claude Opus 5.5)</b>\n${escapeHtml(txt)}</div>`;
+    }
+    function anResumoParaIA(a) { // SÓ números agregados — sem nome, data de nascimento ou prontuário
+        const r = a.r;
+        return JSON.stringify({ periodo: a.per.rotulo, agendados: r.agendados, faltas: r.faltas, taxa_faltas_pct: r.taxa, procedimentos_perdidos: r.perdidos,
+            faltas_por_categoria: r.por_categoria, faltas_por_convenio: (r.noshow_convenio || []).slice(0, 15), faltas_por_faixa_horaria: r.noshow_horario,
+            faltas_por_dia_semana: r.noshow_dia, espera_por_categoria_min: r.espera, urgencias: { pacientes: r.urgencias_pacientes, de_atendidos: r.atendidos_pacientes, por_setor: r.urgencias_setor } });
+    }
+    async function analiseIAAnalytics() {
+        if (!anUltimo) return;
+        const box = document.getElementById('anIABox'), btn = document.getElementById('btnAnIA');
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Analisando…'; }
+        try {
+            const prompt = `Você é consultor de gestão de um serviço de ultrassonografia hospitalar (HAMC/LADI, Santa Rita do Sapucaí-MG). ` +
+                `Abaixo, indicadores agregados do período (JSON). Escreva em português do Brasil, sem markdown, no máximo 220 palavras, para apresentar à direção:\n` +
+                `1) Resumo (3 frases) com os números principais (taxa de faltas, procedimentos perdidos, espera dos agendados; urgências à parte).\n` +
+                `2) Onde estão as faltas (convênio/categoria, faixa horária, dia) — só o que os números sustentam; amostras < 5 não valem conclusão.\n` +
+                `3) 3 a 5 ações práticas e mensuráveis (ex.: confirmação ativa na véspera, overbooking controlado em faixas com mais faltas, lista de espera).\n` +
+                `Não invente dados.\n\nDADOS:\n${anResumoParaIA(anUltimo)}`;
+            const { texto, ia } = await chamarIA({ prompt });
+            anIA = `${texto.trim()}\n\n— ${ia}`;
+            if (box) box.innerHTML = anIAHtml(anIA);
+        } catch (e) { alert('Não consegui gerar a análise:\n' + e.message); }
+        finally { if (btn) { btn.disabled = false; btn.textContent = '🧠 Análise (Opus)'; } }
+    }
+
+    function janelaRelatorio(titulo, corpo) {
+        const win = window.open('', '_blank');
+        if (!win) { alert('O navegador bloqueou a janela do relatório. Libere pop-ups para pacs.ladi.org.br.'); return; }
+        win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(titulo)}</title>
+            <style>body{font-family:Arial,sans-serif;font-size:9.5pt;color:#111;margin:12mm}h1{font-size:15pt;margin:0 0 2px;color:#1e3a8a}h2{font-size:11pt;margin:14px 0 4px;color:#1e3a8a;border-bottom:1.5px solid #1e3a8a;padding-bottom:2px}
+            .meta{font-size:8.5pt;color:#555;margin-bottom:8px}table{width:100%;border-collapse:collapse;margin:4px 0 8px}th,td{border:1px solid #bbb;padding:3px 6px;font-size:8.8pt;text-align:left}th{background:#f1f5f9}td.n,th.n{text-align:right}
+            .kpis{display:flex;gap:8px;margin:6px 0}.kpi{flex:1;border:1px solid #bbb;border-radius:6px;padding:6px;text-align:center}.kpi b{display:block;font-size:13pt}.ia{white-space:pre-wrap;border:1px solid #c4b5fd;background:#f5f3ff;padding:8px;border-radius:6px}
+            .rod{margin-top:14px;font-size:7.5pt;color:#777;border-top:1px solid #ccc;padding-top:4px}</style></head><body>${corpo}
+            <div class="rod">Dr. Gabriel Gaspar · CRM-MG 69.042 · RQE 51.492 · Responsável Técnico — Serviço de Diagnóstico por Imagem HAMC/LADI · gerado em ${new Date().toLocaleString('pt-BR')} · números agregados, sem identificação de pacientes</div></body></html>`);
+        win.document.close(); win.focus(); setTimeout(() => win.print(), 400);
+    }
+    function relatorioAnalytics() {
+        if (!anUltimo) return;
+        const { r, per } = anUltimo, el = anEletivos(r);
+        const tab = (head, rows) => `<table><tr>${head.map((h, i) => `<th class="${i ? 'n' : ''}">${h}</th>`).join('')}</tr>${rows.map(l => `<tr>${l.map((c, i) => `<td class="${i ? 'n' : ''}">${escapeHtml(String(c ?? '—'))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const espMap = Object.fromEntries((r.espera || []).map(e => [e.cat, e]));
+        const espRow = c => { const e = espMap[c]; return [CAT_NOME[c], e ? e.atendidos : 0, e ? e.com_tempo : 0, formatMinutes(e && e.media), formatMinutes(e && e.mediana), formatMinutes(e && e.p90), e ? e.acima_60 : 0]; };
+        const corpo = `<h1>Ultrassonografia — Faltas, espera e urgências</h1><div class="meta">Período: <b>${escapeHtml(per.rotulo)}</b> · HAMC/LADI</div>
+            <div class="kpis"><div class="kpi"><b>${r.agendados}</b>agendados com desfecho</div><div class="kpi"><b>${r.faltas} (${r.taxa ?? 0}%)</b>faltas</div><div class="kpi"><b>${r.perdidos}</b>procedimentos perdidos</div><div class="kpi"><b>${formatMinutes(el.media)}</b>espera média (agendados)</div><div class="kpi"><b>${r.urgencias_pacientes}</b>urgências realizadas</div></div>
+            ${anIA ? `<h2>Análise e ações sugeridas</h2><div class="ia">${escapeHtml(anIA)}</div>` : ''}
+            <h2>Faltas por categoria</h2>${tab(['Categoria', 'Pacientes', 'Faltas', '%'], (r.por_categoria || []).map(c => [CAT_NOME[c.cat] || c.cat, c.pacientes, c.faltas, `${c.taxa ?? 0}%`]))}
+            <h2>Faltas por convênio / setor</h2>${tab(['Convênio', 'Pacientes', 'Faltas', '%', 'Proc. perdidos'], (r.noshow_convenio || []).map(c => [c.convenio, c.pacientes, c.faltas, `${c.taxa ?? 0}%`, c.perdidos]))}
+            <h2>Faltas por faixa horária</h2>${tab(['Faixa', 'Agendados', 'Faltas', '%'], (r.noshow_horario || []).map(c => [`${String(c.faixa).slice(0, 2)}h (${c.periodo})`, c.agendados, c.faltas, `${c.taxa ?? 0}%`]))}
+            <h2>Faltas por dia da semana</h2>${tab(['Dia', 'Agendados', 'Faltas', '%'], (r.noshow_dia || []).map(c => [c.dia, c.agendados, c.faltas, `${c.taxa ?? 0}%`]))}
+            <h2>Tempo de espera (chegada → atendimento)</h2>${tab(['Categoria', 'Atendidos', 'Com tempo', 'Média', 'Mediana', '90% até', '> 60 min'], ['convenio_particular', 'prefeitura', 'encaixe', 'sus_urgencia'].map(espRow))}
+            <div class="meta">SUS hospitalar / urgência: conta à parte (ficha → exame), feito quando o quadro clínico permite — não entra na média dos agendados.</div>
+            <h2>Urgências realizadas</h2><div>${r.urgencias_pacientes} de ${r.atendidos_pacientes} pacientes atendidos (${r.atendidos_pacientes ? Math.round(r.urgencias_pacientes / r.atendidos_pacientes * 1000) / 10 : 0}%) · ${r.urgencias_procedimentos} procedimentos</div>
+            ${tab(['Setor', 'Pacientes'], (r.urgencias_setor || []).map(x => [x.setor, x.pacientes]))}
+            <div class="meta">Faltas: contadas por paciente/dia, somente entre pacientes agendados (encaixes e SUS/urgência não entram). Fonte: Agenda US (Supabase), mesma base do iPhone e dos 3 computadores.</div>`;
+        janelaRelatorio(`Faltas e espera US — ${per.curto}`, corpo);
+    }
+
+    // =====================================================================
+    // 16C. 📈 PRODUÇÃO MENSAL (v9.5) — US e TC lidos do PACS
+    // ---------------------------------------------------------------------
+    // Mês = data do exame (igual ao filtro do relatório do PACS). Meus = usu_codigo_radiologista
+    // do exame igual ao usuário logado no PACS (token). Pendentes "meus": não liberados e
+    // (atribuídos a mim, ou sem radiologista em situação de laudo: US qualquer; TC fora de ABERTO).
+    // Tempo exame → laudo: imagem no PACS (ou ficha) → última atualização do exame liberado
+    // (exa_updated — a API não expõe a hora exata da liberação; é uma boa aproximação).
+    // Nuvem: tabela producao_mensal — SÓ números agregados (nada de nome, prontuário ou código de exame).
+    // =====================================================================
+    const PROD_MOD = { US: 35, CT: 7 }, PROD_NOME = { US: '🔊 Ultrassom', CT: '🩻 Tomografia' };
+    const PROD_CATS = ['SUS', 'Prefeitura', 'Convênio', 'Particular', 'Social', 'Não informado'];
+    let prodMes = isoDe(new Date()).slice(0, 7), prodDados = {}, prodLendo = false, prodErro = '';
+    function prodCategoria(desc) {
+        const d = normName(desc);
+        if (!d) return 'Não informado';
+        if (/^SUS\b/.test(d)) return 'SUS';
+        if (d.includes('PREFEITURA')) return 'Prefeitura';
+        if (d === 'SOCIAL' || /\bSOCIAL\b/.test(d)) return 'Social';
+        if (d.includes('PARTICULAR') || d.includes('CARTAO DESCONTO') || d.includes('CARNE')) return 'Particular';
+        return 'Convênio';
+    }
+    function prodMeuUsuario() {
+        try { const p = pacsToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(p + '==='.slice((p.length + 3) % 4))).usu_codigo; }
+        catch (e) { return null; }
+    }
+    function diaHoraLocal(d, h) {
+        const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return null;
+        const [hh, mi, ss] = String(h || '00:00:00').split(':').map(Number);
+        const dt = new Date(+m[1], m[2] - 1, +m[3], hh || 0, mi || 0, ss || 0); return isNaN(dt) ? null : dt;
+    }
+    function prazoUteis(d, n) { // manhã (07:00) do N-ésimo dia útil seguinte (seg–sex; feriados não descontados)
+        const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0); let c = 0;
+        while (c < n) { x.setDate(x.getDate() + 1); const w = x.getDay(); if (w > 0 && w < 6) c++; }
+        return x;
+    }
+    function estat(v) {
+        if (!v.length) return { n: 0, med: null, media: null, p90: null };
+        const s = [...v].sort((a, b) => a - b), q = p => s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))];
+        return { n: s.length, med: Math.round(q(0.5) * 10) / 10, media: Math.round(s.reduce((a, b) => a + b, 0) / s.length * 10) / 10, p90: Math.round(q(0.9) * 10) / 10 };
+    }
+    async function prodBuscar(mes, cod) {
+        const tok = pacsToken(), [y, m] = mes.split('-').map(Number), fim = isoDe(new Date(y, m, 0)), rows = [];
+        for (let off = 0; off < 9000; off += 300) {
+            const q = new URLSearchParams({ offset: off, limit: 300, tela: 'EXAMES', pac_nome: '', pac_pacs_codigo: '', data_codigo: 1, data_inicial: `${mes}-01`, data_final: fim, exa_idnsomenteassinador: false, exa_dataparam: '$exame.exa_data$' });
+            q.append('mod_codigo[]', cod);
+            const r = await fetch(`${location.origin}/backend/api/exame?${q}`, { headers: { 'x-access-token': tok } });
+            if (r.status === 401 || r.status === 403) throw new Error('sessão do PACS expirada — faça login de novo');
+            if (!r.ok) throw new Error('PACS HTTP ' + r.status);
+            const j = await r.json(), lote = Array.isArray(j) ? j : (j.rows || []);
+            rows.push(...lote);
+            if (lote.length < 300) break;
+        }
+        return rows;
+    }
+    function prodResumir(rows, mod, me, mes) {
+        const out = { liberados: 0, pendentes: 0, por_situacao: {}, por_categoria: {}, urgentes: { lib: 0, pend: 0 }, internados: { lib: 0, pend: 0 } };
+        const exames = {}, tEl = [], tUr = []; let noPrazo = 0, comPrazo = 0, ate2h = 0;
+        PROD_CATS.forEach(c => { out.por_categoria[c] = { lib: 0, pend: 0 }; });
+        rows.forEach(x => {
+            if (!x || String(x.exa_data || '').slice(0, 7) !== mes) return;
+            if (normName(x.paciente && x.paciente.pac_nome).startsWith('TESTE')) return; // pacientes de teste fora
+            const sit = String(x.exa_situacao || '').toUpperCase(), rad = x.usu_codigo_radiologista;
+            const lib = sit === 'LIBERADO';
+            let meu;
+            if (lib) meu = rad != null && rad === me;
+            else meu = x.exa_idnnecessitalaudo !== false && (rad === me || (rad == null && (mod === 'US' || sit !== 'ABERTO')));
+            if (!meu) return;
+            const k = lib ? 'lib' : 'pend';
+            if (lib) out.liberados++; else { out.pendentes++; out.por_situacao[sit] = (out.por_situacao[sit] || 0) + 1; }
+            const cat = prodCategoria(x.convenio && x.convenio.conv_descricao);
+            out.por_categoria[cat][k]++;
+            if (x.exa_idnurgente) out.urgentes[k]++;
+            if (x.exa_tipo === 'I') out.internados[k]++;
+            const ex = cleanExamDesc(x.tipoexame && x.tipoexame.tpe_descricao) || 'NÃO INFORMADO';
+            const e = exames[ex] || (exames[ex] = { exame: ex, lib: 0, pend: 0 }); e[k]++;
+            if (lib) {
+                const ini = (x.exa_pacs_data && x.exa_pacs_hora) ? diaHoraLocal(x.exa_pacs_data, x.exa_pacs_hora) : diaHoraLocal(x.exa_data, x.exa_hora);
+                const fimT = x.exa_updated ? new Date(x.exa_updated) : null;
+                if (ini && fimT && !isNaN(fimT)) {
+                    const h = (fimT - ini) / 36e5;
+                    if (h > 0 && h <= 24 * 30) {
+                        if (x.exa_idnurgente) { tUr.push(h); if (h <= 2) ate2h++; }
+                        else { tEl.push(h); comPrazo++; if (fimT <= prazoUteis(diaHoraLocal(x.exa_data, '00:00:00'), mod === 'US' ? 3 : 5)) noPrazo++; }
+                    }
+                }
+            }
+        });
+        const lista = Object.values(exames).sort((a, b) => (b.lib + b.pend) - (a.lib + a.pend));
+        out.por_exame = lista.slice(0, 30);
+        if (lista.length > 30) out.por_exame.push(lista.slice(30).reduce((a, e) => { a.lib += e.lib; a.pend += e.pend; return a; }, { exame: `OUTROS (${lista.length - 30} tipos)`, lib: 0, pend: 0 }));
+        out.tat = { eletivo: Object.assign(estat(tEl), { no_prazo: noPrazo, com_prazo: comPrazo }), urgente: Object.assign(estat(tUr), { ate2h }) };
+        out.total = out.liberados + out.pendentes;
+        return out;
+    }
+    async function prodLerPacs(mes) {
+        if (prodLendo) return;
+        if (!pacsToken()) throw new Error('PACS sem login nesta aba');
+        const me = prodMeuUsuario(); if (me == null) throw new Error('não consegui identificar o usuário do PACS');
+        prodLendo = true;
+        try {
+            const agora = new Date().toISOString(), linhas = [];
+            for (const [mod, cod] of Object.entries(PROD_MOD)) {
+                const dados = Object.assign(prodResumir(await prodBuscar(mes, cod), mod, me, mes), { lido_em: agora });
+                prodDados[`${mes}|${mod}`] = { dados, atualizado_em: agora };
+                linhas.push({ mes, modalidade: mod, dados, atualizado_em: agora, pc: String(navigator.platform || '').slice(0, 30) });
+            }
+            if (getSupabaseConfig()) {
+                try { await requestSupabase('producao_mensal?on_conflict=mes,modalidade', 'POST', linhas, { Prefer: 'resolution=merge-duplicates,return=minimal' }); }
+                catch (e) { console.warn('[Agenda Produção] nuvem', e); }
+            }
+        } finally { prodLendo = false; }
+    }
+    async function prodCarregarNuvem(mes) {
+        if (!getSupabaseConfig()) return;
+        const rows = await requestSupabase(`producao_mensal?mes=eq.${mes}&select=*`, 'GET').catch(() => []);
+        (rows || []).forEach(r => { prodDados[`${r.mes}|${r.modalidade}`] = { dados: r.dados, atualizado_em: r.atualizado_em }; });
+    }
+    function diasUteisMes(mes) { // [úteis até hoje, úteis no mês] (seg–sex)
+        const [y, m] = mes.split('-').map(Number), ult = new Date(y, m, 0).getDate(), hoje = new Date(); let ate = 0, tot = 0;
+        for (let d = 1; d <= ult; d++) { const w = new Date(y, m - 1, d).getDay(); if (w > 0 && w < 6) { tot++; if (new Date(y, m - 1, d) <= hoje) ate++; } }
+        return [ate, tot];
+    }
+    const fmtH = h => h == null ? '—' : h < 24 ? `${String(h).replace('.', ',')} h` : `${Math.floor(h / 24)}d ${Math.round(h % 24)}h`;
+    const pct = (a, b) => b ? `${Math.round(a / b * 1000) / 10}%` : '—';
+    function prodBlocoHtml(mod, reg, mes) {
+        if (!reg) return `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;"><b>${PROD_NOME[mod]}</b><div style="color:#64748b; margin-top:6px;">Sem leitura deste mês ainda — clique em 🔄 Ler do PACS (com o PACS logado nesta aba).</div></div>`;
+        const d = reg.dados, [ate, tot] = diasUteisMes(mes), emCurso = mes === isoDe(new Date()).slice(0, 7);
+        const proj = emCurso && ate ? Math.round(d.total / ate * tot) : null;
+        const cats = PROD_CATS.filter(c => d.por_categoria[c] && (d.por_categoria[c].lib + d.por_categoria[c].pend));
+        const th = 'style="text-align:right; padding:3px 6px;"', td = 'style="text-align:right; padding:3px 6px;"';
+        const te = d.tat.eletivo, tu = d.tat.urgente;
+        return `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px; margin-bottom:10px;">
+            <div style="display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; margin-bottom:6px;"><b style="font-size:13px;">${PROD_NOME[mod]}</b>
+                <span><b style="font-size:18px; color:#059669;">${d.liberados}</b> liberados</span>
+                <span><b style="font-size:18px; color:#d97706;">${d.pendentes}</b> pendentes meus</span>
+                <span><b style="font-size:18px;">${d.total}</b> no mês${proj && proj > d.total ? ` · projeção ≈ <b>${proj}</b> (${ate}/${tot} dias úteis)` : ''}</span>
+                <span style="margin-left:auto; font-size:10px; color:#94a3b8;">lido do PACS ${new Date(d.lido_em || reg.atualizado_em).toLocaleString('pt-BR')}</span></div>
+            <div style="display:grid; grid-template-columns:1fr 1.4fr; gap:12px;">
+              <div>
+                <table style="width:100%; border-collapse:collapse; font-size:10.5px;"><tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Categoria</th><th ${th}>Lib.</th><th ${th}>Pend.</th><th ${th}>Total</th><th ${th}>%</th></tr>
+                ${cats.map(c => { const v = d.por_categoria[c], t = v.lib + v.pend; return `<tr><td style="padding:3px 6px; font-weight:700;">${c}</td><td ${td}>${v.lib}</td><td ${td}>${v.pend}</td><td ${td}><b>${t}</b></td><td ${td}>${pct(t, d.total)}</td></tr>`; }).join('')}</table>
+                <div style="font-size:10px; color:#475569; margin-top:6px;">🚨 Urgentes: <b>${d.urgentes.lib + d.urgentes.pend}</b> (${pct(d.urgentes.lib + d.urgentes.pend, d.total)}) · 🏥 Internados: <b>${d.internados.lib + d.internados.pend}</b>${d.pendentes ? ` · pendentes: ${Object.entries(d.por_situacao).map(([k, v]) => `${k.toLowerCase()} ${v}`).join(', ')}` : ''}</div>
+                <div style="font-size:10.5px; margin-top:8px; padding:6px 8px; background:#f8fafc; border-radius:6px;">⏱ <b>Exame → laudo liberado</b><br>
+                  Eletivos: mediana <b>${fmtH(te.med)}</b> · média ${fmtH(te.media)} · 90% até ${fmtH(te.p90)} · no prazo (${mod === 'US' ? 3 : 5} dias úteis): <b>${pct(te.no_prazo, te.com_prazo)}</b> (n=${te.n})<br>
+                  Urgentes: mediana <b>${fmtH(tu.med)}</b> · 90% até ${fmtH(tu.p90)}${mod === 'CT' ? ` · até 2 h: <b>${pct(tu.ate2h, tu.n)}</b>` : ''} (n=${tu.n})</div>
+              </div>
+              <div style="max-height:260px; overflow:auto;"><table style="width:100%; border-collapse:collapse; font-size:10px;"><tr style="color:#64748b; font-size:9.5px; text-transform:uppercase; position:sticky; top:0; background:#fff;"><th style="text-align:left; padding:3px 6px;">Exame</th><th ${th}>Lib.</th><th ${th}>Pend.</th><th ${th}>Total</th><th ${th}>%</th></tr>
+                ${d.por_exame.map(e => `<tr><td style="padding:2px 6px;">${escapeHtml(e.exame)}</td><td ${td}>${e.lib}</td><td ${td}>${e.pend}</td><td ${td}><b>${e.lib + e.pend}</b></td><td ${td}>${pct(e.lib + e.pend, d.total)}</td></tr>`).join('')}</table></div>
+            </div></div>`;
+    }
+    async function renderProducao(forcarLeitura) {
+        const content = document.getElementById('contentDashboard');
+        const temPacs = !!pacsToken();
+        content.innerHTML = `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                <b style="font-size:11.5px;">Mês:</b> <select id="prodMesSel" style="font-size:11px; font-weight:700; padding:3px 6px; border-radius:4px; border:1px solid #94a3b8; background:#fff; color:#0f172a;">${mesesRecentes(12).map(m => `<option value="${m}" ${m === prodMes ? 'selected' : ''}>${mesNomeAno(m)}</option>`).join('')}</select>
+                <button id="btnProdLer" class="btn-top-action" style="background:#16a34a; color:#fff;" ${temPacs ? '' : 'disabled title="Abra o PACS logado nesta aba"'}>🔄 Ler do PACS</button>
+                <span id="prodStatus" style="font-size:10.5px; color:#64748b;"></span>
+                <button id="btnProdRel" class="btn-top-action" style="background:#0284c7; color:#fff; margin-left:auto;">🖨️ Relatório</button></div>
+            <div id="prodCorpo"><div style="text-align:center; padding:30px; color:#60a5fa;">⏳ Carregando produção...</div></div>`;
+        const st = document.getElementById('prodStatus'), corpo = document.getElementById('prodCorpo');
+        document.getElementById('prodMesSel').onchange = e => { prodMes = e.target.value; renderProducao(); };
+        document.getElementById('btnProdLer').onclick = () => renderProducao(true);
+        document.getElementById('btnProdRel').onclick = relatorioProducao;
+        const pintar = () => {
+            const rUS = prodDados[`${prodMes}|US`], rCT = prodDados[`${prodMes}|CT`];
+            const tot = (rUS ? rUS.dados.total : 0) + (rCT ? rCT.dados.total : 0), lib = (rUS ? rUS.dados.liberados : 0) + (rCT ? rCT.dados.liberados : 0);
+            corpo.innerHTML = `<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:10px;">
+                    ${box(lib, `Laudos liberados — ${mesNomeAno(prodMes)}`, '#059669')}${box(tot - lib, 'Pendentes atribuídos a mim', '#d97706')}${box(tot, 'Total do mês (US + TC)', isDarkMode ? '#f1f5f9' : '#0f172a')}</div>
+                ${prodBlocoHtml('US', rUS, prodMes)}${prodBlocoHtml('CT', rCT, prodMes)}
+                <div style="font-size:10px; color:#94a3b8;">Mês = data do exame (mesmo critério do filtro do PACS: período + liberados) · meus = radiologista do exame = usuário logado no PACS · pacientes TESTE fora · tempo de liberação aproximado pela última atualização do exame (a API não dá a hora exata) · prazo sem descontar feriados · na nuvem ficam só números.</div>`;
+        };
+        try {
+            await prodCarregarNuvem(prodMes);
+            const reg = prodDados[`${prodMes}|US`], idade = reg ? Date.now() - new Date(reg.atualizado_em).getTime() : Infinity;
+            const recente = prodMes >= isoDe(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)).slice(0, 7);
+            pintar();
+            if (temPacs && (forcarLeitura || (recente && idade > 30 * 60000) || !reg)) {
+                st.textContent = '⏳ lendo o PACS (US e TC)…';
+                await prodLerPacs(prodMes);
+                st.textContent = '✓ atualizado agora';
+                pintar();
+            } else if (reg) st.textContent = '';
+        } catch (e) { st.textContent = '⚠ ' + e.message; st.style.color = '#dc2626'; }
+    }
+    function relatorioProducao() {
+        const rUS = prodDados[`${prodMes}|US`], rCT = prodDados[`${prodMes}|CT`];
+        if (!rUS && !rCT) { alert('Sem dados deste mês. Clique em 🔄 Ler do PACS primeiro.'); return; }
+        const tab = (head, rows) => `<table><tr>${head.map((h, i) => `<th class="${i ? 'n' : ''}">${h}</th>`).join('')}</tr>${rows.map(l => `<tr>${l.map((c, i) => `<td class="${i ? 'n' : ''}">${escapeHtml(String(c ?? '—'))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const sec = (mod, reg) => {
+            if (!reg) return `<h2>${PROD_NOME[mod].slice(2)}</h2><div>Sem leitura.</div>`;
+            const d = reg.dados, te = d.tat.eletivo, tu = d.tat.urgente;
+            return `<h2>${PROD_NOME[mod].slice(2)} — ${d.total} exames (${d.liberados} liberados + ${d.pendentes} pendentes)</h2>
+                ${tab(['Categoria', 'Liberados', 'Pendentes', 'Total', '%'], PROD_CATS.filter(c => d.por_categoria[c].lib + d.por_categoria[c].pend).map(c => { const v = d.por_categoria[c]; return [c, v.lib, v.pend, v.lib + v.pend, pct(v.lib + v.pend, d.total)]; }))}
+                <div class="meta">Urgentes: ${d.urgentes.lib + d.urgentes.pend} · Internados: ${d.internados.lib + d.internados.pend} · Exame → laudo (eletivos): mediana ${fmtH(te.med)}, 90% até ${fmtH(te.p90)}, no prazo ${pct(te.no_prazo, te.com_prazo)} · urgentes: mediana ${fmtH(tu.med)}${mod === 'CT' ? `, até 2 h ${pct(tu.ate2h, tu.n)}` : ''}</div>
+                ${tab(['Exame', 'Liberados', 'Pendentes', 'Total', '%'], d.por_exame.map(e => [e.exame, e.lib, e.pend, e.lib + e.pend, pct(e.lib + e.pend, d.total)]))}`;
+        };
+        const tot = (rUS ? rUS.dados.total : 0) + (rCT ? rCT.dados.total : 0);
+        janelaRelatorio(`Produção ${mesNomeAno(prodMes)}`, `<h1>Produção de laudos — ${mesNomeAno(prodMes)}</h1>
+            <div class="meta">Dr. Gabriel Gaspar · Ultrassom e Tomografia · mês pela data do exame · lido do PACS em ${new Date(((rUS || rCT).dados.lido_em) || Date.now()).toLocaleString('pt-BR')}</div>
+            <div class="kpis"><div class="kpi"><b>${rUS ? rUS.dados.total : '—'}</b>ultrassons</div><div class="kpi"><b>${rCT ? rCT.dados.total : '—'}</b>tomografias</div><div class="kpi"><b>${tot}</b>total</div></div>
+            ${sec('US', rUS)}${sec('CT', rCT)}
+            <div class="meta">Para conferir com o relatório do PACS: filtro por período (data do exame) do mês, situação Liberado, modalidade US/CT. Pendentes = ainda não liberados atribuídos ao Dr. Gabriel.</div>`);
     }
 
     async function renderDashboardNuvemFaltasLegado() {
