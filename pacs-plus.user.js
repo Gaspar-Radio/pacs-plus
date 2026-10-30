@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.38.1
+// @version      1.39.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -146,6 +146,8 @@
         // v1.18: ocultar linhas da lista sem mexer no filtro do PACS; botões do CKEditor que não usa
         c.ocultarLista = Object.assign({ lib: false, mods: [] }, c.ocultarLista || {});
         if (!Array.isArray(c.ocultarLista.mods)) c.ocultarLista.mods = [];
+        c.ocultarLista.mods = c.ocultarLista.mods.filter(m => m === 'CT' || m === 'US'); // v1.39: RX e Outros saíram do 👁 (não ficam ocultos sem botão)
+        c.plantao = Object.assign({ on: false, ontem: false }, c.plantao || {});
         if (typeof c.ckOcultar !== 'string') c.ckOcultar = CK_OCULTAR_PADRAO;
         if (!c.ckMig1181) { c.ckOcultar = c.ckOcultar.split('\n').filter(x => x.trim() !== 'Quebra de página').join('\n'); c.ckMig1181 = true; }
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
@@ -3752,7 +3754,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     function lpVoltarFiltro() {
         const comp = componenteLista(); if (!comp || !lpFiltroAntes) return;
         Object.entries(lpFiltroAntes).forEach(([k, v]) => (comp.$set ? comp.$set(comp.filtro, k, v) : (comp.filtro[k] = v)));
-        lpFiltroAntes = null; if ('page' in comp) comp.page = 1; comp.getExames();
+        lpFiltroAntes = null; if ('page' in comp) comp.page = 1;
+        if (cfg.plantao && cfg.plantao.on) { plantaoFiltro(comp); } else comp.getExames();
         const p = document.getElementById('pp-lp'); if (p) p.remove();
     }
     function alertaCurto(t) { const d = document.createElement('div'); d.className = 'pp-lp-aviso'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 3500); }
@@ -4466,13 +4469,13 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     }
     // v1.18 — ocultar linhas da lista (liberados / modalidades) sem mexer no filtro do PACS.
     // A linha i da tabela é o exame i do componente da lista (conferido 19/10/2026: 50/50).
-    const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom'], ['RX', 'RX', 'Raio-X (CR/DX)'], ['OUT', 'Outros', 'Demais modalidades (MR, MG, ECG, OT…)']];
+    const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom']]; // v1.39: só LIB, TC e US
     const grupoMod = sig => { sig = String(sig || '').toUpperCase(); return sig === 'CT' || sig === 'US' ? sig : (sig === 'CR' || sig === 'DX') ? 'RX' : 'OUT'; };
     let oculStat = { n: 0, total: 0 };
     function ocultarLinhasLista() {
         const f = findListTable(), comp = f && componenteLista();
         const o = cfg.ocultarLista || { lib: false, mods: [] };
-        let n = 0, total = 0;
+        let n = 0, total = 0, nPl = 0;
         if (f && comp) {
             const linhas = [...f.t.querySelectorAll('tbody > tr')];
             const ok = linhas.length === comp.exames.length;
@@ -4481,14 +4484,90 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
                 if (ex) total++;
                 const sit = String(ex && ex.exa_situacao || '').toUpperCase();
                 const mod = ex && ex.tipoexame && ex.tipoexame.modalidade && ex.tipoexame.modalidade.mod_sigla;
-                const esconder = !!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || o.mods.includes(grupoMod(mod)));
+                // v1.39 Plantão: some TC NÃO urgente (US todos, TC urgente, liberados ficam); com "+ontem", some o que é de ontem e já foi liberado
+                const plOc = !!ex && cfg.master && plantaoAtivo() && ((String(mod || '').toUpperCase() === 'CT' && !ex.exa_idnurgente) || (cfg.plantao.ontem && sit === 'LIBERADO' && String(ex.exa_data || '').slice(0, 10) < chaveDia(new Date())));
+                if (plOc) nPl++;
+                const esconder = plOc || (!!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || o.mods.includes(grupoMod(mod))));
                 if (esconder) { n++; if (!tr.hasAttribute('data-pp-oc')) tr.setAttribute('data-pp-oc', ''); }
                 else if (tr.hasAttribute('data-pp-oc')) tr.removeAttribute('data-pp-oc');
             });
         }
-        oculStat = { n, total };
+        oculStat = { n, total, nPl };
     }
     setInterval(ocultarLinhasLista, 700);
+
+    // ---------- v1.39: 🏥 PLANTÃO — um filtro só para o hospital ----------
+    // Filtro do PACS: hoje (ou ontem+hoje), US + TC, todas as situações, sem filtro de urgência. O PACS Plus esconde só as TC
+    // NÃO urgentes (exa_idnurgente). US (urgente e eletivo, inclusive em aberto), TC urgente e liberados aparecem. Liga/desliga na
+    // barra (lembra em cada computador). Se você mudar o filtro à mão (busca por nome, 📝 Filtrar…), o Plantão pausa sozinho.
+    const PL_CHAVES = ['data_codigo', 'data_inicial', 'data_final', 'mod_codigo', 'exa_situacao', 'exa_idnurgente', 'pac_nome', 'pac_pacs_codigo'];
+    let plAntes = null, plSig = '', plPausa = false, plAplicado = false;
+    const plAssin = f => JSON.stringify(PL_CHAVES.map(k => f && f[k]));
+    const plantaoAtivo = () => !!(cfg.plantao && cfg.plantao.on) && !plPausa;
+    function plantaoFiltro(comp) {
+        if (!comp || !comp.filtro) return false;
+        if (!plAntes) plAntes = JSON.parse(JSON.stringify(comp.filtro));
+        const f = comp.filtro, set = (k, v) => (comp.$set ? comp.$set(f, k, v) : (f[k] = v));
+        const hoje = chaveDia(new Date()), d = new Date(); d.setDate(d.getDate() - 1); const ontem = chaveDia(d);
+        if (cfg.plantao.ontem) { set('data_codigo', 1); set('data_inicial', ontem); set('data_final', hoje); } else { set('data_codigo', 2); set('data_inicial', ''); set('data_final', ''); }
+        set('mod_codigo', [LP_MOD.US, LP_MOD.CT]); set('exa_situacao', []); set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
+        if ('page' in comp) comp.page = 1;
+        plSig = plAssin(comp.filtro); plPausa = false; plAplicado = true;
+        comp.getExames();
+        return true;
+    }
+    function plantaoLigar(on) {
+        recarregarCfg(); cfg.plantao.on = on; saveCfg();
+        const comp = componenteLista();
+        if (on) { if (!plantaoFiltro(comp)) alertaCurto('Abra a página Exames — o Plantão entra assim que a lista aparecer.'); }
+        else {
+            plPausa = false; plAplicado = false;
+            if (comp && plAntes) { Object.entries(plAntes).forEach(([k, v]) => (comp.$set ? comp.$set(comp.filtro, k, v) : (comp.filtro[k] = v))); if ('page' in comp) comp.page = 1; comp.getExames(); }
+            plAntes = null;
+        }
+        ocultarLinhasLista(); plantaoDock();
+    }
+    function plantaoTick() {
+        if (!cfg.master) return;
+        const comp = componenteLista();
+        if (cfg.plantao.on && comp && comp.filtro) {
+            if (!plAplicado) plantaoFiltro(comp); // página recarregada com o Plantão ligado
+            else if (!plPausa && plAssin(comp.filtro) !== plSig) { plPausa = true; ocultarLinhasLista(); } // filtro mudou à mão → pausa
+        }
+        plantaoDock();
+    }
+    function plantaoDock() {
+        const d = document.getElementById('pp-dock');
+        let b = document.getElementById('ppd-plantao');
+        if (!d || !findListTable()) { if (b) b.remove(); return; }
+        if (!b) {
+            b = document.createElement('span'); b.id = 'ppd-plantao'; b.className = 'ppd-plantao';
+            b.addEventListener('click', e => {
+                e.stopPropagation();
+                if (e.target.closest('.pl-ontem')) { recarregarCfg(); cfg.plantao.ontem = !cfg.plantao.ontem; saveCfg(); plantaoFiltro(componenteLista()); plantaoDock(); return; }
+                if (cfg.plantao.on && plPausa) { plantaoFiltro(componenteLista()); plantaoDock(); return; } // pausado → volta
+                plantaoLigar(!cfg.plantao.on);
+            });
+            const ref = document.getElementById('ppd-oc'); if (ref && ref.parentElement === d) d.insertBefore(b, ref); else d.appendChild(b);
+        }
+        const on = !!cfg.plantao.on, n = oculStat.nPl || 0;
+        const html = !on ? '🏥 Plantão' : plPausa ? '🏥 Plantão ⏸' : `🏥 Plantão ✓${n ? ` <small>−${n}</small>` : ''} <span class="pl-ontem${cfg.plantao.ontem ? ' on' : ''}" title="Incluir ontem (pendências lançadas no dia anterior). Desligado = só hoje, mais leve.">+ontem</span>`;
+        if (b.innerHTML !== html) b.innerHTML = html;
+        const cl = 'ppd-plantao' + (on ? (plPausa ? ' pausa' : ' on') : '');
+        if (b.className !== cl) b.className = cl;
+        b.title = !on ? 'Filtro do plantão: US do dia (urgente, eletivo e em aberto) + TC URGENTE. TC eletiva/em aberto não aparece. Clique para ligar.'
+            : plPausa ? 'Plantão pausado porque o filtro foi mudado (busca, 📝 Filtrar…). Clique para voltar ao filtro do plantão.'
+            : `Plantão ligado${cfg.plantao.ontem ? ' (ontem + hoje)' : ' (hoje)'}: ${n} oculto(s) (TC não urgente${cfg.plantao.ontem ? ' e o que é de ontem já liberado' : ''}). Clique para desligar e voltar ao filtro anterior.`;
+    }
+    setInterval(() => { try { plantaoTick(); } catch (e) { /* segue */ } }, 1500);
+    setCss('pp-plantao-css', `
+#pp-dock .ppd-plantao { height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border-radius: 6px; background: #2c3036; color: #cbd5e1; border: 1px solid #3a3f46; border-bottom: 2px solid #64748b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
+#pp-dock .ppd-plantao:hover { background: #363b42; }
+#pp-dock .ppd-plantao.on { color: #fff; background: #065f46; border-color: #10b981; border-bottom-color: #34d399; }
+#pp-dock .ppd-plantao.pausa { color: #fde68a; border-bottom-color: #f59e0b; }
+#pp-dock .ppd-plantao small { color: #a7f3d0; font-size: 11px; }
+#pp-dock .ppd-plantao .pl-ontem { padding: 1px 6px; border-radius: 9px; border: 1px solid #6ee7b7; color: #d1fae5; font-size: 10.5px; }
+#pp-dock .ppd-plantao .pl-ontem.on { background: #fbbf24; border-color: #fbbf24; color: #1f2937; }`);
 
     // v1.32 — zoom só da LISTA de exames (nome, idade, exame, data…), sem mexer no zoom do Chrome. Controle A− % A+ na barra do topo.
     function zoomListaCss() {
