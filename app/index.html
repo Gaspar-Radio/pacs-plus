@@ -91,6 +91,22 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 .msg{margin-top:10px;font-size:14px;color:var(--er)}
 .note{font-size:12px;color:var(--mut);margin-top:12px}
 .toast{position:fixed;left:50%;bottom:calc(140px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#0f172a;color:#fff;padding:10px 14px;border-radius:12px;font-size:14px;z-index:30;display:none;max-width:90vw}
+/* v1.4.0 — saídas, anotações, gestão (vagas / financeiro) */
+.per.s{background:#64748b}
+textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--ln);border-radius:10px;padding:10px 12px;width:100%;margin-top:8px;resize:vertical}
+.tag.nota{background:#fef3c7;color:#92400e}@media (prefers-color-scheme:dark){.tag.nota{background:#422006;color:#fde68a}}
+.nota{background:var(--bg);border:1px solid var(--ln);border-radius:10px;padding:8px 30px 8px 10px;margin-bottom:6px;font-size:14px;position:relative}.nota small{display:block;color:var(--mut);font-size:11px}
+.ndel{position:absolute;right:4px;top:4px;color:var(--mut);padding:4px 8px}
+.nchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.nchip{border:1px solid var(--ln);border-radius:999px;padding:6px 10px;font-size:13px;font-weight:600;background:var(--card)}
+.nchip.on{background:var(--pri);color:#fff;border-color:var(--pri)}.nchip.sa.on{background:#b45309;border-color:#b45309}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:var(--chip);border-radius:12px;padding:3px;margin:6px 0 10px}.seg.u6{grid-template-columns:repeat(6,1fr)}.seg.u3{grid-template-columns:repeat(3,1fr)}
+.seg button{padding:8px 2px;border-radius:9px;font-size:13px;font-weight:700;color:var(--mut)}.seg button.on{background:var(--card);color:var(--tx);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.navp{display:flex;align-items:center;gap:8px;margin:0 0 8px}.navp b{flex:1;text-align:center;font-size:15px}.navp button{width:40px;height:36px;border-radius:10px;background:var(--card);border:1px solid var(--ln);font-size:18px}
+.kpi small{display:block;font-size:11px;color:var(--mut);margin-top:2px}
+.sbar{display:flex;gap:2px;height:24px;margin:6px 0}.sbar i{display:block;border-radius:4px;min-width:3px;color:#fff;font-size:11px;font-weight:700;line-height:24px;padding-left:5px;font-style:normal;white-space:nowrap}
+.leg{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--mut)}.leg span i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.lst{margin:0;padding-left:18px;font-size:14px}.lst li{margin:4px 0}
+.tbl.sm{font-size:13px}.tbl.sm td,.tbl.sm th{padding:6px 4px}
 </style>
 </head>
 <body>
@@ -107,8 +123,8 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.3.0';
-const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1' };
+const VERSAO = '1.4.0';
+const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1', gest: 'agapp_gestao_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -146,7 +162,13 @@ function normConvenio(c) {
 function toast(t, ms = 2600) { const el = $('#toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => { el.style.display = 'none'; }, ms); }
 
 // ---------------------------------------------------------------- estado
-const S = { tab: ls.get(K.tab, 'agenda'), dia: hojeIso(), linhas: [], carregando: false, erro: '', rt: 'off', ultima: 0, per: { m: false, t: false } }; // per: períodos começam recolhidos
+const S = { tab: ls.get(K.tab, 'agenda'), dia: hojeIso(), linhas: [], carregando: false, erro: '', rt: 'off', ultima: 0, per: { m: false, t: false, s: false }, gest: ls.get(K.gest, 'faltas'), nota: null }; // per: períodos começam recolhidos
+// v1.4.0 — saída = desmarcou/cancelado, ou saiu da planilha/PACS sem chegar (mesma regra dos PCs): sai da agenda do período e libera a vaga
+const ehSaida = r => r.status === 'cancelado' || (!!r.removido_origem_em && (!r.status || r.status === 'pendente'));
+const notasDe = r => (Array.isArray(r && r.notas) ? r.notas : []);
+const NOTA_TAGS = ['Intercorrência', 'Saída', 'Preparo', 'Contato', 'Pendência', 'Outra'];
+const SAIDA_MOTIVOS = ['Desmarcou', 'Remanejado', 'Convênio não autorizou', 'Desistiu / foi embora', 'Sem preparo', 'Exame não indicado', 'Duplicado', 'Outro'];
+const motivoSaida = r => { const n = [...notasDe(r)].reverse().find(x => x.tag === 'Saída'); return n ? n.motivo || '' : ''; };
 
 // ---------------------------------------------------------------- configuração e sessão
 function cfg() { const c = ls.get(K.cfg, null); return c && c.url && c.key ? c : null; }
@@ -361,7 +383,7 @@ async function pdfCompartilhar(doc, nome, titulo) {
 const SIT = { pendente: '', esperando: 'Em espera', atendido: 'Atendido', faltou: 'Faltou' };
 async function pdfAgenda() {
     try { await carregarPdfLib(); } catch (e) { toast(e.message, 3500); return; }
-    const dia = S.dia, ativos = S.linhas.filter(r => r.status !== 'cancelado');
+    const dia = S.dia, ativos = S.linhas.filter(r => !ehSaida(r)), saidas = S.linhas.filter(ehSaida);
     if (!ativos.length) { toast('Nenhum paciente neste dia.'); return; }
     const comSit = dia <= hojeIso();
     const npac = new Set(ativos.map(chavePac)).size, nproc = ativos.reduce((a, r) => a + proc(r), 0);
@@ -389,6 +411,11 @@ async function pdfAgenda() {
         });
         y = doc.lastAutoTable.finalY + 6;
         if (y > 260) { doc.addPage(); y = 14; }
+    }
+    if (saidas.length) { // só o MOTIVO da saída (o texto livre das anotações não vai para o papel)
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text(`Saídas — ${saidas.length} (desmarcados / cancelados)`, 14, y + 4);
+        doc.autoTable({ startY: y + 6, head: [['Hora', 'Paciente', 'Exame', 'Convênio', 'Motivo']], body: saidas.map(r => [normTime(r.hora), r.paciente, r.exame, r.convenio || '', motivoSaida(r) || (r.status === 'cancelado' ? 'cancelado' : 'saiu da planilha / PACS')]), theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 8.2, cellPadding: 1.4, textColor: [90, 90, 90], lineColor: [205, 210, 218], lineWidth: 0.15 }, headStyles: { fillColor: [100, 116, 139], textColor: 255 }, margin: { left: 14, right: 14 } });
     }
     pdfRodape(doc, 'Documento interno com dados de pacientes — não repassar');
     await pdfCompartilhar(doc, `Agenda US ${dia.split('-').reverse().join('-')}.pdf`, `Agenda de Ultrassom — ${fmtDia(dia)}`);
@@ -482,8 +509,8 @@ function pintarTela() {
     const ehAgenda = S.tab === 'agenda';
     if (hdr) { $('#ant').style.visibility = $('#prox').style.visibility = ehAgenda ? 'visible' : 'hidden'; }
     fab.style.display = ehAgenda ? 'block' : 'none';
-    t.innerHTML = ehAgenda ? `${S.dia === hojeIso() ? 'Hoje' : fmtDia(S.dia)}<small>${fmtDia(S.dia)} · toque para voltar a hoje</small>` : { semana: 'Próximos dias', analytics: 'Faltas, espera e produção', laudos: 'Laudos pendentes', consulta: 'Consulta', ajustes: 'Ajustes' }[S.tab];
-    if (ehAgenda) pintarAgenda(); else if (S.tab === 'semana') telaSemana(); else if (S.tab === 'analytics') telaAnalytics(); else if (S.tab === 'laudos') telaLaudos(); else if (S.tab === 'consulta') telaConsulta(); else telaAjustes();
+    t.innerHTML = ehAgenda ? `${S.dia === hojeIso() ? 'Hoje' : fmtDia(S.dia)}<small>${fmtDia(S.dia)} · toque para voltar a hoje</small>` : S.tab === 'analytics' ? GEST_TIT[S.gest] || GEST_TIT.faltas : { semana: 'Próximos dias', laudos: 'Laudos pendentes', consulta: 'Consulta', ajustes: 'Ajustes' }[S.tab];
+    if (ehAgenda) pintarAgenda(); else if (S.tab === 'semana') telaSemana(); else if (S.tab === 'analytics') telaGestao(); else if (S.tab === 'laudos') telaLaudos(); else if (S.tab === 'consulta') telaConsulta(); else telaAjustes();
     pintarSync();
 }
 function pintarSync() {
@@ -513,42 +540,52 @@ function cardHtml(r, nProc) {
     if (r.origem === 'encaixe_pacs' || r.origem === 'encaixe_manual') tags.push('<span class="tag enc">ENCAIXE</span>');
     if (r.pacs_paciente_id > 0) tags.push(`<span class="tag">🔗 ${r.chegou_em ? hm(r.chegou_em) : 'PACS'}</span>`);
     if (r.removido_origem_em && s !== 'cancelado') tags.push('<span class="tag sus">⚠ SAIU</span>');
+    if (notasDe(r).length) tags.push(`<span class="tag nota">🗒 ${notasDe(r).length}</span>`);
     if (r.urgente) tags.unshift(`<span class="tag urg">🚨 URGÊNCIA${r.setor ? ' · ' + esc(r.setor) : ''}</span>`);
+    const saida = ehSaida(r), mot = saida ? motivoSaida(r) : '';
     return `<div class="card ${s}" data-id="${r.id}">
-<div class="row1" data-det="${r.id}"><div class="hora">${esc(normTime(r.hora))}</div><div class="who"><div class="pac">${esc(r.paciente)}</div><div class="ex">${esc(r.exame)}</div>${r.obs ? `<div class="obs">📝 ${esc(r.obs)}</div>` : ''}<div class="tags">${tags.join('')}</div></div>${statusHtml(r)}</div>
-${s === 'cancelado' ? `<div class="acts"><button class="b" data-a="chegou" data-id="${r.id}">Chegou</button><span></span><span></span></div>` : `<div class="acts">
+<div class="row1" data-det="${r.id}"><div class="hora">${esc(normTime(r.hora))}</div><div class="who"><div class="pac">${esc(r.paciente)}</div><div class="ex">${esc(r.exame)}</div>${r.obs ? `<div class="obs">📝 ${esc(r.obs)}</div>` : ''}${mot ? `<div class="obs">🚪 ${esc(mot)}</div>` : ''}<div class="tags">${tags.join('')}</div></div>${statusHtml(r)}</div>
+${saida ? `<div class="acts"><button class="b" data-a="chegou" data-id="${r.id}">Chegou</button><span></span><span></span></div>` : `<div class="acts">
 <button class="b ${s === 'esperando' ? 'on-chegou' : ''}" data-a="chegou" data-id="${r.id}">${s === 'esperando' ? 'Em espera' : 'Chegou'}</button>
 <button class="b ${s === 'atendido' ? 'on-atend' : ''}" data-a="atend" data-id="${r.id}">Atend</button>
 <button class="b ${s === 'faltou' ? 'on-falta' : ''}" data-a="falta" data-id="${r.id}">Falta</button></div>`}</div>`;
 }
 function pintarAgenda() {
     const tela = $('#tela'); if (!tela || S.tab !== 'agenda') return;
-    const L = S.linhas, ativos = L.filter(r => r.status !== 'cancelado');
+    const L = S.linhas, ativos = L.filter(r => !ehSaida(r)), saidas = L.filter(ehSaida);
     const porPac = {}; ativos.forEach(r => { const k = chavePac(r); porPac[k] = (porPac[k] || 0) + proc(r); });
-    const cnt = st => L.filter(r => (r.status || 'pendente') === st).length;
-    const m = L.filter(r => normTime(r.hora) < '12:00'), t = L.filter(r => normTime(r.hora) >= '12:00');
-    const st = arr => { const a = arr.filter(r => r.status !== 'cancelado'); return `${new Set(a.map(chavePac)).size} pac · ${a.reduce((x, r) => x + proc(r), 0)} proc`; };
-    const esp = L.filter(r => r.status === 'esperando' && !r.urgente).map(r => minutos(r.chegou_em) || 0);
+    const cnt = st => ativos.filter(r => (r.status || 'pendente') === st).length;
+    const m = ativos.filter(r => normTime(r.hora) < '12:00'), t = ativos.filter(r => normTime(r.hora) >= '12:00');
+    const st = a => `${new Set(a.map(chavePac)).size} pac · ${a.reduce((x, r) => x + proc(r), 0)} proc`;
+    const esp = ativos.filter(r => r.status === 'esperando' && !r.urgente).map(r => minutos(r.chegou_em) || 0);
     const espDe = arr => { const n = arr.filter(r => r.status === 'esperando').length; return n ? ` · ⏳ ${n}` : ''; };
     tela.innerHTML = `<div class="chips">${L.length ? '<button class="chip pdf" id="pdfdia">📄 PDF</button>' : ''}
 <span class="chip">👤 ${new Set(ativos.map(chavePac)).size}</span><span class="chip">🧾 ${ativos.reduce((a, r) => a + proc(r), 0)}</span>
-<span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${cnt('cancelado') ? `<span class="chip">⊘ ${cnt('cancelado')}</span>` : ''}${ativos.some(r => r.urgente) ? `<span class="chip">🚨 ${new Set(ativos.filter(r => r.urgente).map(chavePac)).size}</span>` : ''}</div>
+<span class="chip">⏳ ${cnt('esperando')}${esp.length ? ` · máx ${fmtMin(Math.max(...esp))}` : ''}</span><span class="chip">✓ ${cnt('atendido')}</span><span class="chip">✗ ${cnt('faltou')}</span><span class="chip">◌ ${cnt('pendente')}</span>${saidas.length ? `<button class="chip" id="chsai">🚪 ${saidas.length}</button>` : ''}${ativos.some(r => r.urgente) ? `<span class="chip">🚨 ${new Set(ativos.filter(r => r.urgente).map(chavePac)).size}</span>` : ''}</div>
 <main>${!L.length ? `<div class="vazio">${S.carregando ? 'Carregando…' : 'Nenhum paciente neste dia.'}</div>` : `
 ${m.length ? `<button class="per m" data-per="m"><span>${S.per.m ? '▾' : '▸'} ☀️ Manhã</span><small>${st(m)}${espDe(m)}</small></button>${S.per.m ? m.map(r => cardHtml(r, porPac[chavePac(r)])).join('') : ''}` : ''}
-${t.length ? `<button class="per t" data-per="t"><span>${S.per.t ? '▾' : '▸'} 🌤️ Tarde</span><small>${st(t)}${espDe(t)}</small></button>${S.per.t ? t.map(r => cardHtml(r, porPac[chavePac(r)])).join('') : ''}` : ''}`}</main>`;
+${t.length ? `<button class="per t" data-per="t"><span>${S.per.t ? '▾' : '▸'} 🌤️ Tarde</span><small>${st(t)}${espDe(t)}</small></button>${S.per.t ? t.map(r => cardHtml(r, porPac[chavePac(r)])).join('') : ''}` : ''}
+${saidas.length ? `<button class="per s" data-per="s" id="persai"><span>${S.per.s ? '▾' : '▸'} 🚪 Saídas</span><small>${saidas.length} · desmarcados / cancelados</small></button>${S.per.s ? saidas.map(r => cardHtml(r, 0)).join('') : ''}` : ''}`}</main>`;
     tela.querySelectorAll('[data-per]').forEach(b => { b.onclick = () => { S.per[b.dataset.per] = !S.per[b.dataset.per]; pintarAgenda(); }; });
     tela.querySelectorAll('[data-a]').forEach(b => { b.onclick = e => { e.stopPropagation(); const id = Number(b.dataset.id); ({ chegou: acaoChegou, atend: acaoAtend, falta: acaoFalta })[b.dataset.a](id); }; });
     tela.querySelectorAll('[data-det]').forEach(d => { d.onclick = () => abrirDetalhe(Number(d.dataset.det)); });
     const bp = $('#pdfdia'); if (bp) bp.onclick = () => pdfAgenda();
+    const cs = $('#chsai'); if (cs) cs.onclick = () => { S.per.s = true; pintarAgenda(); const ps = $('#persai'); if (ps) ps.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
     if (L.length) carregarPdfLib().catch(() => {}); // deixa pronto para o toque no PDF
 }
 function abrirSheet(html) { const s = $('#sheet'); s.innerHTML = html; $('#sheetbg').style.display = 'block'; requestAnimationFrame(() => s.classList.add('open')); }
 function fecharSheet() { $('#sheet').classList.remove('open'); $('#sheetbg').style.display = 'none'; }
 function abrirDetalhe(id) {
     const r = S.linhas.find(x => x.id === id); if (!r) return;
+    S.nota = { id, tag: ehSaida(r) ? 'Saída' : 'Intercorrência', motivo: null };
+    abrirSheet(detalheHtml(r)); ligarDetalhe(id);
+}
+const fmtNota = iso => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? '' : `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function detalheHtml(r) {
     const orig = { agenda: 'agenda (print)', prefeitura_planilha: 'planilha da Prefeitura', spdata_pdf: 'PDF do SPDATA', encaixe_manual: 'encaixe manual', encaixe_pacs: 'encaixe criado pelo PACS' }[r.origem] || r.origem || '—';
-    abrirSheet(`<h3>${esc(r.paciente)}</h3>
-<div class="tl"><span>Horário:</span> ${esc(normTime(r.hora))} · ${esc(r.tipo || '')}</div>
+    const notas = notasDe(r), saida = ehSaida(r), tagSaida = S.nota.tag === 'Saída';
+    return `<h3>${esc(r.paciente)}</h3>
+<div class="tl"><span>Horário:</span> ${esc(normTime(r.hora))} · ${esc(r.tipo || '')}${saida ? ' · <b style="color:#b45309">🚪 nas Saídas</b>' : ''}</div>
 <div class="tl"><span>Convênio:</span> ${esc(r.convenio)}</div>
 <div class="tl"><span>Exame:</span> ${esc(r.exame)} ${proc(r) > 1 ? `(${proc(r)} proc.)` : ''}</div>
 ${r.obs ? `<div class="tl"><span>Obs.:</span> ${esc(r.obs)}</div>` : ''}
@@ -557,10 +594,45 @@ ${r.obs ? `<div class="tl"><span>Obs.:</span> ${esc(r.obs)}</div>` : ''}
 <div class="tl"><span>Imagens no PACS:</span> ${hm(r.imagem_em)}</div>
 <div class="tl"><span>Atendido:</span> ${hm(r.atendido_em)} ${r.atendido_em ? `(${r.atendido_fonte === 'imagem' ? 'pela imagem' : 'clique'})` : ''}${r.tempo_espera_min != null ? ` · espera ${fmtMin(r.tempo_espera_min)}` : ''}</div>
 <div class="tl"><span>Urgência:</span> ${r.urgente ? `<b style="color:#dc2626">sim</b> (${esc({ sus: 'SUS hospitalar', pacs: 'marcado no PACS', manual: 'marcado à mão' }[r.urgente_fonte] || r.urgente_fonte || '—')})` : 'não'}${r.setor ? ` · setor: ${esc(r.setor)}` : ''}</div>
+<h2><span>🗒 Anotações (${notas.length})</span></h2>
+${notas.length ? notas.map((n, k) => `<div class="nota"><button class="ndel" data-del="${k}" aria-label="Apagar anotação">✕</button><small>${esc(fmtNota(n.em))}${n.por ? ' · ' + esc(n.por) : ''}</small><b>${esc(n.tag || 'Nota')}${n.motivo ? ': ' + esc(n.motivo) : ''}</b>${n.txt ? `<div>${esc(n.txt)}</div>` : ''}</div>`).join('') : '<div class="note" style="margin:0">Nenhuma anotação.</div>'}
+<div class="nchips">${NOTA_TAGS.map(t => `<button class="nchip${t === 'Saída' ? ' sa' : ''}${t === S.nota.tag ? ' on' : ''}" data-tag="${t}">${t === 'Saída' ? '🚪 ' : ''}${t}</button>`).join('')}</div>
+${tagSaida ? `<div class="nchips">${SAIDA_MOTIVOS.map(mo => `<button class="nchip sa${mo === S.nota.motivo ? ' on' : ''}" data-mot="${mo}">${mo}</button>`).join('')}</div>` : ''}
+<textarea id="ntxt" maxlength="1000" rows="3" placeholder="${tagSaida ? 'Detalhe (opcional): quem avisou, nova data…' : 'Ex.: passou mal na espera; trouxe exame anterior; aguardando autorização…'}"></textarea>
+<button class="btnp" id="nsal"${tagSaida ? ' style="background:#b45309"' : ''}>${tagSaida ? (saida || r.status === 'atendido' ? 'Salvar motivo' : '🚪 Registrar saída') : 'Salvar anotação'}</button>
+${saida ? '<button class="btns" id="nvol">↩ Voltar para a agenda</button>' : ''}
+<div class="note">Anotações vão para a nuvem e aparecem nos computadores. Não entram em relatórios; no PDF da agenda sai só o motivo da saída.</div>
 <button class="${r.urgente ? 'btns' : 'btnu'}" id="urg">${r.urgente ? 'Retirar urgência' : '🚨 Marcar como urgência'}</button>
-<button class="btnd" id="rem">Remover da agenda</button><button class="btns" id="fec">Fechar</button>`);
+<button class="btnd" id="rem">Remover da agenda</button><button class="btns" id="fec">Fechar</button>`;
+}
+function pintarDetalhe(id, limpar) {
+    const r = S.linhas.find(x => x.id === id), sh = $('#sheet'); if (!r || !sh) { fecharSheet(); return; }
+    const txt = limpar ? '' : (($('#ntxt') || {}).value || '');
+    sh.innerHTML = detalheHtml(r); $('#ntxt').value = txt; ligarDetalhe(id);
+}
+function ligarDetalhe(id) {
+    const sh = $('#sheet');
+    sh.querySelectorAll('[data-tag]').forEach(b => { b.onclick = () => { S.nota.tag = b.dataset.tag; if (S.nota.tag !== 'Saída') S.nota.motivo = null; pintarDetalhe(id); }; });
+    sh.querySelectorAll('[data-mot]').forEach(b => { b.onclick = () => { S.nota.motivo = b.dataset.mot; pintarDetalhe(id); }; });
+    sh.querySelectorAll('[data-del]').forEach(b => { b.onclick = () => { if (!confirm('Apagar esta anotação?')) return; const k = Number(b.dataset.del); aplicar(id, r => ({ notas: notasDe(r).filter((_, j) => j !== k) })); pintarDetalhe(id); }; });
+    $('#nsal').onclick = () => notaSalvar(id);
+    const v = $('#nvol'); if (v) v.onclick = () => { aplicar(id, r => ({ status: r.chegou_em ? 'esperando' : 'pendente', removido_origem_em: null, notas: [...notasDe(r), { em: agoraIso(), tag: 'Retorno', txt: 'voltou para a agenda', por: 'iPhone' }] })); S.nota.tag = 'Intercorrência'; pintarDetalhe(id, true); toast('Voltou para a agenda.'); };
     $('#rem').onclick = () => remover(id); $('#fec').onclick = fecharSheet;
     $('#urg').onclick = () => { fecharSheet(); acaoUrgente(id); };
+}
+function notaSalvar(id) {
+    const r = S.linhas.find(x => x.id === id); if (!r) return;
+    if (id < 0) { toast('Encaixe ainda não enviado: aguarde a conexão.'); return; }
+    const txt = String(($('#ntxt') || {}).value || '').trim().slice(0, 1000), tag = S.nota.tag, motivo = tag === 'Saída' ? S.nota.motivo : null;
+    if (tag === 'Saída' && !motivo) { toast('Escolha o motivo da saída.'); return; }
+    if (tag !== 'Saída' && !txt) { toast('Escreva a anotação.'); return; }
+    const e = { em: agoraIso(), tag, por: 'iPhone' }; if (motivo) e.motivo = motivo; if (txt) e.txt = txt;
+    const campos = { notas: [...notasDe(r), e] };
+    if (tag === 'Saída' && r.status !== 'atendido') campos.status = 'cancelado'; // libera a vaga e vai para 🚪 Saídas (igual aos PCs)
+    aplicar(id, () => campos);
+    S.nota = { id, tag: 'Intercorrência', motivo: null };
+    pintarDetalhe(id, true);
+    toast(campos.status === 'cancelado' ? 'Saída registrada — vaga liberada.' : 'Anotação salva.');
 }
 function abrirEncaixe() {
     const d = new Date(); const h = `${pad(d.getHours())}:${pad(Math.floor(d.getMinutes() / 5) * 5)}`;
@@ -597,14 +669,14 @@ function periodoApp(p) {
     return { ini: `${p}-01`, fim, rotulo: `${MESES[m - 1]}/${y}${ult >= ontem ? ' (mês em curso)' : ''}`, curto: `${MESES[m - 1]}-${y}`, mes: p };
 }
 async function telaAnalytics() {
-    const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
+    const tela = $('#tela'); tela.innerHTML = `<main>${gestaoSeg()}<div class="vazio">Carregando…</div></main>`; ligarSeg();
     S.anPer = S.anPer || '30d';
     const meses = []; { const d = new Date(); d.setDate(1); for (let i = 0; i < 12; i++) { meses.push(isoDia(d).slice(0, 7)); d.setMonth(d.getMonth() - 1); } }
     const per = periodoApp(S.anPer);
     try {
         const [r, prod] = await Promise.all([api('rpc/analytics_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim }),
             api(`producao_mensal?mes=eq.${per.mes}&select=*&order=modalidade.desc`).catch(() => [])]);
-        if (S.tab !== 'analytics') return;
+        if (S.tab !== 'analytics' || S.gest !== 'faltas') return;
         S.an = { r, per, prod };
         carregarPdfLib().catch(() => {});
         const esp = Object.fromEntries((r.espera || []).map(e => [e.cat, e]));
@@ -617,7 +689,7 @@ async function telaAnalytics() {
 <div class="tl" style="margin-top:4px"><span>Mais feitos:</span> ${d.por_exame.slice(0, 4).map(e => `${esc(e.exame.toLowerCase())} <b>${e.lib + e.pend}</b>`).join(' · ')}</div>
 <div class="tl" style="margin-top:4px"><span>Exame → laudo (eletivos):</span> mediana <b>${d.tat.eletivo.med == null ? '–' : d.tat.eletivo.med < 24 ? d.tat.eletivo.med + ' h' : Math.round(d.tat.eletivo.med / 24 * 10) / 10 + ' d'}</b> · no prazo ${d.tat.eletivo.com_prazo ? Math.round(d.tat.eletivo.no_prazo / d.tat.eletivo.com_prazo * 100) : 0}%</div>
 <div class="tl" style="margin-top:4px;font-size:11px"><span>lido do PACS em ${new Date(p.atualizado_em).toLocaleString('pt-BR')}</span></div></div>`; }).join('');
-        tela.innerHTML = `<main><select id="anper" style="margin:4px 0 8px">${[['30d', 'Últimos 30 dias'], ['90d', 'Últimos 90 dias'], ...meses.map(m => [m, `${MESES[Number(m.slice(5)) - 1]}/${m.slice(0, 4)}`])].map(([v, t]) => `<option value="${v}" ${v === S.anPer ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        tela.innerHTML = `<main>${gestaoSeg()}<select id="anper" style="margin:4px 0 8px">${[['30d', 'Últimos 30 dias'], ['90d', 'Últimos 90 dias'], ...meses.map(m => [m, `${MESES[Number(m.slice(5)) - 1]}/${m.slice(0, 4)}`])].map(([v, t]) => `<option value="${v}" ${v === S.anPer ? 'selected' : ''}>${t}</option>`).join('')}</select>
 <button class="btnp" id="pdfan" style="margin:0 0 10px">📄 Gerar PDF para compartilhar</button>
 <div class="kpis"><div class="kpi"><b>${r.agendados}</b><span>Agendados com desfecho</span></div><div class="kpi"><b style="color:var(--er)">${r.faltas} (${r.taxa ?? 0}%)</b><span>Faltas</span></div><div class="kpi"><b>${r.perdidos}</b><span>Procedimentos perdidos</span></div><div class="kpi"><b>${fmtMin(mediaAg)}</b><span>Espera média dos agendados</span></div></div>
 ${prodHtml ? `<h2><span>Produção ${per.mes === hojeIso().slice(0, 7) ? 'do mês (até agora)' : MESES[Number(per.mes.slice(5)) - 1]}</span></h2>${prodHtml}` : ''}
@@ -628,9 +700,167 @@ ${barras((r.noshow_convenio || []).map(c => ({ k: c.convenio, f: c.faltas, t: c.
 ${barras((r.noshow_horario || []).map(c => ({ k: `${String(c.faixa || '').slice(0, 2)}h · ${c.periodo || ''}`, f: c.faltas, t: c.agendados, p: c.taxa })), 'Por faixa horária')}
 ${barras((r.noshow_dia || []).map(c => ({ k: c.dia, f: c.faltas, t: c.agendados, p: c.taxa })), 'Por dia da semana')}
 <div class="note">Faltas só entre agendados (encaixe e SUS/urgência não entram). Espera dos agendados sem SUS/urgência. Produção lida do PACS pela Agenda no computador (aba 📈 Produção). Mesmo cálculo dos PCs.</div></main>`;
+        ligarSeg();
         $('#anper').onchange = e => { S.anPer = e.target.value; telaAnalytics(); };
         $('#pdfan').onclick = () => pdfAnalytics();
-    } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
+    } catch (e) { tela.innerHTML = `<main>${gestaoSeg()}<div class="vazio">Erro: ${esc(e.message)}</div></main>`; ligarSeg(); }
+}
+// v1.4.0 — Gestão em 3 partes: faltas & espera · vagas da escala × agenda · financeiro (repasse pela produção)
+const GEST_TIT = { faltas: 'Faltas, espera e produção', vagas: 'Vagas × agenda', fin: 'Financeiro' };
+function gestaoSeg() { return `<div class="seg">${[['faltas', '📊 Faltas'], ['vagas', '🗓 Vagas'], ['fin', '💰 Financeiro']].map(([k, t]) => `<button data-g="${k}" class="${S.gest === k ? 'on' : ''}">${t}</button>`).join('')}</div>`; }
+function ligarSeg() { document.querySelectorAll('[data-g]').forEach(b => { b.onclick = () => { S.gest = b.dataset.g; ls.set(K.gest, S.gest); telaGestao(); }; }); }
+function telaGestao() {
+    const t = $('#titulo'); if (t) t.textContent = GEST_TIT[S.gest] || GEST_TIT.faltas;
+    if (S.gest === 'vagas') telaVagas(); else if (S.gest === 'fin') telaFin(); else telaAnalytics();
+}
+const pctBR = (a, b) => (b ? `${(a / b * 100).toFixed(1).replace('.', ',').replace(',0', '')}%` : '—');
+const brl = v => (v == null || !isFinite(v) ? '—' : Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
+const nBR = v => Number(v || 0).toLocaleString('pt-BR');
+const isoD = s => { const [y, m, d] = String(s).slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d); };
+
+// ---- 🗓 Vagas: escala ofertada (Prefeitura e Convênio/Particular/LADI) × agendados × encaixes × desfechos × ociosas (função vagas_periodo)
+const VGT = { prefeitura: 'Prefeitura', convenio_particular: 'Convênio / Particular / LADI' };
+const VGB = { us_geral: 'US geral', pescoco: 'Pescoço (qui tarde)', doppler_membro: 'Doppler de membros (sex manhã)', proprio: 'Horários próprios', exclusivo: 'Horários exclusivos' };
+const VGK = ['ofertadas', 'ocupadas', 'atendidos', 'faltas', 'pendentes', 'saidas', 'ociosas', 'livres', 'acima', 'ofertadas_passadas'];
+const DSI = ['', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb', 'dom'];
+async function telaVagas() {
+    const tela = $('#tela'); tela.innerHTML = `<main>${gestaoSeg()}<div class="vazio">Carregando…</div></main>`; ligarSeg();
+    S.vgPer = S.vgPer || hojeIso().slice(0, 7);
+    const ops = [], h = new Date();
+    for (let i = 3; i >= -12; i--) { const x = new Date(h.getFullYear(), h.getMonth() + i, 1); ops.push([isoDia(x).slice(0, 7), `${MESES[x.getMonth()]}/${x.getFullYear()}${i === 0 ? ' (atual)' : i > 0 ? ' · futuro' : ''}`]); }
+    ops.push(['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses']);
+    const n = { '3m': 3, '6m': 6 }[S.vgPer];
+    const per = n ? { ini: isoDia(new Date(h.getFullYear(), h.getMonth() - n + 1, 1)), fim: isoDia(new Date(h.getFullYear(), h.getMonth() + 1, 0)), rot: `últimos ${n} meses` }
+        : (() => { const [y, m] = S.vgPer.split('-').map(Number); return { ini: `${S.vgPer}-01`, fim: isoDia(new Date(y, m, 0)), rot: `${MESES[m - 1]}/${y}` }; })();
+    try {
+        const r = await api('rpc/vagas_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim });
+        if (S.tab !== 'analytics' || S.gest !== 'vagas') return;
+        const z = () => Object.fromEntries(VGK.map(k => [k, 0])), res = { prefeitura: z(), convenio_particular: z() }, T = z();
+        (r.resumo || []).forEach(x => { res[x.tipo] = Object.assign(z(), x); });
+        Object.values(res).forEach(x => VGK.forEach(k => { T[k] += +x[k] || 0; }));
+        const ad = { encaixe: { n: 0, atendidos: 0 }, sus: { n: 0, atendidos: 0 } }; (r.adicionais || []).forEach(x => { ad[x.tipo] = x; });
+        const adic = ad.encaixe.n + ad.sus.n, pre = x => x.ofertadas - x.ociosas - x.livres, desf = T.atendidos + T.faltas;
+        const pass = (r.por_dia || []).filter(d => d.escala && d.data < r.hoje), ofP = pass.reduce((a, d) => a + d.pref_of + d.conv_of, 0), atP = pass.reduce((a, d) => a + d.atendidos, 0);
+        const pendP = (r.por_dia || []).filter(d => d.data < r.hoje).reduce((a, d) => a + d.pendentes, 0);
+        const partes = [['Atendidos', T.atendidos, '#059669'], ['Sem desfecho', T.pendentes, '#d97706'], ['Faltas', T.faltas, '#e11d48'], ['Ociosas', T.ociosas, '#94a3b8'], ['Livres', T.livres, '#0284c7'], ['Adicionais', adic, '#7c3aed']].filter(p => p[1] > 0);
+        const base = partes.reduce((a, p) => a + p[1], 0) || 1;
+        const leit = [];
+        if (pendP) leit.push(`✍️ ${pendP} agendamento(s) de dias que passaram <b>sem desfecho</b> — marcar atendido/falta.`);
+        if (T.ociosas) { const bl = [...(r.por_bloco || [])].filter(b => b.ociosas).sort((a, b) => b.ociosas - a.ociosas).slice(0, 2).map(b => `${esc(VGB[b.bloco] || b.bloco)} (${b.tipo === 'prefeitura' ? 'Pref.' : 'Conv.'}): ${b.ociosas}`).join('; '); leit.push(`📉 <b>${T.ociosas} vaga(s) ociosa(s)</b> (${pctBR(T.ociosas, T.ofertadas_passadas)} da oferta já passada). Onde: ${bl || '—'}.`); }
+        if (T.livres) { const prox = (r.por_dia || []).filter(d => d.escala && d.data >= r.hoje && d.sobra > 0).slice(0, 5).map(d => `${fmtDia(d.data)} (${d.sobra})`).join(', '); leit.push(`🟦 <b>${T.livres} vaga(s) livre(s)</b> de hoje em diante${prox ? `: ${prox}` : ''} — oferecer à Prefeitura / lista de espera.`); }
+        if (adic) leit.push(`➕ ${adic} atendimento(s) além da escala (${ad.encaixe.n} encaixes + ${ad.sus.n} SUS/urgência) = +${pctBR(adic, T.ofertadas)} sobre a oferta.`);
+        if (T.acima) leit.push(`⚠️ ${T.acima} paciente(s) acima da escala — conferir se a escala está atualizada.`);
+        if (T.saidas) leit.push(`🚪 ${T.saidas} saída(s) devolveram vaga — reaproveitar com lista de espera.`);
+        if ((r.dias_sem_escala || []).length) leit.push(`🗂 ${r.dias_sem_escala.length} dia(s) com pacientes sem escala cadastrada (ficam fora da conta).`);
+        const linhaT = (nome, x, b) => `<tr${b ? ' style="font-weight:700"' : ''}><td>${nome}</td><td class="num">${x.ofertadas}</td><td class="num">${x.ocupadas}</td><td class="num">${pctBR(pre(x), x.ofertadas)}</td><td class="num">${x.faltas}</td><td class="num">${x.ociosas}</td><td class="num">${x.livres}</td></tr>`;
+        tela.innerHTML = `<main>${gestaoSeg()}<select id="vgper" style="margin:4px 0 8px">${ops.map(([v, t]) => `<option value="${v}" ${v === S.vgPer ? 'selected' : ''}>${t}</option>`).join('')}</select>
+${!r.dias_escala && !(r.por_dia || []).length ? `<div class="vazio">Sem escala cadastrada e sem agendamentos em ${esc(per.rot)}.<br>Cadastre a escala pelo computador (Dashboard › 🗓️ Vagas).</div>` : `
+<div class="kpis"><div class="kpi"><b>${T.ofertadas}</b><span>Vagas ofertadas</span><small>Pref. ${res.prefeitura.ofertadas} · Conv. ${res.convenio_particular.ofertadas}</small></div>
+<div class="kpi"><b>${pre(T)} <small style="display:inline">${pctBR(pre(T), T.ofertadas)}</small></b><span>Vagas preenchidas</span></div>
+<div class="kpi"><b>+${adic}</b><span>Adicionais</span><small>${ad.encaixe.n} encaixes · ${ad.sus.n} SUS/urg.</small></div>
+<div class="kpi"><b style="color:${T.ociosas ? 'var(--er)' : 'inherit'}">${T.ociosas}</b><span>Ociosas (dias passados)</span><small>${T.livres} livres de hoje em diante</small></div>
+<div class="kpi"><b>${T.atendidos}</b><span>Atendidos (agendados)</span><small>realizados no total: ${T.atendidos + ad.encaixe.atendidos + ad.sus.atendidos}</small></div>
+<div class="kpi"><b style="color:var(--er)">${T.faltas} <small style="display:inline">${pctBR(T.faltas, desf)}</small></b><span>Faltas</span><small>${T.pendentes} sem desfecho · ${T.saidas} saídas</small></div></div>
+<h2><span>Para onde foram as vagas</span></h2><div class="card"><div class="sbar">${partes.map(([t, v, c]) => `<i style="flex:${v} 1 0;background:${c};${c === '#d97706' || c === '#94a3b8' ? 'color:#0b0b0b;' : ''}" title="${t}: ${v}">${v / base >= 0.08 ? v : ''}</i>`).join('')}</div>
+<div class="leg">${partes.map(([t, , c]) => `<span><i style="background:${c}"></i>${t}</span>`).join('')}</div>
+<div class="tl" style="margin-top:6px"><span>Aproveitamento da escala (dias passados):</span> <b>${pctBR(atP, ofP)}</b> das vagas viraram exame</div></div>
+${leit.length ? `<h2><span>Leituras</span></h2><div class="card"><ul class="lst">${leit.map(x => `<li>${x}</li>`).join('')}</ul></div>` : ''}
+<h2><span>Por tipo de vaga</span></h2><table class="tbl sm"><tr><th>Tipo</th><th class="num">Ofert.</th><th class="num">Agend.</th><th class="num">Ocup.</th><th class="num">Faltas</th><th class="num">Ocios.</th><th class="num">Livres</th></tr>
+${linhaT('Prefeitura', res.prefeitura)}${linhaT('Conv./Part./LADI', res.convenio_particular)}${linhaT('Total', T, true)}</table>
+<h2><span>Por bloco da escala</span></h2><table class="tbl sm"><tr><th>Bloco</th><th class="num">Ofert.</th><th class="num">Agend.</th><th class="num">Ocup.</th><th class="num">Ocios.</th></tr>
+${(r.por_bloco || []).map(b => `<tr><td>${b.tipo === 'prefeitura' ? 'Pref.' : 'Conv.'} · ${esc(VGB[b.bloco] || b.bloco)}</td><td class="num">${b.ofertadas}</td><td class="num">${b.ocupadas}</td><td class="num">${pctBR(b.ofertadas - b.ociosas - b.livres, b.ofertadas)}</td><td class="num">${b.ociosas}</td></tr>`).join('')}</table>
+<h2><span>Dia da semana</span></h2><table class="tbl sm"><tr><th>Dia</th><th class="num">Pref. ag./vagas</th><th class="num">Conv. ag./vagas</th><th class="num">Ocios.</th></tr>
+${(() => { const g = {}; (r.por_dia_semana || []).forEach(x => { const k = `${x.dow}|${x.periodo}`; (g[k] = g[k] || { dow: x.dow, per: x.periodo })[x.tipo] = x; }); const z0 = { ofertadas: 0, ocupadas: 0, ociosas: 0 };
+    return Object.values(g).sort((a, b) => a.dow - b.dow || (a.per === 'manha' ? -1 : 1)).map(x => { const p = x.prefeitura || z0, c = x.convenio_particular || z0; return `<tr><td>${DSI[x.dow]} ${x.per === 'manha' ? 'manhã' : 'tarde'}</td><td class="num">${p.ofertadas ? `${p.ocupadas}/${p.ofertadas}` : '–'}</td><td class="num">${c.ofertadas ? `${c.ocupadas}/${c.ofertadas}` : '–'}</td><td class="num">${p.ociosas + c.ociosas || '–'}</td></tr>`; }).join(''); })()}</table>`}
+<div class="note">1 paciente num horário = 1 vaga. Saída (desmarcou/cancelado) devolve a vaga. Encaixe e SUS/urgência = adicionais. Ociosa = dia que passou sem paciente; livre = de hoje em diante. Mesmo cálculo do computador (Dashboard › 🗓️ Vagas, onde se cadastra a escala e se tira o relatório).</div></main>`;
+        ligarSeg();
+        $('#vgper').onchange = e => { S.vgPer = e.target.value; telaVagas(); };
+    } catch (e) { tela.innerHTML = `<main>${gestaoSeg()}<div class="vazio">Erro: ${esc(e.message)}</div></main>`; ligarSeg(); }
+}
+
+// ---- 💰 Financeiro: repasse estimado pela produção (US e TC) — função financeiro_periodo; nenhum valor no código
+const FUN = [['dia', 'Dia'], ['semana', 'Sem.'], ['mes', 'Mês'], ['tri', 'Tri'], ['sem', 'Semes.'], ['ano', 'Ano']];
+const FMU = { mes: 1, tri: 3, sem: 6, ano: 12 };
+function finPerApp(un, ref) {
+    const y = ref.getFullYear(), m = ref.getMonth(), d = ref.getDate(); let a, b, rot;
+    if (un === 'dia') { a = b = new Date(y, m, d); rot = fmtDia(isoDia(a)); }
+    else if (un === 'semana') { a = new Date(y, m, d - ((ref.getDay() + 6) % 7)); b = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 6); rot = `${pad(a.getDate())}/${pad(a.getMonth() + 1)} a ${pad(b.getDate())}/${pad(b.getMonth() + 1)}`; }
+    else if (un === 'mes') { a = new Date(y, m, 1); b = new Date(y, m + 1, 0); rot = `${MESES[m]}/${y}`; }
+    else if (un === 'tri') { const q = Math.floor(m / 3); a = new Date(y, q * 3, 1); b = new Date(y, q * 3 + 3, 0); rot = `${q + 1}º tri ${y}`; }
+    else if (un === 'sem') { const q = m < 6 ? 0 : 1; a = new Date(y, q * 6, 1); b = new Date(y, q * 6 + 6, 0); rot = `${q + 1}º sem ${y}`; }
+    else { a = new Date(y, 0, 1); b = new Date(y, 11, 31); rot = String(y); }
+    return { ini: isoDia(a), fim: isoDia(b), rot };
+}
+const finDesl = (un, ref, n) => (un === 'dia' ? new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + n) : un === 'semana' ? new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + 7 * n) : new Date(ref.getFullYear(), ref.getMonth() + n * FMU[un], 1));
+function finSoma(r, mod) {
+    const o = { liberado: { n: 0, v: 0 }, revisar: { n: 0, v: 0 }, pendente: { n: 0, v: 0 }, est: 0, semN: 0, urgN: 0, urgV: 0, intN: 0, pm: {} };
+    (r.totais || []).filter(x => mod === 'todos' || x.mod === mod).forEach(x => {
+        const m = o.pm[x.mod] = o.pm[x.mod] || { liberado: { n: 0, v: 0 }, revisar: { n: 0, v: 0 }, pendente: { n: 0, v: 0 } };
+        [o, m].forEach(t => { const e = t[x.estado] || t.pendente; e.n += +x.n || 0; e.v += +x.valor || 0; });
+        o.est += +x.estimado || 0; o.semN += +x.sem_n || 0; o.urgN += +x.urg_n || 0; o.urgV += +x.urg_valor || 0; o.intN += +x.int_n || 0;
+    });
+    o.n = o.liberado.n + o.revisar.n + o.pendente.n; o.v = o.liberado.v + o.revisar.v + o.pendente.v; o.ticket = o.n - o.semN > 0 ? o.v / (o.n - o.semN) : null;
+    return o;
+}
+async function telaFin() {
+    const tela = $('#tela'); S.fin = S.fin || { un: 'mes', ref: new Date(), mod: 'todos' };
+    const F = S.fin, per = finPerApp(F.un, F.ref), hoje = hojeIso(), atual = per.ini <= hoje && hoje <= per.fim;
+    const topo = `${gestaoSeg()}<div class="seg u6">${FUN.map(([k, t]) => `<button data-un="${k}" class="${k === F.un ? 'on' : ''}">${t}</button>`).join('')}</div>
+<div class="navp"><button id="fant" aria-label="Anterior">‹</button><b id="frot">${esc(per.rot)}</b><button id="fprox" aria-label="Próximo">›</button></div>
+<div class="seg u3">${[['todos', 'US + TC'], ['US', '🔊 US'], ['CT', '🩻 TC']].map(([k, t]) => `<button data-fm="${k}" class="${k === F.mod ? 'on' : ''}">${t}</button>`).join('')}</div>`;
+    const ligar = () => {
+        ligarSeg();
+        tela.querySelectorAll('[data-un]').forEach(b => { b.onclick = () => { F.un = b.dataset.un; telaFin(); }; });
+        tela.querySelectorAll('[data-fm]').forEach(b => { b.onclick = () => { F.mod = b.dataset.fm; telaFin(); }; });
+        $('#fant').onclick = () => { F.ref = finDesl(F.un, F.ref, -1); telaFin(); };
+        $('#fprox').onclick = () => { F.ref = finDesl(F.un, F.ref, 1); telaFin(); };
+        $('#frot').onclick = () => { F.ref = new Date(); telaFin(); };
+    };
+    tela.innerHTML = `<main>${topo}<div class="vazio">Calculando…</div></main>`; ligar();
+    try {
+        const ant = finPerApp(F.un, finDesl(F.un, F.ref, -1));
+        if (atual) { const dias = Math.round((isoD(hoje) - isoD(per.ini)) / 864e5), lim = isoD(ant.ini); lim.setDate(lim.getDate() + dias); if (isoDia(lim) < ant.fim) ant.fim = isoDia(lim); }
+        const [r, ra] = await Promise.all([api('rpc/financeiro_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim }), api('rpc/financeiro_periodo', 'POST', { p_ini: ant.ini, p_fim: ant.fim }).catch(() => null)]);
+        if (S.tab !== 'analytics' || S.gest !== 'fin') return;
+        const A = finSoma(r, F.mod), B = ra ? finSoma(ra, F.mod) : null, filt = arr => (arr || []).filter(x => F.mod === 'todos' || x.mod === F.mod);
+        const mesesP = (r.meses || []).filter(m => m.mes <= hoje.slice(0, 7)), falta = mesesP.filter(m => !m.lido || !m.lido.US || !m.lido.CT);
+        const idade = iso => { if (!iso) return 'sem leitura'; const mi = Math.round((Date.now() - new Date(iso).getTime()) / 60000); return mi < 60 ? `há ${Math.max(mi, 0)} min` : mi < 1440 ? `há ${Math.round(mi / 60)} h` : new Date(iso).toLocaleDateString('pt-BR'); };
+        let proj = null;
+        if (atual && FMU[F.un] && !falta.length) { let ate = 0, tot = 0; for (let d = isoD(per.ini); isoDia(d) <= per.fim; d.setDate(d.getDate() + 1)) { const w = d.getDay(); if (w > 0 && w < 6) { tot++; if (isoDia(d) <= hoje) ate++; } } if (ate && A.v) proj = A.v / ate * tot; }
+        const dlt = B && B.n && B.v ? (A.v - B.v) / B.v * 100 : null, rt = r.fixos && r.fixos.RT, nM = FMU[F.un] || 0;
+        // série: por dia (semana/mês), por semana (tri) ou por mês (semestre/ano)
+        const porMes = F.un === 'sem' || F.un === 'ano', porSem = F.un === 'tri';
+        const chave = s => (porMes ? s.slice(0, 7) : porSem ? isoDia((d => new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7)))(isoD(s))) : s.slice(0, 10));
+        const bk = new Map();
+        if (F.un !== 'dia') for (let d = isoD(per.ini); isoDia(d) <= per.fim; d.setDate(d.getDate() + 1)) { const k = chave(isoDia(d)); if (!bk.has(k)) bk.set(k, { k, lib: 0, pend: 0 }); }
+        filt(r.serie).forEach(x => { const e = bk.get(chave(String(x.dia))); if (e) { e.lib += +x.lib_valor || 0; e.pend += +x.pend_valor || 0; } });
+        const arr = [...bk.values()], max = Math.max(1, ...arr.map(x => x.lib + x.pend)), W = Math.max(300, (tela.clientWidth || 360) - 26), H = 120, slot = W / Math.max(arr.length, 1), bw = Math.min(slot * 0.7, 18);
+        const yv = v => (H - 16) * v / max;
+        const graf = arr.length > 1 ? `<div class="card"><svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${arr.map((x, i) => { const cx = slot * (i + 0.5), hl = yv(x.lib), hp = yv(x.pend), y0 = H - 14; return `<g><title>${porMes ? MESES[+x.k.slice(5, 7) - 1] : x.k.split('-').reverse().slice(0, 2).join('/')}: liberado ${brl(x.lib)} · não liberado ${brl(x.pend)}</title>${hl > 0.5 ? `<rect x="${(cx - bw / 2).toFixed(1)}" y="${(y0 - hl).toFixed(1)}" width="${bw.toFixed(1)}" height="${hl.toFixed(1)}" rx="2" fill="#059669"/>` : ''}${hp > 0.5 ? `<rect x="${(cx - bw / 2).toFixed(1)}" y="${(y0 - hl - hp).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(hp - 2, 0.5).toFixed(1)}" rx="2" fill="#d97706"/>` : ''}${i % Math.ceil(arr.length / 8) === 0 ? `<text x="${cx.toFixed(1)}" y="${H - 2}" font-size="10" text-anchor="middle" fill="#94a3b8">${porMes ? MESES[+x.k.slice(5, 7) - 1].slice(0, 3) : x.k.slice(8, 10)}</text>` : ''}</g>`; }).join('')}</svg>
+<div class="leg"><span><i style="background:#059669"></i>Liberado</span><span><i style="background:#d97706"></i>Não liberado (revisão + a laudar)</span></div></div>` : '';
+        const junta = (lst, kf) => { const m = new Map(); lst.forEach(x => { const k = kf(x), e = m.get(k); if (!e) m.set(k, Object.assign({}, x)); else ['n', 'valor', 'lib_valor', 'sem_n', 'est_n'].forEach(c => { e[c] = (+e[c] || 0) + (+x[c] || 0); }); }); return [...m.values()].sort((a, b) => b.valor - a.valor || b.n - a.n); };
+        const cats = junta(filt(r.por_categoria), x => x.cat), convs = junta(filt(r.por_convenio), x => x.conv).slice(0, 25), grupos = [...filt(r.por_grupo)].sort((a, b) => b.valor - a.valor);
+        const semT = filt(r.sem_tarifa).reduce((a, x) => a + x.n, 0);
+        const lm = (nome, m) => `<tr><td>${nome}</td><td class="num">${m.liberado.n}<br><small>${brl(m.liberado.v)}</small></td><td class="num">${m.revisar.n}<br><small>${brl(m.revisar.v)}</small></td><td class="num">${m.pendente.n}<br><small>${brl(m.pendente.v)}</small></td></tr>`;
+        tela.innerHTML = `<main>${topo}
+${falta.length ? `<div class="card" style="background:var(--wabg)">⚠ Sem leitura do PACS: <b>${falta.map(m => `${MESES[+m.mes.slice(5) - 1]}/${m.mes.slice(0, 4)}`).join(', ')}</b> — abra o 💰 Financeiro num computador com o PACS logado e toque em 🔄 Ler do PACS.</div>` : ''}
+<div class="kpis"><div class="kpi"><b>${brl(A.liberado.v)}</b><span>✅ Liberado</span><small>${nBR(A.liberado.n)} laudos</small></div>
+<div class="kpi"><b>${brl(A.revisar.v)}</b><span>📝 Em revisão</span><small>${nBR(A.revisar.n)} exames</small></div>
+<div class="kpi"><b>${brl(A.pendente.v)}</b><span>⏳ A laudar</span><small>${nBR(A.pendente.n)} exames</small></div>
+<div class="kpi"><b>${brl(A.v)}</b><span>Σ Produção</span><small>${nBR(A.n)} exames${A.semN ? ` · ${A.semN} sem tarifa` : ''}</small></div>
+<div class="kpi"><b>${brl(A.ticket)}</b><span>Ticket médio</span><small>${A.est ? `inclui ${brl(A.est)} estimado` : 'valores conferidos'}</small></div>
+<div class="kpi"><b>${nBR(A.urgN)}</b><span>🚨 Urgências</span><small>${brl(A.urgV)} · ${nBR(A.intN)} internados</small></div>
+<div class="kpi"><b>${proj ? brl(proj) : '—'}</b><span>📈 Projeção</span><small>${proj ? 'no ritmo dos dias úteis' : atual ? 'mês, tri, semestre ou ano' : 'período encerrado'}</small></div>
+<div class="kpi"><b>${rt ? brl(rt.valor) : '—'}</b><span>RT fixo/mês (à parte)</span><small>${rt && nM > 1 ? `${nM} meses = ${brl(rt.valor * nM)}` : 'fora da produção'}</small></div></div>
+<div class="note" style="margin-top:8px">${dlt != null ? `<b style="color:${dlt >= 0 ? 'var(--ok)' : 'var(--er)'}">${dlt >= 0 ? '▲ +' : '▼ −'}${Math.abs(dlt).toFixed(1).replace('.', ',')}%</b> vs ${atual ? 'mesmo ponto de ' : ''}${esc(ant.rot)} (${brl(B.v)}) · ` : ''}${mesesP.length && mesesP.length <= 2 ? mesesP.map(m => `lido do PACS: US ${idade(m.lido && m.lido.US)} · TC ${idade(m.lido && m.lido.CT)}`).join(' — ') : ''}</div>
+${graf}
+<h2><span>Por modalidade e situação</span></h2><table class="tbl sm"><tr><th>Mod.</th><th class="num">Liberado</th><th class="num">Revisão</th><th class="num">A laudar</th></tr>${['US', 'CT'].filter(k => A.pm[k]).map(k => lm(k === 'US' ? '🔊 US' : '🩻 TC', A.pm[k])).join('')}</table>
+<h2><span>Por categoria</span></h2><table class="tbl sm"><tr><th>Categoria</th><th class="num">Exames</th><th class="num">Valor</th><th class="num">%</th></tr>${cats.map(c => `<tr><td>${esc(c.cat)}</td><td class="num">${nBR(c.n)}</td><td class="num">${brl(+c.valor)}</td><td class="num">${pctBR(+c.valor, A.v)}</td></tr>`).join('')}</table>
+<h2><span>Por convênio</span></h2><table class="tbl sm"><tr><th>Convênio</th><th class="num">Exames</th><th class="num">Valor</th><th class="num">Ticket</th></tr>${convs.map(c => `<tr><td>${esc(c.conv)}${c.sem_n ? ' <small style="color:var(--wa)">⚠' + c.sem_n + '</small>' : ''}${c.est_n ? ' <small style="color:var(--mut)">≈' + c.est_n + '</small>' : ''}</td><td class="num">${nBR(c.n)}</td><td class="num">${brl(+c.valor)}</td><td class="num">${brl(c.n - c.sem_n > 0 ? c.valor / (c.n - c.sem_n) : null)}</td></tr>`).join('')}</table>
+<h2><span>Por tipo de procedimento</span></h2><table class="tbl sm"><tr><th>Tipo</th><th class="num">Exames</th><th class="num">Valor</th></tr>${grupos.map(g => `<tr><td>${F.mod === 'todos' ? `<small style="color:var(--mut)">${g.mod === 'CT' ? 'TC' : 'US'}</small> ` : ''}${esc(g.grupo || 'Sem classificação')}</td><td class="num">${nBR(g.n)}</td><td class="num">${brl(+g.valor)}</td></tr>`).join('')}</table>
+<div class="note">${semT ? `⚠ ${semT} exame(s) sem tarifa ficaram fora do total. ` : ''}≈ = valor estimado. Produção pela data do exame, lida do PACS pelos computadores (a cada ~30 min com o PACS aberto) × tabela de tarifas privada do banco (versão corrigida). Repasse estimado — o pagamento real depende do fechamento e das glosas.</div></main>`;
+        ligar();
+    } catch (e) { tela.innerHTML = `<main>${topo}<div class="vazio">Erro: ${esc(e.message)}</div></main>`; ligar(); }
 }
 // v1.2.0 — 📝 Laudos pendentes (US e TC): tabela laudos_pendentes, alimentada pelo PACS Plus dos computadores (só números/datas)
 async function telaLaudos() {
