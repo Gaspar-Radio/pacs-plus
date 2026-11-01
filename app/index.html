@@ -123,7 +123,7 @@ textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid va
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.4.0';
+const VERSAO = '1.4.1';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1', gest: 'agapp_gestao_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -843,6 +843,7 @@ async function telaFin() {
         const semT = filt(r.sem_tarifa).reduce((a, x) => a + x.n, 0);
         const lm = (nome, m) => `<tr><td>${nome}</td><td class="num">${m.liberado.n}<br><small>${brl(m.liberado.v)}</small></td><td class="num">${m.revisar.n}<br><small>${brl(m.revisar.v)}</small></td><td class="num">${m.pendente.n}<br><small>${brl(m.pendente.v)}</small></td></tr>`;
         tela.innerHTML = `<main>${topo}
+${A.n && A.semN / A.n >= 0.03 ? `<div class="card" style="background:var(--wabg)">⚠ <b>${nBR(A.semN)} exame(s) (${pctBR(A.semN, A.n)}) sem tarifa</b> — ficaram fora do total (falta a tabela desse convênio/exame).</div>` : ''}
 ${falta.length ? `<div class="card" style="background:var(--wabg)">⚠ Sem leitura do PACS: <b>${falta.map(m => `${MESES[+m.mes.slice(5) - 1]}/${m.mes.slice(0, 4)}`).join(', ')}</b> — abra o 💰 Financeiro num computador com o PACS logado e toque em 🔄 Ler do PACS.</div>` : ''}
 <div class="kpis"><div class="kpi"><b>${brl(A.liberado.v)}</b><span>✅ Liberado</span><small>${nBR(A.liberado.n)} laudos</small></div>
 <div class="kpi"><b>${brl(A.revisar.v)}</b><span>📝 Em revisão</span><small>${nBR(A.revisar.n)} exames</small></div>

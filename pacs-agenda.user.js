@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.6.0
+// @version      9.6.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda, painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -4104,7 +4104,9 @@
         const falta = mesesPass.filter(m => !m.lido || !m.lido.US || !m.lido.CT);
         const idade = iso => { if (!iso) return 'sem leitura'; const mi = Math.round((Date.now() - new Date(iso).getTime()) / 60000); return mi < 60 ? `há ${Math.max(mi, 0)} min` : mi < 1440 ? `há ${Math.round(mi / 60)} h` : `em ${new Date(iso).toLocaleDateString('pt-BR')}`; };
         const frescor = mesesPass.length <= 2 ? `lido do PACS — ${mesesPass.map(m => `${mesNomeAno(m.mes)}: US ${idade(m.lido && m.lido.US)} · TC ${idade(m.lido && m.lido.CT)}`).join(' — ')}` : `${mesesPass.length - falta.length} de ${mesesPass.length} meses lidos do PACS`;
-        const aviso = falta.length ? `<div style="background:#fef3c7; color:#92400e; border:1px solid #fcd34d; border-radius:6px; padding:6px 9px; margin-bottom:8px; font-size:10.5px;">⚠ Sem leitura do PACS: <b>${falta.map(m => mesNomeAno(m.mes)).join(', ')}</b> — esses dias ficam zerados. Clique em <b>🔄 Ler do PACS</b> (com o PACS logado nesta aba) para completar.</div>` : '';
+        let aviso = falta.length ? `<div style="background:#fef3c7; color:#92400e; border:1px solid #fcd34d; border-radius:6px; padding:6px 9px; margin-bottom:8px; font-size:10.5px;">⚠ Sem leitura do PACS: <b>${falta.map(m => mesNomeAno(m.mes)).join(', ')}</b> — esses dias ficam zerados. Clique em <b>🔄 Ler do PACS</b> (com o PACS logado nesta aba) para completar.</div>` : '';
+        // exames sem tarifa ficam FORA do total: com ≥ 3% da produção, avisa no topo (para nunca parecer "mês zerado" sem explicação)
+        if (A.n && A.semN / A.n >= 0.03) aviso += `<div style="background:#fef3c7; color:#92400e; border:1px solid #fcd34d; border-radius:6px; padding:6px 9px; margin-bottom:8px; font-size:10.5px;">⚠ <b>${nBR(A.semN)} exame(s) (${pctBR(A.semN, A.n)}) sem tarifa</b> no período — ficaram FORA do total. Veja o quadro "Sem tarifa" abaixo (falta a tabela desse convênio/exame no banco).</div>`;
         let delta = '';
         if (B && B.n) {
             const d = B.v ? (A.v - B.v) / B.v * 100 : 0;
