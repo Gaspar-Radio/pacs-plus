@@ -123,7 +123,7 @@ textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid va
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.4.2';
+const VERSAO = '1.4.3';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1', gest: 'agapp_gestao_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -167,7 +167,7 @@ const S = { tab: ls.get(K.tab, 'agenda'), dia: hojeIso(), linhas: [], carregando
 const ehSaida = r => r.status === 'cancelado' || (!!r.removido_origem_em && (!r.status || r.status === 'pendente'));
 const notasDe = r => (Array.isArray(r && r.notas) ? r.notas : []);
 const NOTA_TAGS = ['Intercorrência', 'Saída', 'Preparo', 'Contato', 'Pendência', 'Outra'];
-const SAIDA_MOTIVOS = ['Desmarcou', 'Remanejado', 'Convênio não autorizou', 'Desistiu / foi embora', 'Sem preparo', 'Exame não indicado', 'Duplicado', 'Outro'];
+const SAIDA_MOTIVOS = ['Desmarcou', 'Remanejado', 'Convênio não autorizou', 'Desistiu / foi embora', 'Sem preparo', 'Exame não indicado', 'Duplicado', 'Sem expediente', 'Outro'];
 const motivoSaida = r => { const n = [...notasDe(r)].reverse().find(x => x.tag === 'Saída'); return n ? n.motivo || '' : ''; };
 
 // ---------------------------------------------------------------- configuração e sessão
@@ -720,7 +720,8 @@ const isoD = s => { const [y, m, d] = String(s).slice(0, 10).split('-').map(Numb
 
 // ---- 🗓 Vagas: escala ofertada (Prefeitura e Convênio/Particular/LADI) × agendados × encaixes × desfechos × ociosas (função vagas_periodo)
 const VGT = { prefeitura: 'Prefeitura', convenio_particular: 'Convênio / Particular / LADI' };
-const VGB = { us_geral: 'US geral', pescoco: 'Pescoço (qui tarde)', doppler_membro: 'Doppler de membros (sex manhã)', proprio: 'Horários próprios', exclusivo: 'Horários exclusivos' };
+const VGB = { us_geral: 'US geral', pescoco: 'Pescoço (carótidas / tireoide)', doppler_membro: 'Doppler de membros', proprio: 'Horários próprios', exclusivo: 'Horários exclusivos' };
+const VGR = { email: 'e-mail', planilha: 'estimada (planilha)', 'v6-out': 'regra v6', 'v6-nov': 'regra v6' };
 const VGK = ['ofertadas', 'ocupadas', 'atendidos', 'faltas', 'pendentes', 'saidas', 'ociosas', 'livres', 'acima', 'ofertadas_passadas'];
 const DSI = ['', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb', 'dom'];
 async function telaVagas() {
@@ -728,9 +729,9 @@ async function telaVagas() {
     S.vgPer = S.vgPer || hojeIso().slice(0, 7);
     const ops = [], h = new Date();
     for (let i = 3; i >= -12; i--) { const x = new Date(h.getFullYear(), h.getMonth() + i, 1); ops.push([isoDia(x).slice(0, 7), `${MESES[x.getMonth()]}/${x.getFullYear()}${i === 0 ? ' (atual)' : i > 0 ? ' · futuro' : ''}`]); }
-    ops.push(['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses']);
+    ops.push(['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses'], [String(h.getFullYear()), `Ano de ${h.getFullYear()}`], [String(h.getFullYear() - 1), `Ano de ${h.getFullYear() - 1}`]);
     const n = { '3m': 3, '6m': 6 }[S.vgPer];
-    const per = n ? { ini: isoDia(new Date(h.getFullYear(), h.getMonth() - n + 1, 1)), fim: isoDia(new Date(h.getFullYear(), h.getMonth() + 1, 0)), rot: `últimos ${n} meses` }
+    const per = /^\d{4}$/.test(S.vgPer) ? { ini: `${S.vgPer}-01-01`, fim: `${S.vgPer}-12-31`, rot: `ano de ${S.vgPer}`, ano: true } : n ? { ini: isoDia(new Date(h.getFullYear(), h.getMonth() - n + 1, 1)), fim: isoDia(new Date(h.getFullYear(), h.getMonth() + 1, 0)), rot: `últimos ${n} meses` }
         : (() => { const [y, m] = S.vgPer.split('-').map(Number); return { ini: `${S.vgPer}-01`, fim: isoDia(new Date(y, m, 0)), rot: `${MESES[m - 1]}/${y}` }; })();
     try {
         const r = await api('rpc/vagas_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim });
@@ -751,7 +752,13 @@ async function telaVagas() {
         if (adic) leit.push(`➕ ${adic} atendimento(s) além da escala (${ad.encaixe.n} encaixes + ${ad.sus.n} SUS/urgência) = +${pctBR(adic, T.ofertadas)} sobre a oferta.`);
         if (T.acima) leit.push(`⚠️ ${T.acima} paciente(s) acima da escala — conferir se a escala está atualizada.`);
         if (T.saidas) leit.push(`🚪 ${T.saidas} saída(s) devolveram vaga — reaproveitar com lista de espera.`);
-        if ((r.dias_sem_escala || []).length) leit.push(`🗂 ${r.dias_sem_escala.length} dia(s) com pacientes sem escala cadastrada (ficam fora da conta).`);
+        const se = r.sem_escala || [];
+        if (se.length) leit.push(`🗂 Fora da conta (dias sem escala do tipo): ${se.map(x => `${x.tipo === 'prefeitura' ? 'Pref.' : 'Conv.'} ${x.ocupadas} agendados em ${x.dias} dia(s), ${x.faltas} faltas`).join('; ')}.`);
+        else if ((r.dias_sem_escala || []).length) leit.push(`🗂 ${r.dias_sem_escala.length} dia(s) com pacientes sem escala cadastrada (ficam fora da conta).`);
+        const fts = {}; (r.escala_fontes || []).forEach(x => { (fts[x.mes] = fts[x.mes] || new Set()).add(VGR[x.regra] || x.regra); });
+        if (Object.values(fts).some(v => [...v].some(t => t !== 'regra v6'))) leit.push('📑 Escala de meses anteriores: e-mails à Prefeitura (ago–set/2026) ou estimada pelos horários da planilha (1 horário aberto = 1 vaga).');
+        const pm = {}; (r.por_mes || []).forEach(x => { const g = pm[x.mes] = pm[x.mes] || { of: 0, oc: 0, fa: 0, at: 0, oci: 0 }; g.of += x.ofertadas; g.oc += x.ocupadas; g.fa += x.faltas; g.at += x.atendidos; g.oci += x.ociosas; });
+        const mesTab = Object.keys(pm).length > 1 ? `<h2><span>Mês a mês</span></h2><table class="tbl sm"><tr><th>Mês</th><th>Escala</th><th class="num">Ofert.</th><th class="num">Agend.</th><th class="num">Faltas</th><th class="num">Ocios.</th></tr>${Object.keys(pm).sort().map(m => { const g = pm[m], [y, mo] = m.split('-').map(Number); return `<tr><td>${MESES[mo - 1].slice(0, 3)}/${String(y).slice(2)}</td><td>${esc([...(fts[m] || [])].join(' + '))}</td><td class="num">${g.of}</td><td class="num">${g.oc}</td><td class="num">${g.fa} <small>${pctBR(g.fa, g.at + g.fa)}</small></td><td class="num">${g.oci}</td></tr>`; }).join('')}</table>` : '';
         const linhaT = (nome, x, b) => `<tr${b ? ' style="font-weight:700"' : ''}><td>${nome}</td><td class="num">${x.ofertadas}</td><td class="num">${x.ocupadas}</td><td class="num">${pctBR(pre(x), x.ofertadas)}</td><td class="num">${x.faltas}</td><td class="num">${x.ociosas}</td><td class="num">${x.livres}</td></tr>`;
         tela.innerHTML = `<main>${gestaoSeg()}<select id="vgper" style="margin:4px 0 8px">${ops.map(([v, t]) => `<option value="${v}" ${v === S.vgPer ? 'selected' : ''}>${t}</option>`).join('')}</select>
 ${!r.dias_escala && !(r.por_dia || []).length ? `<div class="vazio">Sem escala cadastrada e sem agendamentos em ${esc(per.rot)}.<br>Cadastre a escala pelo computador (Dashboard › 🗓️ Vagas).</div>` : `
@@ -766,7 +773,7 @@ ${!r.dias_escala && !(r.por_dia || []).length ? `<div class="vazio">Sem escala c
 <div class="tl" style="margin-top:6px"><span>Aproveitamento da escala (dias passados):</span> <b>${pctBR(atP, ofP)}</b> das vagas viraram exame</div></div>
 ${leit.length ? `<h2><span>Leituras</span></h2><div class="card"><ul class="lst">${leit.map(x => `<li>${x}</li>`).join('')}</ul></div>` : ''}
 <h2><span>Por tipo de vaga</span></h2><table class="tbl sm"><tr><th>Tipo</th><th class="num">Ofert.</th><th class="num">Agend.</th><th class="num">Ocup.</th><th class="num">Faltas</th><th class="num">Ocios.</th><th class="num">Livres</th></tr>
-${linhaT('Prefeitura', res.prefeitura)}${linhaT('Conv./Part./LADI', res.convenio_particular)}${linhaT('Total', T, true)}</table>
+${linhaT('Prefeitura', res.prefeitura)}${linhaT('Conv./Part./LADI', res.convenio_particular)}${linhaT('Total', T, true)}</table>${mesTab}
 <h2><span>Por bloco da escala</span></h2><table class="tbl sm"><tr><th>Bloco</th><th class="num">Ofert.</th><th class="num">Agend.</th><th class="num">Ocup.</th><th class="num">Ocios.</th></tr>
 ${(r.por_bloco || []).map(b => `<tr><td>${b.tipo === 'prefeitura' ? 'Pref.' : 'Conv.'} · ${esc(VGB[b.bloco] || b.bloco)}</td><td class="num">${b.ofertadas}</td><td class="num">${b.ocupadas}</td><td class="num">${pctBR(b.ofertadas - b.ociosas - b.livres, b.ofertadas)}</td><td class="num">${b.ociosas}</td></tr>`).join('')}</table>
 <h2><span>Dia da semana</span></h2><table class="tbl sm"><tr><th>Dia</th><th class="num">Pref. ag./vagas</th><th class="num">Conv. ag./vagas</th><th class="num">Ocios.</th></tr>

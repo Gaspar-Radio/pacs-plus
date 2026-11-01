@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.6.2
-// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda, painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
+// @version      9.7.0
+// @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
 // @grant        GM_addStyle
@@ -2718,7 +2718,7 @@
     // status cancelado = vaga liberada). "Voltar para a agenda" desfaz.
     // =====================================================================
     const NOTA_TAGS = ['Intercorrência', 'Saída', 'Preparo', 'Contato', 'Pendência', 'Outra'];
-    const SAIDA_MOTIVOS = ['Desmarcou', 'Remanejado', 'Convênio não autorizou', 'Desistiu / foi embora', 'Sem preparo', 'Exame não indicado', 'Duplicado', 'Outro'];
+    const SAIDA_MOTIVOS = ['Desmarcou', 'Remanejado', 'Convênio não autorizou', 'Desistiu / foi embora', 'Sem preparo', 'Exame não indicado', 'Duplicado', 'Sem expediente', 'Outro'];
     let notaAtual = { id: null, tag: 'Intercorrência', motivo: null, histHtml: '' };
     const pcRotulo = () => localStorage.getItem('agenda_pc_nome') || ({ MacIntel: 'Mac', Win32: 'PC Windows' }[navigator.platform] || String(navigator.platform || 'PC')).slice(0, 30);
     function fmtNotaData(iso) {
@@ -3657,7 +3657,17 @@
     // =====================================================================
     const VG_TIPO = { prefeitura: 'Prefeitura', convenio_particular: 'Convênio / Particular / LADI' };
     const VG_TIPO_CURTO = { prefeitura: 'Pref.', convenio_particular: 'Conv.' };
-    const VG_BLOCO = { us_geral: 'US geral', pescoco: 'Pescoço (qui tarde)', doppler_membro: 'Doppler de membros (sex manhã)', proprio: 'Horários próprios', exclusivo: 'Horários exclusivos' };
+    const VG_BLOCO = { us_geral: 'US geral', pescoco: 'Pescoço (carótidas / tireoide)', doppler_membro: 'Doppler de membros', proprio: 'Horários próprios', exclusivo: 'Horários exclusivos' };
+    // v9.7 — de onde veio a escala (agenda_vagas.regra)
+    const VG_REGRA = { email: 'e-mail à Prefeitura', planilha: 'estimada pela planilha', 'v6-out': 'regra v6', 'v6-nov': 'regra v6' };
+    function vgFontesTxt(r) {
+        const g = {};
+        (r.escala_fontes || []).forEach(x => { const rg = VG_REGRA[x.regra] || x.regra, k = `${x.tipo}|${rg}`; (g[k] = g[k] || { tipo: x.tipo, rg, meses: new Set() }).meses.add(x.mes); });
+        const v = Object.values(g);
+        if (!v.length || v.every(x => x.rg === 'regra v6')) return '';
+        return v.sort((a, b) => (a.tipo < b.tipo ? 1 : a.tipo > b.tipo ? -1 : [...a.meses].sort()[0] < [...b.meses].sort()[0] ? -1 : 1))
+            .map(x => { const ms = [...x.meses].sort(); return `${VG_TIPO_CURTO[x.tipo] || x.tipo} ${x.rg} (${ms.length > 1 ? `${mesNomeAno(ms[0])} a ${mesNomeAno(ms[ms.length - 1])}` : mesNomeAno(ms[0])})`; }).join(' · ');
+    }
     const DOW_ISO = ['', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
     const VG_INICIO = '2026-10'; // 1ª escala cadastrada (Drive › Agenda Mensal)
     const VG_K = ['ofertadas', 'ocupadas', 'atendidos', 'faltas', 'pendentes', 'saidas', 'ociosas', 'livres', 'acima', 'ofertadas_passadas', 'ocupadas_passadas'];
@@ -3686,9 +3696,10 @@
             const m = isoDe(new Date(h.getFullYear(), h.getMonth() + i, 1)).slice(0, 7);
             out.push([m, `${mesNomeAno(m)}${i === 0 ? ' (atual)' : i > 0 ? ' · futuro' : ''}`]);
         }
-        return [...out, ['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses'], ['12m', 'Últimos 12 meses']];
+        return [...out, ['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses'], ['12m', 'Últimos 12 meses'], [String(h.getFullYear()), `Ano de ${h.getFullYear()}`], [String(h.getFullYear() - 1), `Ano de ${h.getFullYear() - 1}`]];
     }
     function vgDatas(p) {
+        if (/^\d{4}$/.test(p)) return { ini: `${p}-01-01`, fim: `${p}-12-31`, meses: 12, rotulo: `Ano de ${p}`, curto: p };
         const n = { '3m': 3, '6m': 6, '12m': 12 }[p], h = new Date();
         if (n) {
             const ini = isoDe(new Date(h.getFullYear(), h.getMonth() - n + 1, 1)), fim = isoDe(new Date(h.getFullYear(), h.getMonth() + 1, 0));
@@ -3711,11 +3722,25 @@
             pendPass: dias.filter(d => d.data < r.hoje).reduce((a, d) => a + d.pendentes, 0)
         };
     }
+    // v9.7 — mês a mês: escala × agenda (só dias com escala do tipo) + fora da escala + fonte da escala
+    function vgMeses(r) {
+        const pm = {}, reg = m => (pm[m] = pm[m] || { mes: m, esc: false, enc: 0, sus: 0, fonte: '', s: { ofertadas: 0, ocupadas: 0, atendidos: 0, faltas: 0, ociosas: 0, livres: 0 }, fora: { ocupadas: 0, atendidos: 0, faltas: 0 } });
+        (r.por_mes || []).forEach(x => { const g = reg(x.mes); g.esc = true; Object.keys(g.s).forEach(k => { g.s[k] += x[k] || 0; }); });
+        (r.adicionais_mes || []).forEach(x => { reg(x.mes)[x.tipo === 'sus' ? 'sus' : 'enc'] += x.n; });
+        (r.sem_escala_mes || []).forEach(x => { const g = reg(x.mes); ['ocupadas', 'atendidos', 'faltas'].forEach(k => { g.fora[k] += x[k] || 0; }); });
+        const fs = {};
+        (r.escala_fontes || []).forEach(x => { (fs[x.mes] = fs[x.mes] || new Set()).add(VG_REGRA[x.regra] || x.regra); });
+        Object.values(pm).forEach(g => { g.fonte = fs[g.mes] ? [...fs[g.mes]].join(' + ') : ''; });
+        return Object.values(pm).sort((a, b) => (a.mes < b.mes ? -1 : 1));
+    }
     // leituras automáticas (regras simples, só sobre os números agregados)
     function vgSugestoes(r, C) {
-        const s = [], T = C.tot, E = C.ad.encaixe, S = C.ad.sus, semEsc = r.dias_sem_escala || [];
+        const s = [], T = C.tot, E = C.ad.encaixe, S = C.ad.sus, semEsc = r.dias_sem_escala || [], se = r.sem_escala || [];
         const dm = d => fmtBR(String(d).slice(0, 10)).slice(0, 5);
-        if (semEsc.length) s.push(`🗂 ${semEsc.length} dia(s) com pacientes mas <b>sem escala cadastrada</b> (${semEsc.slice(0, 6).map(dm).join(', ')}${semEsc.length > 6 ? '…' : ''}) — ficaram fora da comparação.${semEsc.some(d => String(d) >= `${VG_INICIO}-01`) ? ' Cadastre pelo ＋ na lista dia a dia.' : ' A escala está cadastrada a partir de out/2026.'}`);
+        const fontes = vgFontesTxt(r);
+        if (fontes) s.push(`📑 Escala usada: ${escapeHtml(fontes)}. A estimada conta 1 horário aberto na planilha = 1 vaga (meses sem a escala do e-mail).`);
+        if (se.length) s.push(`🗂 <b>Fora da comparação</b> (dias sem escala do tipo): ${se.map(x => `${VG_TIPO_CURTO[x.tipo] || escapeHtml(x.tipo)} ${x.ocupadas} agendado(s) em ${x.dias} dia(s) — ${x.atendidos} atendidos, ${x.faltas} faltas (${pctBR(x.faltas, x.atendidos + x.faltas)})`).join('; ')}.${semEsc.some(d => String(d) >= `${VG_INICIO}-01`) ? ' Cadastre a escala pelo ＋ na lista dia a dia.' : ' Escala de Convênio/Particular cadastrada só a partir de out/2026.'}`);
+        else if (semEsc.length) s.push(`🗂 ${semEsc.length} dia(s) com pacientes mas <b>sem escala cadastrada</b> (${semEsc.slice(0, 6).map(dm).join(', ')}${semEsc.length > 6 ? '…' : ''}) — ficaram fora da comparação.`);
         if (C.pendPass) s.push(`✍️ ${C.pendPass} agendamento(s) em dias que já passaram estão <b>sem desfecho</b> (nem Atendido nem Falta) — marque para fechar o mês com números certos.`);
         if (T.ociosas) {
             const bl = [...(r.por_bloco || [])].filter(b => b.ociosas).sort((a, b) => b.ociosas - a.ociosas).slice(0, 2).map(b => `${VG_TIPO_CURTO[b.tipo] || ''} ${escapeHtml(VG_BLOCO[b.bloco] || b.bloco)}: ${b.ociosas}`).join('; ');
@@ -3758,7 +3783,7 @@
                     <button id="btnVgRel" class="btn-top-action" style="background:#0284c7; color:#fff;" title="Relatório do período para imprimir/salvar em PDF (direção / Prefeitura)">🖨️ Relatório</button>
                 </span></div>`;
         if (!r.dias_escala && !(r.por_dia || []).length) {
-            return topo + `<div style="padding:24px; text-align:center; color:#64748b;">Sem escala cadastrada e sem agendamentos em ${escapeHtml(per.rotulo)}.${podeGerar ? '<br>Use <b>＋ Gerar escala pela regra</b> para cadastrar as vagas ofertadas do mês.' : per.mes && per.mes < VG_INICIO ? '<br>A escala de vagas está cadastrada a partir de outubro/2026.' : ''}</div>`;
+            return topo + `<div style="padding:24px; text-align:center; color:#64748b;">Sem escala cadastrada e sem agendamentos em ${escapeHtml(per.rotulo)}.${podeGerar ? '<br>Use <b>＋ Gerar escala pela regra</b> para cadastrar as vagas ofertadas do mês.' : per.ini < `${VG_INICIO}-01` ? '<br>Meses anteriores ao controle: use <b>🧩 Meses anteriores</b> abaixo (planilha da Prefeitura × PACS).' : ''}</div>`;
         }
         const kpis = `<div style="display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:8px;">
                 ${box(T.ofertadas, `Vagas ofertadas (Pref. ${P.ofertadas} · Conv. ${V.ofertadas})`, cor)}
@@ -3790,13 +3815,13 @@
             }));
         let tMes = '';
         if (per.meses > 1) {
-            const pm = {}, reg = m => (pm[m] = pm[m] || { mes: m, esc: false, enc: 0, sus: 0, s: { ofertadas: 0, ocupadas: 0, atendidos: 0, faltas: 0, ociosas: 0, livres: 0 } });
-            (r.por_mes || []).forEach(x => { const g = reg(x.mes); g.esc = true; Object.keys(g.s).forEach(k => { g.s[k] += x[k] || 0; }); });
-            (r.adicionais_mes || []).forEach(x => { reg(x.mes)[x.tipo === 'sus' ? 'sus' : 'enc'] += x.n; });
-            tMes = cartaoHtml('📆 Mês a mês', tabelaHtml(['Mês', 'Ofertadas', 'Agendados', 'Ocupação', 'Encaixes', 'SUS/urg.', 'Atendidos', 'Faltas', 'Ociosas', 'Livres'],
-                Object.values(pm).sort((a, b) => (a.mes < b.mes ? -1 : 1)).map(g => (g.esc
-                    ? [mesNomeAno(g.mes), g.s.ofertadas, g.s.ocupadas, pctBR(g.s.ofertadas - g.s.ociosas - g.s.livres, g.s.ofertadas), g.enc || '—', g.sus || '—', g.s.atendidos, `${g.s.faltas} ${cinzaN(`(${pctBR(g.s.faltas, g.s.atendidos + g.s.faltas)})`)}`, g.s.ociosas || '—', g.s.livres || '—']
-                    : [mesNomeAno(g.mes), cinzaN('sem escala'), '—', '—', g.enc || '—', g.sus || '—', '—', '—', '—', '—']))), 'Meses sem escala cadastrada ficam fora da comparação (a escala começa em out/2026).');
+            const pm = vgMeses(r);
+            const comLivres = pm.some(g => g.s.livres), fora = g => (g.fora.ocupadas ? `${g.fora.ocupadas} ${cinzaN(`(${g.fora.faltas} f.)`)}` : '—');
+            tMes = cartaoHtml('📆 Mês a mês', tabelaHtml(['Mês', 'Escala', 'Ofertadas', 'Agendados', 'Ocupação', 'Atendidos', 'Faltas', 'Ociosas', ...(comLivres ? ['Livres'] : []), 'Adicionais', 'Fora da escala'],
+                pm.map(g => (g.esc
+                    ? [mesNomeAno(g.mes), cinzaN(escapeHtml(g.fonte)), g.s.ofertadas, g.s.ocupadas, pctBR(g.s.ofertadas - g.s.ociosas - g.s.livres, g.s.ofertadas), g.s.atendidos, `${g.s.faltas} ${cinzaN(`(${pctBR(g.s.faltas, g.s.atendidos + g.s.faltas)})`)}`, g.s.ociosas || '—', ...(comLivres ? [g.s.livres || '—'] : []), (g.enc + g.sus) || '—', fora(g)]
+                    : [mesNomeAno(g.mes), cinzaN('sem escala'), '—', '—', '—', '—', '—', '—', ...(comLivres ? ['—'] : []), (g.enc + g.sus) || '—', fora(g)]))),
+                'Ofertadas, agendados, faltas e ociosas só nos dias em que o tipo tem escala. Adicionais = encaixes + SUS/urgência. Fora da escala = agendados em dias sem escala do tipo (ex.: Convênio antes de out/2026), com as faltas entre parênteses.');
         }
         const btnMini = 'background:none; border:1px solid #94a3b8; border-radius:4px; cursor:pointer; font-size:10px; padding:0 4px; margin-left:4px;';
         const tDia = tabelaHtml(['Dia', 'Pref.', 'Conv.', 'Sobra', 'Acima', 'Enc.', 'SUS', 'Atend.', 'Faltas', 'Saídas', ''],
@@ -3805,7 +3830,7 @@
                 const util = w > 0 && w < 6 && !d.feriado && d.data >= `${VG_INICIO}-01`;
                 const acao = d.escala && !fechado ? `<button data-vg-fechar="${d.data}" title="Marcar sem expediente (férias, curso…): vagas do dia = 0" style="${btnMini}">🚫</button>`
                     : util ? `<button data-vg-abrir="${d.data}" title="${fechado ? 'Reabrir: volta as vagas da regra' : 'Cadastrar a escala deste dia pela regra'}" style="${btnMini}">${fechado ? '↺' : '＋'}</button>` : '';
-                const flag = d.feriado ? `🎌 ${escapeHtml(d.feriado)}` : !d.escala ? 'sem escala' : fechado ? 'sem expediente' : '';
+                const flag = d.feriado ? `🎌 ${escapeHtml(d.feriado)}` : !d.escala ? 'sem escala' : fechado ? 'sem expediente' : /planilha/.test(d.regra || '') ? 'escala estimada' : /email/.test(d.regra || '') ? 'escala do e-mail' : '';
                 const fr = (oc, of) => (d.escala && of ? `${oc}/${of}` : oc || '—');
                 return {
                     estilo: d.data === hojeIso ? 'background:rgba(37,99,235,.10); font-weight:700;' : d.data > hojeIso ? 'color:#64748b;' : '',
@@ -3824,7 +3849,7 @@
             + cartaoHtml('🧩 Por bloco da escala', tBloco, 'Ociosas, livres e acima contadas dentro de cada bloco.')
             + cartaoHtml('📅 Por dia da semana e período', tDsw)
             + `<details class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:8px 10px; margin-bottom:10px;"><summary style="font-weight:bold; font-size:11.5px; cursor:pointer;">🗒 Dia a dia (${(r.por_dia || []).length} dias) — sobra vermelha = ociosa · azul = livre · 🚫 marca dia sem expediente</summary>${tDia}</details>`
-            + `<div style="font-size:9.5px; color:#94a3b8; line-height:1.5;">Como contamos: 1 paciente num horário = 1 vaga (2 exames juntos contam 1). Saída (desmarcou, cancelado, saiu da planilha sem chegar) devolve a vaga. Encaixe e SUS/urgência são adicionais (fora da escala). Ociosa = vaga de dia que já passou sem paciente; livre = de hoje em diante. Acima = mais pacientes que vagas no mesmo período e tipo (não compensa ociosas de outro período). Comparação só nos dias com escala cadastrada (desde out/2026). Calculado no banco — igual nos 3 computadores e no iPhone.</div>`;
+            + `<div style="font-size:9.5px; color:#94a3b8; line-height:1.5;">Como contamos: 1 paciente num horário = 1 vaga (2 exames juntos contam 1). Saída (desmarcou, cancelado, saiu da planilha sem chegar) devolve a vaga. Encaixe e SUS/urgência são adicionais (fora da escala). Ociosa = vaga de dia que já passou sem paciente; livre = de hoje em diante. Acima = mais pacientes que vagas no mesmo período e tipo (não compensa ociosas de outro período). Comparação só nos dias em que o tipo tem escala: regra v6 desde out/2026; antes, Prefeitura pela escala dos e-mails (ago–set/2026) ou estimada pelos horários da planilha (🧩 abaixo). Calculado no banco — igual nos 3 computadores e no iPhone.</div>`;
     }
     async function renderVagas() {
         const content = document.getElementById('contentDashboard');
@@ -3836,7 +3861,8 @@
             const r = await requestSupabase('rpc/vagas_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim });
             if (vgUltimo && vgUltimo.periodo !== vgPeriodo) vgIA = null;
             vgUltimo = { r, per, periodo: vgPeriodo };
-            content.innerHTML = vgHtml(r, per);
+            content.innerHTML = vgHtml(r, per) + histCardHtml();
+            histLigar();
             const $c = id => document.getElementById(id);
             $c('vgPeriodoSel').onchange = e => { vgPeriodo = e.target.value; vgIA = null; renderVagas(); };
             $c('btnVgRel').onclick = relatorioVagas;
@@ -3884,13 +3910,13 @@
         const la = (nome, a) => [nome, '—', a.n, '—', a.atendidos, a.faltas, a.pendentes, '—', '—', '—', '—'];
         const dsw = {}, z0 = { dias: 0, ofertadas: 0, ocupadas: 0, atendidos: 0, faltas: 0, ociosas: 0, livres: 0 };
         (r.por_dia_semana || []).forEach(x => { const k = `${x.dow}|${x.periodo}`; (dsw[k] = dsw[k] || { dow: x.dow, periodo: x.periodo })[x.tipo] = x; });
-        const pm = {};
-        (r.por_mes || []).forEach(x => { const g = pm[x.mes] = pm[x.mes] || { of: 0, oc: 0, at: 0, fa: 0, oci: 0, liv: 0 }; g.of += x.ofertadas; g.oc += x.ocupadas; g.at += x.atendidos; g.fa += x.faltas; g.oci += x.ociosas; g.liv += x.livres; });
+        const pm = vgMeses(r), fontes = vgFontesTxt(r);
         const corpo = `<h1>Ultrassonografia — Vagas ofertadas × agenda</h1><div class="meta">Período: <b>${escapeHtml(per.rotulo)}</b> · ${r.dias_escala} dia(s) com escala · HAMC/LADI</div>
             <div class="kpis"><div class="kpi"><b>${T.ofertadas}</b>vagas ofertadas</div><div class="kpi"><b>${vgPreench(T)} (${pctBR(vgPreench(T), T.ofertadas)})</b>vagas preenchidas</div><div class="kpi"><b>+${E.n + S.n}</b>adicionais (encaixe + SUS)</div><div class="kpi"><b>${T.atendidos + E.atendidos + S.atendidos}</b>exames realizados</div><div class="kpi"><b>${T.faltas} (${pctBR(T.faltas, T.atendidos + T.faltas)})</b>faltas</div><div class="kpi"><b>${T.ociosas}</b>vagas ociosas</div></div>
             ${vgIA ? `<h2>Análise e sugestões</h2><div class="ia">${escapeHtml(vgIA)}</div>` : ''}
             <h2>Por tipo de vaga</h2>${tabRel(['Tipo', 'Ofertadas', 'Agendados', 'Ocupação', 'Atendidos', 'Faltas', 'Sem desfecho', 'Saídas', 'Ociosas', 'Livres', 'Acima da escala'], [lt(VG_TIPO.prefeitura, P), lt(VG_TIPO.convenio_particular, V), lt('Total da escala', T), la('Encaixes (adicionais)', E), la('SUS hospitalar / urgência (adicionais)', S)])}
-            ${per.meses > 1 ? `<h2>Mês a mês</h2>${tabRel(['Mês', 'Ofertadas', 'Agendados', 'Ocupação', 'Atendidos', 'Faltas', 'Ociosas', 'Livres'], Object.entries(pm).sort().map(([m, g]) => [mesNomeAno(m), g.of, g.oc, pctBR(g.of - g.oci - g.liv, g.of), g.at, g.fa, g.oci, g.liv]))}` : ''}
+            ${per.meses > 1 ? `<h2>Mês a mês</h2>${tabRel(['Mês', 'Escala', 'Ofertadas', 'Agendados', 'Ocupação', 'Encaixes', 'Atendidos', 'Faltas', 'Ociosas', 'Livres', 'Fora da escala'], pm.map(g => (g.esc ? [mesNomeAno(g.mes), g.fonte, g.s.ofertadas, g.s.ocupadas, pctBR(g.s.ofertadas - g.s.ociosas - g.s.livres, g.s.ofertadas), g.enc, g.s.atendidos, `${g.s.faltas} (${pctBR(g.s.faltas, g.s.atendidos + g.s.faltas)})`, g.s.ociosas, g.s.livres, g.fora.ocupadas || '—'] : [mesNomeAno(g.mes), 'sem escala', '—', '—', '—', g.enc, '—', '—', '—', '—', g.fora.ocupadas || '—'])))}` : ''}
+            ${fontes ? `<div class="meta">Escala usada: ${escapeHtml(fontes)}. Estimada = 1 horário aberto na planilha da Prefeitura = 1 vaga (meses sem a escala do e-mail).</div>` : ''}
             <h2>Por bloco da escala</h2>${tabRel(['Bloco', 'Dias', 'Ofertadas', 'Agendados', 'Ocupação', 'Ociosas', 'Livres', 'Acima', 'Faltas'], (r.por_bloco || []).map(b => [`${VG_TIPO[b.tipo] || b.tipo} — ${VG_BLOCO[b.bloco] || b.bloco}`, b.dias, b.ofertadas, b.ocupadas, pctBR(b.ofertadas - b.ociosas - b.livres, b.ofertadas), b.ociosas, b.livres, b.acima, b.faltas]))}
             <h2>Por dia da semana e período</h2>${tabRel(['Dia / período', 'Prefeitura (agend./vagas)', 'Ociosas Pref.', 'Convênio (agend./vagas)', 'Ociosas Conv.', 'Faltas'], Object.values(dsw).sort((a, b) => a.dow - b.dow || (a.periodo === 'manha' ? -1 : 1)).map(g => { const p = g.prefeitura || z0, v = g.convenio_particular || z0; return [`${DOW_ISO[g.dow]} ${perTxt(g.periodo)}`, `${p.ocupadas}/${p.ofertadas}`, p.ociosas, `${v.ocupadas}/${v.ofertadas}`, v.ociosas, p.faltas + v.faltas]; }))}
             <h2>Leituras</h2><ul>${vgSugestoes(r, C).map(s => `<li>${s}</li>`).join('')}</ul>
@@ -3903,11 +3929,12 @@
         if (btn) { btn.disabled = true; btn.textContent = '⏳ Analisando…'; }
         try {
             const { r, per } = vgUltimo, C = vgCalc(r);
-            const dados = JSON.stringify({ periodo: per.rotulo, dias_com_escala: r.dias_escala, por_tipo: r.resumo, adicionais: r.adicionais, por_bloco: r.por_bloco, por_dia_semana: r.por_dia_semana, por_mes: per.meses > 1 ? r.por_mes : undefined, aproveitamento_dias_passados: { atendidos: C.atPass, vagas: C.ofPass } });
+            const dados = JSON.stringify({ periodo: per.rotulo, dias_com_escala: r.dias_escala, fonte_da_escala: vgFontesTxt(r) || 'regra v6', por_tipo: r.resumo, adicionais: r.adicionais, fora_da_escala: r.sem_escala, por_bloco: r.por_bloco, por_dia_semana: r.por_dia_semana, por_mes: per.meses > 1 ? r.por_mes : undefined, fora_da_escala_por_mes: per.meses > 1 ? r.sem_escala_mes : undefined, aproveitamento_dias_passados: { atendidos: C.atPass, vagas: C.ofPass } });
             const prompt = 'Você é consultor de gestão de um serviço de ultrassonografia hospitalar (HAMC/LADI, Santa Rita do Sapucaí-MG). ' +
                 'Abaixo, a escala de vagas ofertadas (Prefeitura e Convênio/Particular) comparada com a agenda real, em JSON agregado (sem pacientes). ' +
                 'Definições: 1 paciente num horário = 1 vaga; ofertadas = vagas da escala; ocupadas = agendados que não saíram; ociosas = vagas de dias passados sem paciente; ' +
-                'livres = de hoje em diante; acima = agendados além das vagas; adicionais = encaixes e SUS/urgência fora da escala; saídas = desmarcações/cancelamentos (devolvem a vaga).\n' +
+                'livres = de hoje em diante; acima = agendados além das vagas; adicionais = encaixes e SUS/urgência fora da escala; saídas = desmarcações/cancelamentos (devolvem a vaga); ' +
+                'fora_da_escala = agendados em dias sem escala do tipo (não entram na comparação); escala estimada = horários abertos na planilha da Prefeitura (meses antigos, menos precisa).\n' +
                 'Escreva em português do Brasil, sem markdown, no máximo 220 palavras:\n1) resumo com os números principais (oferta, ocupação, faltas, ociosas, adicionais);\n' +
                 '2) onde está a ineficiência (bloco, dia/período) — só o que os números sustentam; amostras pequenas não valem conclusão;\n' +
                 '3) 3 a 5 ações práticas e mensuráveis (redistribuir vagas entre blocos/dias, devolver vagas à Prefeitura com antecedência, overbooking controlado onde há mais faltas, confirmação na véspera, lista de espera para saídas).\n' +
@@ -3917,6 +3944,315 @@
             if (boxIA) boxIA.innerHTML = anIAHtml(vgIA);
         } catch (e) { alert('Não consegui gerar a análise:\n' + e.message); }
         finally { if (btn) { btn.disabled = false; btn.textContent = '🧠 Sugestões (Opus)'; } }
+    }
+
+    // =====================================================================
+    // 16F. 🧩 HISTÓRICO DA PREFEITURA (v9.7) — meses sem controle: planilha × PACS
+    // ---------------------------------------------------------------------
+    // Só para dias SEM agenda da Prefeitura no banco (antes de 20/08/2026 e buracos). Por dia:
+    //  • agendados = linhas com paciente das abas USG HAMC e USG HAMC MUTIRAO (Doppler de sábado);
+    //  • atendido = o paciente tem exame de US no PACS no MESMO dia: nome ≥ 0,88, ou 0,72–0,88 com data de
+    //    nascimento igual ou exame da mesma família; nascimento diferente exige nome ≥ 0,97;
+    //  • falta = agendado sem exame no dia (exame até 10 dias antes/depois → anotação "exame em dd/mm");
+    //  • período sem NENHUM exame de US no PACS = sem expediente: agendados → cancelado (saída), não falta;
+    //  • horário "VER E-SUS" (regulação, sem nome) recebe paciente da Prefeitura do PACS fora da planilha;
+    //    o restante da Prefeitura no PACS vira encaixe (origem encaixe_historico);
+    //  • escala: dia sem escala recebe a estimativa pelos horários da planilha (1 horário = 1 vaga, regra
+    //    'planilha'); dia com escala (e-mail) e período sem expediente → vagas 0.
+    // Simular primeiro (não grava nada); Gravar refaz a conta e grava. Na tela e no banco, só números.
+    // =====================================================================
+    // >>> HIST-NUCLEO (sem rede e sem tela)
+    const HIST_ORIGENS = ['historico_planilha', 'historico_mutirao', 'encaixe_historico'];
+    const HIST_JANELA_DIAS = 10;
+    const HIST_NOTA_RE = /^(FERIAD|BLOQUE|F[EÉ]RIAS|SEM (ATEND|EXPED|AGENDA|M[EÉ]DICO)|CANCELAD|DESMARC|N[AÃ]O AGEND|LIVRE|VAG[OA]\b|RESERVAD|PONTO FACULT|RECESSO|CURSO|CONGRESSO|FECHAD|SUSPENS)/;
+    function histPascoa(y) {
+        const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+        const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+        const x = h + l - 7 * m + 114;
+        return new Date(y, Math.floor(x / 31) - 1, (x % 31) + 1);
+    }
+    // feriado nacional (mesma regra da função feriado() do banco, sem os extras municipais)
+    function histFeriado(iso) {
+        const [y, m, d] = iso.split('-').map(Number);
+        if (['01-01', '04-21', '05-01', '09-07', '10-12', '11-02', '11-15', '11-20', '12-25'].includes(iso.slice(5))) return true;
+        return [-48, -47, -2, 60].includes(Math.round((new Date(y, m - 1, d) - histPascoa(y)) / 864e5));
+    }
+    function histDN(s) { // data de nascimento → AAAA-MM-DD (planilha "dd/mm/aaaa"; PACS ISO); CNS e lixo → null
+        const t = String(s == null ? '' : s).trim();
+        let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+        m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/);
+        if (!m) return null;
+        let y = +m[3]; if (y < 100) y += y > (new Date().getFullYear() % 100) ? 1900 : 2000;
+        return `${y}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    }
+    // famílias de exame — desempate quando o nome é só parecido
+    function histFamilias(txt) {
+        const t = ` ${normName(txt)} `, f = new Set();
+        if (/DOPP?LER|DUPLEX/.test(t)) {
+            f.add('doppler');
+            if (/CAROTID|VERTEBR/.test(t)) f.add('pescoco');
+            else if (/MEMBR|MMII|MMSS| MI[DE] | MS[DE] |VENOS|ARTERIA|VARIZ|PERNA|BRACO/.test(t)) f.add('membro');
+        }
+        if (/TIREOID|TIROID|CERVICAL|PESCO|CAROTID/.test(t)) f.add('pescoco');
+        if (/ABDOM/.test(t)) f.add('abdome');
+        if (/ RINS |RENA|URINAR|BEXIGA/.test(t)) f.add('urinario');
+        if (/PROSTAT/.test(t)) f.add('prostata');
+        if (/MAMA/.test(t)) f.add('mama');
+        if (/PELV|TRANSVAG|ENDOVAG|USTV| TV |UTER|OVARI/.test(t)) f.add('pelve');
+        if (/OBSTET|GESTA|MORFOL/.test(t)) f.add('obstetrica');
+        if (/ARTIC|ARTC|OMBRO|JOELH|PUNHO|COTOVEL|TORNOZ|QUADRIL| MAO | PE |TEND|MUSC|PARTES MOLES/.test(t)) f.add('msk');
+        if (/BOLSA|TESTIC|ESCROT/.test(t)) f.add('bolsa');
+        return f;
+    }
+    const histCompat = (a, b) => { for (const x of a) if (b.has(x)) return true; return false; };
+    function histBloco(exames) { // bloco da escala estimada: maioria (≥ 60%) Doppler de membro / pescoço; senão US geral
+        if (!exames.length) return 'us_geral';
+        const fs = exames.map(histFamilias), n = exames.length;
+        if (fs.filter(f => f.has('membro')).length / n >= 0.6) return 'doppler_membro';
+        if (fs.filter(f => f.has('pescoco')).length / n >= 0.6) return 'pescoco';
+        return 'us_geral';
+    }
+    function histClasse(l) { // linha da planilha: agendado | esus (regulação, sem nome) | vazio | nota (bloqueio/aviso)
+        if (/VER\s*E\s*-?\s*SUS|\bE-?SUS\b|REGULA/.test(l.pac)) return 'esus';
+        if (!l.pac) return 'vazio';
+        if (HIST_NOTA_RE.test(l.pac) || l.pac.split(' ').filter(w => w.length > 1).length < 2) return 'nota';
+        return 'agendado';
+    }
+    // CSV da planilha (colunas A data · B hora · D paciente · E nasc./CNS · H procedimento · I observação) → linhas do período
+    function histLerPlanilha(csv, aba, ini, fim, out) {
+        parseCSV(csv).forEach(c => {
+            const m = String(c[0] || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+            if (!m) return;
+            const data = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+            if (data < ini || data > fim || !/\d/.test(String(c[1] || ''))) return;
+            out.push({ aba, data, hora: normalizeTime(c[1]), pac: normText(c[3]), dn: String(c[4] || '').trim(), proc: normText(c[7]), obs: aba === 'pref' ? obsDaPlanilha(c[8]) : null });
+        });
+        return out;
+    }
+    function histFechar(r) { // exame no PACS sem imagem registrada: atendido pela ficha (sem tempo de espera)
+        if (r.status === 'esperando') { r.status = 'atendido'; r.atendidoEm = r.chegouEm || null; r.atendidoFonte = 'ficha'; r.tempoEsperaMin = null; }
+        return r;
+    }
+    // núcleo: dias do período (antes de hoje) → linhas da agenda, vagas estimadas, vagas a zerar e resumo por mês
+    function histProcessar({ plan, pacs, ini, fim, hoje, controlados, reconstruidos, refazer = false, vagasExist, estimarEscala = true, marcarSemExpediente = true, agoraIso }) {
+        const porDiaPlan = new Map(), porDiaPacs = new Map(), gruposDia = new Map();
+        plan.forEach(l => { l.cls = histClasse(l); if (!porDiaPlan.has(l.data)) porDiaPlan.set(l.data, []); porDiaPlan.get(l.data).push(l); });
+        pacs.forEach(x => {
+            if (!x || !x.paciente || String(x.exa_situacao || '').toUpperCase() === 'CANCELADO') return;
+            if (normName(x.paciente.pac_nome).startsWith('TESTE')) return;
+            const d = String(x.exa_data || '').slice(0, 10); if (!d) return;
+            if (!porDiaPacs.has(d)) porDiaPacs.set(d, []); porDiaPacs.get(d).push(x);
+        });
+        const grupos = d => {
+            if (!gruposDia.has(d)) gruposDia.set(d, groupPacsExams(porDiaPacs.get(d) || []).map(g => Object.assign(g, {
+                dn: histDN(g.exames[0].paciente && g.exames[0].paciente.pac_dtnasc), fam: histFamilias(g.examDescs.join(' ')),
+                pref: convenioFromPacs(g.convenioDesc).tipo === 'Prefeitura' })));
+            return gruposDia.get(d);
+        };
+        const pontua = (p, g) => {
+            let sc = nameScore(p.nome, g.nome);
+            if (sc < 0.5) return 0;
+            if (p.dn && g.dn) { if (p.dn === g.dn) { if (sc >= 0.6) sc = Math.max(sc, 0.96); } else if (sc < 0.97) sc = Math.min(sc, 0.7); }
+            return sc;
+        };
+        const outroDia = (p, d0) => { // exame do mesmo paciente até HIST_JANELA_DIAS antes/depois
+            for (let k = 1; k <= HIST_JANELA_DIAS; k++) for (const s of [k, -k]) {
+                const t = dIso(d0); t.setDate(t.getDate() + s); const dd = isoDe(t);
+                if (porDiaPacs.has(dd) && grupos(dd).some(g => pontua(p, g) >= PACS_LINK_AUTO)) return dd;
+            }
+            return null;
+        };
+        const nota = (txt, saida) => (saida ? { em: agoraIso, tag: 'Saída', motivo: 'Sem expediente', txt, por: 'Histórico' } : { em: agoraIso, tag: 'Outra', txt, por: 'Histórico' });
+        const origemAba = a => (a === 'mut' ? 'historico_mutirao' : 'historico_planilha');
+        const out = { linhas: [], vagas: [], zerar: [] }, mesRes = {};
+        const M = m => (mesRes[m] = mesRes[m] || { mes: m, dias: 0, controlados: 0, ja: 0, horarios: 0, agendados: 0, pacientes: 0, atendidos: 0, faltas: 0, cancelados: 0, remarcados: 0, esus: 0, esus_ok: 0, encaixes: 0, duvidosos: 0, notas_planilha: 0, sem_exped: 0, vagas_est: 0, vagas_zeradas: 0, pacs_us: 0 });
+        for (let t = dIso(ini); isoDe(t) <= fim && isoDe(t) < hoje; t.setDate(t.getDate() + 1)) {
+            const d = isoDe(t), r = M(d.slice(0, 7)), lp = porDiaPlan.get(d) || [], gs = grupos(d), exD = porDiaPacs.get(d) || [];
+            if (controlados.has(d)) { if (lp.length || gs.length) r.controlados++; continue; }
+            if (reconstruidos.has(d) && !refazer) { r.ja++; continue; }
+            if (!lp.length && !gs.some(g => g.pref)) continue; // nada da Prefeitura no dia
+            r.dias++; r.pacs_us += exD.length;
+            const aberto = { manha: exD.some(x => periodoFromHora(x.exa_hora) === 'manha'), tarde: exD.some(x => periodoFromHora(x.exa_hora) === 'tarde') };
+            r.horarios += lp.filter(l => l.cls !== 'nota').length; r.notas_planilha += lp.filter(l => l.cls === 'nota').length;
+            // agendados: 1 horário + paciente = 1 vaga (procedimentos do mesmo horário juntos)
+            const slots = new Map();
+            lp.filter(l => l.cls === 'agendado').forEach(l => {
+                const k = `${l.hora}|${normName(l.pac)}`;
+                if (!slots.has(k)) slots.set(k, { hora: l.hora, pac: l.pac, dn: histDN(l.dn), partes: [], obs: l.obs || null, aba: l.aba });
+                const s = slots.get(k);
+                (exameDaPlanilha(l.proc, d, l.hora) || '').split(' + ').forEach(p => { if (p && !s.partes.includes(p)) s.partes.push(p); });
+                if (!s.dn) s.dn = histDN(l.dn);
+            });
+            const pacientes = new Map();
+            slots.forEach(s => { const k = normName(s.pac); if (!pacientes.has(k)) pacientes.set(k, { nome: s.pac, dn: s.dn, slots: [] }); const p = pacientes.get(k); p.slots.push(s); if (!p.dn) p.dn = s.dn; });
+            r.agendados += slots.size; r.pacientes += pacientes.size;
+            // vínculo com o PACS do mesmo dia: maiores notas primeiro, cada exame do PACS serve a 1 paciente
+            const pares = [];
+            pacientes.forEach((p, kp) => {
+                const famP = histFamilias(p.slots.map(s => s.partes.join(' ')).join(' '));
+                gs.forEach((g, gi) => { const sc = pontua(p, g); if (sc >= PACS_LINK_AUTO || (sc >= PACS_LINK_ASK && histCompat(famP, g.fam))) pares.push({ kp, gi, sc }); });
+            });
+            pares.sort((a, b) => b.sc - a.sc);
+            const casP = new Map(), casG = new Set();
+            pares.forEach(x => { if (!casP.has(x.kp) && !casG.has(x.gi)) { casP.set(x.kp, x); casG.add(x.gi); } });
+            pacientes.forEach((p, kp) => {
+                const base = p.slots.map(s => ({ hora: s.hora, tipo: 'Prefeitura', convenio: 'PREFEITURA', paciente: p.nome, exame: s.partes.join(' + ') || 'USG NÃO INFORMADO', qtdExames: Math.max(1, s.partes.length), status: 'pendente', obs: s.obs, origem: origemAba(s.aba), notas: null }));
+                const cas = casP.get(kp);
+                if (cas) {
+                    linkGroupToRows(gs[cas.gi], base).forEach(row => out.linhas.push(toCloudRow(histFechar(row), d)));
+                    r.atendidos += base.length; if (cas.sc < PACS_LINK_AUTO) r.duvidosos++;
+                    return;
+                }
+                let outro;
+                base.forEach(row => {
+                    if (!aberto[periodoFromHora(row.hora)]) { row.status = 'cancelado'; row.notas = [nota('nenhum exame de US no PACS no período (histórico)', true)]; r.cancelados++; }
+                    else {
+                        row.status = 'faltou'; r.faltas++;
+                        if (outro === undefined) { outro = outroDia(p, d); if (outro) r.remarcados++; }
+                        if (outro) row.notas = [nota(`exame de US no PACS em ${fmtBR(outro).slice(0, 5)} (fora do dia agendado) — histórico`)];
+                    }
+                    out.linhas.push(toCloudRow(row, d));
+                });
+            });
+            // regulação (VER E-SUS): horário sem nome recebe paciente da Prefeitura do PACS que não estava na planilha
+            const sobra = gs.filter((g, gi) => g.pref && !casG.has(gi)), usados = new Set();
+            const esus = lp.filter(l => l.cls === 'esus').sort((a, b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
+            r.esus += esus.length;
+            esus.forEach(l => {
+                const g = sobra.find(x => !usados.has(x) && periodoFromHora(x.horaFicha) === periodoFromHora(l.hora)); if (!g) return;
+                usados.add(g); r.esus_ok++;
+                const row = { hora: l.hora, tipo: 'Prefeitura', convenio: 'PREFEITURA', paciente: g.nome, exame: g.examDescs[0] || 'NÃO INFORMADO', status: 'pendente', obs: 'REGULAÇÃO E-SUS (HORÁRIO SEM NOME NA PLANILHA)', origem: origemAba(l.aba) };
+                out.linhas.push(toCloudRow(histFechar(applyPacsToRow(row, g, g.examIds)), d));
+            });
+            sobra.filter(g => !usados.has(g)).forEach(g => { const e = newEncaixeFromPacs(g); e.origem = 'encaixe_historico'; out.linhas.push(toCloudRow(histFechar(e), d)); r.encaixes++; });
+            // escala do dia
+            ['manha', 'tarde'].forEach(per => {
+                const ex = vagasExist.get(d);
+                if (ex) {
+                    const pos = ex.filter(v => v.periodo === per && v.vagas > 0), antes = pos.reduce((a, v) => a + v.vagas, 0);
+                    if (antes && !aberto[per] && marcarSemExpediente) { out.zerar.push({ data: d, periodo: per, antes }); r.sem_exped++; r.vagas_zeradas += antes; }
+                    return;
+                }
+                const rs = lp.filter(l => l.cls !== 'nota' && periodoFromHora(l.hora) === per);
+                if (!estimarEscala || !rs.length || (histFeriado(d) && !aberto[per])) return;
+                const porBloco = {};
+                ['pref', 'mut'].forEach(aba => {
+                    const ra = rs.filter(l => l.aba === aba); if (!ra.length) return;
+                    const n = new Set(ra.map((l, i) => (l.cls === 'agendado' ? `${l.hora}|${normName(l.pac)}` : `v${i}`))).size;
+                    const bloco = aba === 'mut' ? 'doppler_membro' : histBloco(ra.filter(l => l.cls === 'agendado').map(l => l.proc));
+                    (porBloco[bloco] = porBloco[bloco] || { n: 0, mut: false }).n += n; if (aba === 'mut') porBloco[bloco].mut = true;
+                });
+                Object.entries(porBloco).forEach(([bloco, b]) => {
+                    const fechado = !aberto[per];
+                    out.vagas.push({ data: d, periodo: per, tipo: 'prefeitura', bloco, vagas: fechado ? 0 : b.n, regra: 'planilha',
+                        fonte: fechado ? `sem expediente — ${b.n} horário(s) na planilha e nenhum exame de US no PACS no período (histórico)`
+                            : `estimada: ${b.n} horário(s) abertos na planilha da Prefeitura${b.mut ? ' (aba Mutirão)' : ''} (histórico)` });
+                    if (fechado) r.sem_exped++; else r.vagas_est += b.n;
+                });
+            });
+        }
+        out.resumo = Object.values(mesRes).sort((a, b) => (a.mes < b.mes ? -1 : 1));
+        return out;
+    }
+    // <<< HIST-NUCLEO
+    let histUltimo = null, histRodando = false;
+    function histResHtml(h) {
+        if (h.erro) return `<div style="font-size:10.5px; color:#e11d48; margin:4px 0;">⚠️ Não consegui reconstruir: ${escapeHtml(h.erro)}</div>`;
+        const K = ['dias', 'horarios', 'agendados', 'atendidos', 'faltas', 'remarcados', 'cancelados', 'esus', 'esus_ok', 'encaixes', 'duvidosos', 'vagas_est', 'sem_exped', 'vagas_zeradas', 'controlados', 'ja'];
+        const T = Object.fromEntries(K.map(k => [k, h.resumo.reduce((a, x) => a + (x[k] || 0), 0)]));
+        const lin = (nome, x, neg) => ({ estilo: neg ? 'font-weight:800;' : '', c: [nome, x.dias, x.horarios, x.agendados, x.atendidos, `${x.faltas} ${cinzaN(`(${pctBR(x.faltas, x.atendidos + x.faltas)})`)}`, x.cancelados || '—', x.esus ? `${x.esus_ok}/${x.esus}` : '—', x.encaixes || '—', x.vagas_est || '—', x.sem_exped ? `${x.sem_exped}${x.vagas_zeradas ? ` (−${x.vagas_zeradas})` : ''}` : '—'] });
+        const st = h.simulado ? `🔎 Simulação de ${fmtBR(h.ini)} a ${fmtBR(h.fim)} — <b>nada foi gravado</b>. Confira e clique em 💾 Gravar.`
+            : `✓ Gravado em ${new Date(h.em).toLocaleString('pt-BR')}: ${h.linhas.length} linha(s) na agenda, ${h.vagas.length} linha(s) de escala estimada${h.zerar.length ? `, ${h.zerar.length} período(s) marcado(s) sem expediente` : ''}.`;
+        return `<div style="font-size:10.5px; margin:4px 0 6px;">${st}</div>` + tabelaHtml(['Mês', 'Dias', 'Horários', 'Agendados', 'Atendidos', 'Faltas', 'Sem exped.', 'e-SUS', 'Encaixes', 'Escala estimada', 'Períodos fechados'],
+            [...h.resumo.filter(x => x.dias || x.controlados || x.ja).map(x => lin(mesNomeAno(x.mes), x)), lin('Total', T, true)])
+            + `<div style="font-size:10.5px; margin-top:4px;">Faltas que fizeram o exame em outro dia (até ${HIST_JANELA_DIAS} dias): <b>${T.remarcados}</b> · vínculos por nome parecido (aceitos por exame ou nascimento): <b>${T.duvidosos}</b> · dias pulados (já tinham agenda no banco): <b>${T.controlados + T.ja}</b></div>`
+            + `<div style="font-size:9.5px; color:#94a3b8; margin-top:4px; line-height:1.5;">Horários = linhas da planilha (vazias e e-SUS incluídas). Faltas (%) sobre agendados com desfecho. Sem exped. = agendados de período sem nenhum exame de US no PACS (viram saída, não falta). e-SUS = horários de regulação preenchidos com paciente da Prefeitura do PACS / total. Períodos fechados = sem nenhum exame no PACS (escala estimada 0; escala do e-mail zerada, entre parênteses).</div>`;
+    }
+    function histCardHtml() {
+        const h = new Date(), ops = [];
+        for (let i = 1; i <= 30; i++) ops.push(isoDe(new Date(h.getFullYear(), h.getMonth() - i, 1)).slice(0, 7));
+        const de = histUltimo ? histUltimo.ini.slice(0, 7) : `${h.getFullYear()}-01`, ate = histUltimo ? histUltimo.fim.slice(0, 7) : ops[0];
+        const sel = (id, v) => `<select id="${id}" style="font-size:11px; font-weight:700; padding:2px 5px; border-radius:4px; border:1px solid #94a3b8; background:#fff; color:#0f172a;">${ops.map(m => `<option value="${m}" ${m === v ? 'selected' : ''}>${mesNomeAno(m)}</option>`).join('')}</select>`;
+        return `<details id="histBox" class="dash-box" ${histUltimo ? 'open' : ''} style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:8px 10px; margin-bottom:10px;">
+            <summary style="font-weight:bold; font-size:11.5px; cursor:pointer;">🧩 Meses anteriores ao controle — reconstruir a Prefeitura (planilha × PACS)</summary>
+            <div style="font-size:10.5px; color:#64748b; margin:6px 0; line-height:1.5;">Só nos dias <b>sem agenda da Prefeitura no banco</b>: agendados da planilha (aba USG HAMC e, se marcada, a aba do Mutirão) × exames de US do PACS do mesmo dia → atendido ou falta. Período sem nenhum exame de US no PACS = sem expediente (vira saída, não falta). Paciente da Prefeitura no PACS fora da planilha preenche horário "VER E-SUS" ou vira encaixe. Dia sem escala cadastrada recebe a escala estimada pelos horários da planilha. Os nomes não saem do computador — só para o banco, como na agenda do dia.</div>
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:11px;">De ${sel('histDe', de)} até ${sel('histAte', ate)}
+                <label><input type="checkbox" id="histMut" checked> aba Mutirão</label>
+                <label><input type="checkbox" id="histEsc" checked> estimar a escala pela planilha</label>
+                <label title="Apaga e refaz só o que esta ferramenta gravou nesses dias (agenda histórica e escala estimada)"><input type="checkbox" id="histRefazer"> refazer dias já reconstruídos</label>
+                <button id="btnHistSim" class="btn-top-action" style="background:#0f766e; color:#fff;">🔎 Simular</button>
+                <button id="btnHistGravar" class="btn-top-action" style="background:#b45309; color:#fff;" ${histUltimo && histUltimo.simulado && !histUltimo.erro ? '' : 'disabled'} title="Refaz a conta e grava (simule antes)">💾 Gravar</button>
+                <span id="histStatus" style="font-size:10.5px; color:#64748b;"></span></div>
+            <div id="histRes" style="margin-top:6px;">${histUltimo ? histResHtml(histUltimo) : ''}</div></details>`;
+    }
+    function histLigar() {
+        const b1 = document.getElementById('btnHistSim'), b2 = document.getElementById('btnHistGravar');
+        if (b1) b1.onclick = () => histExecutar(false);
+        if (b2) b2.onclick = () => histExecutar(true);
+    }
+    async function histExecutar(gravar) {
+        if (histRodando) return;
+        const $h = id => document.getElementById(id), st = $h('histStatus'), msg = t => { if (st) st.textContent = t; };
+        const de = $h('histDe').value, ate = $h('histAte').value, mut = $h('histMut').checked, est = $h('histEsc').checked, refazer = $h('histRefazer').checked;
+        const ini = `${de}-01`, [ya, ma] = ate.split('-').map(Number), fim = isoDe(new Date(ya, ma, 0)), hoje = getTodayIso();
+        histRodando = true; ['btnHistSim', 'btnHistGravar'].forEach(i => { if ($h(i)) $h(i).disabled = true; });
+        try {
+            if (!getSupabaseConfig()) throw new Error('configure a nuvem (⚙️ API) e faça login');
+            if (!pacsToken()) throw new Error('PACS sem login nesta aba');
+            if (ini > fim) throw new Error('o mês inicial é depois do final');
+            msg('⏳ Baixando a planilha da Prefeitura…');
+            const id = await configNuvem('prefeitura_planilha_id'), gid = await configNuvem('prefeitura_planilha_gid'), gidM = mut ? await configNuvem('prefeitura_mutirao_gid') : null;
+            if (!id || !gid) throw new Error('planilha da Prefeitura não configurada (agenda_config)');
+            const url = g => `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/export?format=csv&gid=${encodeURIComponent(g)}`;
+            const plan = histLerPlanilha(await baixarTexto(url(gid)), 'pref', ini, fim, []);
+            if (gidM) histLerPlanilha(await baixarTexto(url(gidM)), 'mut', ini, fim, plan);
+            msg('⏳ Lendo a agenda e a escala do banco…');
+            const ag = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&tipo=eq.Prefeitura&select=data_agenda,origem&limit=50000`, 'GET');
+            const controlados = new Set(), reconstruidos = new Set();
+            (Array.isArray(ag) ? ag : []).forEach(x => (HIST_ORIGENS.includes(x.origem) ? reconstruidos : controlados).add(x.data_agenda));
+            controlados.forEach(d => reconstruidos.delete(d));
+            const vg = await requestSupabase(`agenda_vagas?data=gte.${ini}&data=lte.${fim}&tipo=eq.prefeitura&select=data,periodo,bloco,vagas,regra&limit=20000`, 'GET');
+            const refazerDias = refazer ? [...reconstruidos] : [];
+            const vagasExist = new Map();
+            (Array.isArray(vg) ? vg : []).forEach(v => { if (refazer && v.regra === 'planilha' && reconstruidos.has(v.data)) return; if (!vagasExist.has(v.data)) vagasExist.set(v.data, []); vagasExist.get(v.data).push(v); });
+            // PACS: do mês anterior ao início até o mês seguinte ao fim (janela do "exame em outro dia")
+            const meses = [], t = new Date(+de.slice(0, 4), +de.slice(5, 7) - 2, 1), ultimo = isoDe(new Date(ya, ma, 1)).slice(0, 7);
+            for (let m = isoDe(t).slice(0, 7); m <= ultimo && m <= hoje.slice(0, 7); t.setMonth(t.getMonth() + 1), m = isoDe(t).slice(0, 7)) meses.push(m);
+            const pacs = [];
+            for (const m of meses) { msg(`⏳ PACS: exames de US de ${mesNomeAno(m)}…`); pacs.push(...await prodBuscar(m, PROD_MOD.US)); }
+            msg('⏳ Cruzando planilha × PACS…');
+            const out = histProcessar({ plan, pacs, ini, fim, hoje, controlados, reconstruidos, refazer, vagasExist, estimarEscala: est, marcarSemExpediente: true, agoraIso: new Date().toISOString() });
+            histUltimo = Object.assign(out, { ini, fim, simulado: !gravar, em: new Date().toISOString() });
+            if (gravar) {
+                for (let i = 0; i < refazerDias.length; i += 50) {
+                    const lote = refazerDias.slice(i, i + 50).join(',');
+                    msg('⏳ Apagando a reconstrução anterior desses dias…');
+                    await requestSupabase(`${TABLE}?data_agenda=in.(${lote})&origem=in.(${HIST_ORIGENS.join(',')})`, 'DELETE', null, { Prefer: 'return=minimal' });
+                    await requestSupabase(`agenda_vagas?data=in.(${lote})&regra=eq.planilha`, 'DELETE', null, { Prefer: 'return=minimal' });
+                }
+                for (let i = 0; i < out.linhas.length; i += 200) {
+                    msg(`⏳ Gravando a agenda histórica… ${Math.min(i + 200, out.linhas.length)}/${out.linhas.length}`);
+                    await requestSupabase(`${TABLE}?on_conflict=${CONFLICT_COLS}`, 'POST', out.linhas.slice(i, i + 200), { Prefer: 'resolution=ignore-duplicates,return=minimal' });
+                }
+                for (let i = 0; i < out.vagas.length; i += 300) await requestSupabase('agenda_vagas?on_conflict=data,periodo,tipo,bloco', 'POST', out.vagas.slice(i, i + 300), { Prefer: 'resolution=ignore-duplicates,return=minimal' });
+                for (const z of out.zerar) await requestSupabase(`agenda_vagas?data=eq.${z.data}&periodo=eq.${z.periodo}&tipo=eq.prefeitura&vagas=gt.0`, 'PATCH', { vagas: 0, fonte: `sem expediente (histórico: nenhum exame de US no PACS no período; a escala tinha ${z.antes})` }, { Prefer: 'return=minimal' });
+                await requestSupabase('agenda_config?on_conflict=chave', 'POST', [{ chave: 'historico_resumo', valor: JSON.stringify({ em: histUltimo.em, ini, fim, pc: String(navigator.platform || '').slice(0, 30), linhas: out.linhas.length, vagas: out.vagas.length, zerar: out.zerar.length, resumo: out.resumo }) }], { Prefer: 'resolution=merge-duplicates,return=minimal' });
+                msg('');
+                renderVagas();
+                return;
+            }
+            msg('');
+            const res = $h('histRes'); if (res) res.innerHTML = histResHtml(histUltimo);
+        } catch (e) {
+            histUltimo = { erro: e.message || String(e), resumo: [], ini, fim, simulado: true, linhas: [], vagas: [], zerar: [] };
+            const res = $h('histRes'); if (res) res.innerHTML = histResHtml(histUltimo);
+            msg('');
+        } finally {
+            histRodando = false;
+            if ($h('btnHistSim')) $h('btnHistSim').disabled = false;
+            if ($h('btnHistGravar')) $h('btnHistGravar').disabled = !(histUltimo && histUltimo.simulado && !histUltimo.erro);
+        }
     }
 
     // =====================================================================
