@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.6.1
+// @version      9.6.2
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda, painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3408,23 +3408,33 @@
     }
     // exame "meu" no mês: null = não conta; senão { lib, sit }. Liberado = radiologista do exame sou eu;
     // pendente = precisa de laudo e (é meu, ou sem radiologista: US qualquer; TC fora de ABERTO). TESTE fora.
+    // v9.6.2 — ABERTO há mais de 10 dias = "aberto antigo": não é laudo a fazer (2º código de laudo conjunto não liberado,
+    // não realizado, cancelado não excluído) → fora do "a laudar" e do valor; vai para a auditoria do 💰 Financeiro.
+    const ABERTO_ANTIGO_DIAS = 10;
     function prodSituacao(x, mod, me, mes) {
         if (!x || String(x.exa_data || '').slice(0, 7) !== mes) return null;
         if (normName(x.paciente && x.paciente.pac_nome).startsWith('TESTE')) return null; // pacientes de teste fora
         const sit = String(x.exa_situacao || '').toUpperCase(), rad = x.usu_codigo_radiologista, lib = sit === 'LIBERADO';
         const meu = lib ? (rad != null && rad === me) : (x.exa_idnnecessitalaudo !== false && (rad === me || (rad == null && (mod === 'US' || sit !== 'ABERTO'))));
-        return meu ? { lib, sit } : null;
+        if (!meu) return null;
+        const d = diaHoraLocal(x.exa_data, '00:00:00');
+        const antigo = !lib && sit === 'ABERTO' && !!d && (Date.now() - d.getTime()) > ABERTO_ANTIGO_DIAS * 864e5;
+        return { lib, sit, antigo };
     }
+    // paciente+dia com exame liberado na mesma lista (para marcar o aberto antigo que parece 2º código de laudo conjunto)
+    const prodChavePacDia = x => `${(x.paciente && (x.paciente.pac_codigo || x.paciente.pac_pacs_codigo)) || ''}|${String(x.exa_data || '').slice(0, 10)}`;
+    const prodLibPacDia = rows => new Set(rows.filter(x => String(x.exa_situacao || '').toUpperCase() === 'LIBERADO').map(prodChavePacDia));
     // v9.6 — produção do mês agregada por dia × convênio × exame × situação (base do 💰 Financeiro). Só contagens.
     const SIT_REVISAR = ['REVISAR', 'DIGITADO', 'ASSINAR', 'PRELAUDO'];
     function prodItens(rows, mod, me, mes) {
-        const acc = new Map();
+        const acc = new Map(), libPD = prodLibPacDia(rows);
         rows.forEach(x => {
             const s = prodSituacao(x, mod, me, mes); if (!s) return;
             const it = { dia: String(x.exa_data).slice(0, 10), conv: normConvenio(x.convenio && x.convenio.conv_descricao),
                 exame: cleanExamDesc(x.tipoexame && x.tipoexame.tpe_descricao) || 'NÃO INFORMADO',
-                estado: s.lib ? 'liberado' : SIT_REVISAR.includes(s.sit) ? 'revisar' : 'pendente', urg: !!x.exa_idnurgente, int: x.exa_tipo === 'I' };
-            const k = [it.dia, it.conv, it.exame, it.estado, it.urg, it.int].join('|');
+                estado: s.lib ? 'liberado' : SIT_REVISAR.includes(s.sit) ? 'revisar' : s.antigo ? 'aberto' : 'pendente', urg: !!x.exa_idnurgente, int: x.exa_tipo === 'I' };
+            if (it.estado === 'aberto') it.par = libPD.has(prodChavePacDia(x));
+            const k = [it.dia, it.conv, it.exame, it.estado, it.urg, it.int, !!it.par].join('|');
             const e = acc.get(k); if (e) e.n++; else acc.set(k, Object.assign(it, { n: 1 }));
         });
         return [...acc.values()];
@@ -3433,8 +3443,10 @@
         const out = { liberados: 0, pendentes: 0, por_situacao: {}, por_categoria: {}, urgentes: { lib: 0, pend: 0 }, internados: { lib: 0, pend: 0 } };
         const exames = {}, tEl = [], tUr = []; let noPrazo = 0, comPrazo = 0, ate2h = 0;
         PROD_CATS.forEach(c => { out.por_categoria[c] = { lib: 0, pend: 0 }; });
+        out.abertos_antigos = 0;
         rows.forEach(x => {
             const s = prodSituacao(x, mod, me, mes); if (!s) return;
+            if (s.antigo) { out.abertos_antigos++; return; } // fora da conta (auditoria no 💰 Financeiro)
             const { lib, sit } = s;
             const k = lib ? 'lib' : 'pend';
             if (lib) out.liberados++; else { out.pendentes++; out.por_situacao[sit] = (out.por_situacao[sit] || 0) + 1; }
@@ -3516,7 +3528,7 @@
               <div>
                 <table style="width:100%; border-collapse:collapse; font-size:10.5px;"><tr style="color:#64748b; font-size:9.5px; text-transform:uppercase;"><th style="text-align:left; padding:3px 6px;">Categoria</th><th ${th}>Lib.</th><th ${th}>Pend.</th><th ${th}>Total</th><th ${th}>%</th></tr>
                 ${cats.map(c => { const v = d.por_categoria[c], t = v.lib + v.pend; return `<tr><td style="padding:3px 6px; font-weight:700;">${c}</td><td ${td}>${v.lib}</td><td ${td}>${v.pend}</td><td ${td}><b>${t}</b></td><td ${td}>${pct(t, d.total)}</td></tr>`; }).join('')}</table>
-                <div style="font-size:10px; color:#475569; margin-top:6px;">🚨 Urgentes: <b>${d.urgentes.lib + d.urgentes.pend}</b> (${pct(d.urgentes.lib + d.urgentes.pend, d.total)}) · 🏥 Internados: <b>${d.internados.lib + d.internados.pend}</b>${d.pendentes ? ` · pendentes: ${Object.entries(d.por_situacao).map(([k, v]) => `${k.toLowerCase()} ${v}`).join(', ')}` : ''}</div>
+                <div style="font-size:10px; color:#475569; margin-top:6px;">🚨 Urgentes: <b>${d.urgentes.lib + d.urgentes.pend}</b> (${pct(d.urgentes.lib + d.urgentes.pend, d.total)}) · 🏥 Internados: <b>${d.internados.lib + d.internados.pend}</b>${d.pendentes ? ` · pendentes: ${Object.entries(d.por_situacao).map(([k, v]) => `${k.toLowerCase()} ${v}`).join(', ')}` : ''}${d.abertos_antigos ? ` · <span title="Em ABERTO há mais de ${ABERTO_ANTIGO_DIAS} dias: fora da conta (ver 💰 Financeiro › auditoria)">${d.abertos_antigos} aberto(s) antigo(s) fora da conta</span>` : ''}</div>
                 <div style="font-size:10.5px; margin-top:8px; padding:6px 8px; background:#f8fafc; border-radius:6px;">⏱ <b>Exame → laudo liberado</b><br>
                   Eletivos: mediana <b>${fmtH(te.med)}</b> · média ${fmtH(te.media)} · 90% até ${fmtH(te.p90)} · no prazo (${mod === 'US' ? 3 : 5} dias úteis): <b>${pct(te.no_prazo, te.com_prazo)}</b> (n=${te.n})<br>
                   Urgentes: mediana <b>${fmtH(tu.med)}</b> · 90% até ${fmtH(tu.p90)}${mod === 'CT' ? ` · até 2 h: <b>${pct(tu.ate2h, tu.n)}</b>` : ''} (n=${tu.n})</div>
@@ -4152,13 +4164,52 @@
         const sem = F(r.sem_tarifa), semTot = sem.reduce((a, s) => a + s.n, 0);
         const cSem = sem.length ? cartaoFin(`⚠ Sem tarifa — fora do total (${nBR(semTot)} exame(s))`, finTab(['Convênio', 'Exame', 'Exames', 'Estimativa*'], sem.slice(0, 40).map(s => [escapeHtml(s.conv), `${finTagMod(s.mod)}${escapeHtml(s.exame)}`, nBR(s.n), +s.est ? brl(+s.est) : '—'])),
             `*pelo ticket médio de convênio no US (${brl(r.ticket_conv_us)}), só como referência — falta a tabela desse convênio/exame no banco.`) : cartaoFin('✓ Tarifas', '<div style="color:#059669;">Todos os exames do período têm tarifa.</div>');
+        // v9.6.2 — auditoria: exames em ABERTO há mais de 10 dias (fora do valor)
+        const ab = F(r.abertos), abTot = ab.reduce((a, x) => a + (+x.n || 0), 0);
+        let cAb = '';
+        if (abTot) {
+            const pm = {};
+            ab.forEach(x => { const g = pm[x.mes] = pm[x.mes] || { US: 0, CT: 0, par: 0 }; g[x.mod] = (g[x.mod] || 0) + (+x.n || 0); g.par += +x.par_n || 0; });
+            cAb = cartaoFin(`🗂 Em ABERTO há mais de ${ABERTO_ANTIGO_DIAS} dias — fora do valor (${nBR(abTot)})`,
+                finTab(['Mês', 'US', 'TC', '2º código*'], Object.keys(pm).sort().map(m => [mesNomeAno(m), pm[m].US || '—', pm[m].CT || '—', pm[m].par || '—']))
+                + `<div style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;"><button id="btnFinAbertos" style="background:#334155; color:#fff; border:none; border-radius:5px; padding:4px 10px; font-weight:700; font-size:10.5px; cursor:pointer;">🔎 Listar no PACS (nº do exame, sem nome)</button><span style="font-size:10px; color:#94a3b8;">consulta ao vivo, nada é gravado</span></div><div id="finAbertosLista" style="margin-top:6px;"></div>`,
+                'Não são laudos a fazer: provável 2º código de laudo conjunto que ficou sem liberar (mesmo paciente e dia de outro exame liberado — pode ser faturamento perdido), exame não realizado ou cancelado sem exclusão. *2º código: marcado nas leituras do PACS feitas a partir da versão 9.6.2 (a lista ao vivo mostra todos).');
+        }
         corpo.innerHTML = aviso + tiles + grafico
             + cartaoFin('🧾 Por modalidade e situação', tMod, 'Liberado = laudo liberado · Em revisão = revisar / digitado / assinar / pré-laudo · A laudar = sem laudo ainda (meus ou sem radiologista)')
             + `<div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:10px;">${cartaoFin('🏷 Por categoria', tCat)}${cartaoFin('🧩 Por tipo de procedimento', tGrupo)}</div>`
             + cartaoFin('🏥 Por convênio', tConv, '≈ = valor estimado (sem tabela conferida) · ⚠ = sem tarifa (fora do total) · "tabela" = qual tabela de valores foi usada')
             + `<div style="display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:10px;">${cartaoFin('🔬 Exames (maiores valores)', tEx)}${cSem}</div>`
+            + cAb
             + '<div style="font-size:10px; color:#94a3b8; line-height:1.5;">Base: produção lida do PACS pela data do exame ("meus" = radiologista do exame = Dr. Gabriel; pendentes sem radiologista: US todos, TC fora de ABERTO; pacientes TESTE fora) × tabela de tarifas privada do banco (versão corrigida: % do acordo aplicado uma única vez). Repasse estimado — o pagamento real depende do fechamento e de glosas do hospital. Nenhum valor fica no código e nenhum dado de paciente vai para a nuvem (só contagens).</div>';
         finLigarDicas(corpo);
+        const bAb = document.getElementById('btnFinAbertos'); if (bAb) bAb.onclick = finAbertosListar;
+    }
+    // lista ao vivo (PACS desta aba) dos exames em ABERTO há mais de 10 dias no período — só nº, data, exame e convênio; nada é gravado
+    async function finAbertosListar() {
+        const box = document.getElementById('finAbertosLista'); if (!box || !finUltimo) return;
+        if (!pacsToken()) { box.innerHTML = '<div style="color:#d97706;">Abra o PACS logado nesta aba para listar.</div>'; return; }
+        const me = prodMeuUsuario(); if (me == null) { box.innerHTML = '<div style="color:#dc2626;">Não consegui identificar o usuário do PACS.</div>'; return; }
+        const per = finUltimo.per, atualM = getTodayIso().slice(0, 7), [y0, m0] = per.ini.split('-').map(Number), meses = [];
+        for (let i = 0; i < 13; i++) { const m = isoDe(new Date(y0, m0 - 1 + i, 1)).slice(0, 7); if (m > per.fim.slice(0, 7) || m > atualM) break; meses.push(m); }
+        const linhas = [];
+        try {
+            for (const mes of meses) for (const [mod, cod] of Object.entries(PROD_MOD)) {
+                if (finMod !== 'todos' && finMod !== mod) continue;
+                box.innerHTML = `<div style="color:#64748b;">⏳ consultando o PACS: ${mesNomeAno(mes)} ${mod === 'CT' ? 'TC' : 'US'}…</div>`;
+                const rows = await prodBuscar(mes, cod), libPD = prodLibPacDia(rows);
+                rows.forEach(x => {
+                    const s = prodSituacao(x, mod, me, mes); if (!s || !s.antigo) return;
+                    const dia = String(x.exa_data).slice(0, 10); if (dia < per.ini || dia > per.fim) return;
+                    linhas.push({ dia, cod: x.exa_codigo, mod, exame: cleanExamDesc(x.tipoexame && x.tipoexame.tpe_descricao) || '—', conv: normConvenio(x.convenio && x.convenio.conv_descricao), par: libPD.has(prodChavePacDia(x)), urg: !!x.exa_idnurgente, int: x.exa_tipo === 'I' });
+                });
+            }
+        } catch (e) { box.innerHTML = `<div style="color:#dc2626;">${escapeHtml(e.message || String(e))}</div>`; return; }
+        linhas.sort((a, b) => (a.dia < b.dia ? -1 : a.dia > b.dia ? 1 : a.mod < b.mod ? -1 : 1));
+        const nPar = linhas.filter(l => l.par).length;
+        box.innerHTML = linhas.length ? `<div style="font-size:10.5px; margin-bottom:4px;"><b>${linhas.length}</b> exame(s): <b>${nPar}</b> com outro exame do mesmo paciente liberado no dia (provável 2º código de laudo conjunto) · <b>${linhas.length - nPar}</b> sem laudo no dia.</div><div style="max-height:320px; overflow:auto;">`
+            + finTab(['Data', 'Nº do exame', 'Mod.', 'Exame', 'Convênio', 'Provável'], linhas.map(l => [fmtBR(l.dia), `#${l.cod}`, l.mod === 'CT' ? 'TC' : 'US', `${escapeHtml(l.exame)}${l.urg ? ' 🚨' : ''}${l.int ? ' 🏥' : ''}`, escapeHtml(l.conv), l.par ? '2º código (outro exame liberado no dia)' : 'sem laudo no dia']))
+            + '</div>' : '<div style="color:#059669;">Nenhum exame em ABERTO antigo no período ✓</div>';
     }
     async function finLerPeriodo() {
         if (finLendo) return;
@@ -4198,6 +4249,7 @@
             <h2>Por convênio</h2>${tabRel(['Convênio', 'Categoria', 'Exames', 'Valor', 'Liberado', 'Estimados', 'Sem tarifa'], convs.map(c => [c.conv, c.cat, c.n, brl(+c.valor), brl(+c.lib_valor), c.est_n || '', c.sem_n || '']))}
             <h2>Por tipo de procedimento</h2>${tabRel(['Tipo', 'Modalidade', 'Exames', 'Valor'], [...F(r.por_grupo)].sort((a, b) => b.valor - a.valor).map(g => [finGrupoNome(g.grupo), g.mod === 'CT' ? 'TC' : 'US', g.n, brl(+g.valor)]))}
             <h2>Exames (maiores valores)</h2>${tabRel(['Exame', 'Modalidade', 'Exames', 'Ticket', 'Valor'], F(r.por_exame).slice(0, 40).map(e => [e.exame, e.mod === 'CT' ? 'TC' : 'US', e.n, brl(e.ticket), brl(+e.valor)]))}
+            ${F(r.abertos).length ? `<div class="meta">Em ABERTO há mais de ${ABERTO_ANTIGO_DIAS} dias (fora do valor, para conferir): ${F(r.abertos).reduce((a, x) => a + (+x.n || 0), 0)} exame(s).</div>` : ''}
             ${F(r.sem_tarifa).length ? `<h2>Sem tarifa (fora do total)</h2>${tabRel(['Convênio', 'Exame', 'Exames', 'Estimativa pelo ticket'], F(r.sem_tarifa).map(s => [s.conv, s.exame, s.n, brl(+s.est)]))}` : ''}
             <div class="meta">Liberado = laudo liberado · Em revisão = revisar/digitado/assinar/pré-laudo · A laudar = sem laudo. Estimado = sem tabela conferida. Repasse estimado: o pagamento real depende do fechamento e de glosas do hospital.</div>`;
         janelaRelatorio(`Financeiro — ${per.rotulo}`, corpo);
