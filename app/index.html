@@ -123,7 +123,7 @@ textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid va
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.4.3';
+const VERSAO = '1.4.4';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1', gest: 'agapp_gestao_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -866,7 +866,7 @@ ${graf}
 <h2><span>Por categoria</span></h2><table class="tbl sm"><tr><th>Categoria</th><th class="num">Exames</th><th class="num">Valor</th><th class="num">%</th></tr>${cats.map(c => `<tr><td>${esc(c.cat)}</td><td class="num">${nBR(c.n)}</td><td class="num">${brl(+c.valor)}</td><td class="num">${pctBR(+c.valor, A.v)}</td></tr>`).join('')}</table>
 <h2><span>Por convênio</span></h2><table class="tbl sm"><tr><th>Convênio</th><th class="num">Exames</th><th class="num">Valor</th><th class="num">Ticket</th></tr>${convs.map(c => `<tr><td>${esc(c.conv)}${c.sem_n ? ' <small style="color:var(--wa)">⚠' + c.sem_n + '</small>' : ''}${c.est_n ? ' <small style="color:var(--mut)">≈' + c.est_n + '</small>' : ''}</td><td class="num">${nBR(c.n)}</td><td class="num">${brl(+c.valor)}</td><td class="num">${brl(c.n - c.sem_n > 0 ? c.valor / (c.n - c.sem_n) : null)}</td></tr>`).join('')}</table>
 <h2><span>Por tipo de procedimento</span></h2><table class="tbl sm"><tr><th>Tipo</th><th class="num">Exames</th><th class="num">Valor</th></tr>${grupos.map(g => `<tr><td>${F.mod === 'todos' ? `<small style="color:var(--mut)">${g.mod === 'CT' ? 'TC' : 'US'}</small> ` : ''}${esc(g.grupo || 'Sem classificação')}</td><td class="num">${nBR(g.n)}</td><td class="num">${brl(+g.valor)}</td></tr>`).join('')}</table>
-${(() => { const abT = filt(r.abertos).reduce((a, x) => a + (+x.n || 0), 0); return abT ? `<div class="card" style="margin-top:8px">🗂 <b>${abT}</b> exame(s) em ABERTO há mais de 10 dias — <b>fora do valor</b> (provável 2º código de laudo conjunto, não realizado ou cancelado). Lista com o nº do exame no computador: 💰 Financeiro › 🔎 Listar no PACS.</div>` : ''; })()}
+${(() => { const abT = filt(r.abertos).reduce((a, x) => a + (+x.n || 0), 0), rv = filt(r.revisao_abertos), sj = rv.filter(x => x.situacao !== 'justificado').reduce((a, x) => a + x.n, 0), ok = rv.filter(x => x.situacao === 'justificado').reduce((a, x) => a + x.n, 0); return abT || rv.length ? `<div class="card" style="margin-top:8px${sj ? ';border-color:var(--er)' : ''}">🗂 <b>${abT}</b> exame(s) em ABERTO (do dia seguinte em diante) — <b>fora do valor</b>. Comentário do PACS: ${ok} justificado(s)${sj ? ` · <b style="color:var(--er)">${sj} sem justificativa — conferir (pode ser laudo esquecido)</b>` : ''}. Conferência completa no computador: 💰 Financeiro › 🔎 Conferir comentários.</div>` : ''; })()}
 <div class="note">${semT ? `⚠ ${semT} exame(s) sem tarifa ficaram fora do total. ` : ''}≈ = valor estimado. Produção pela data do exame, lida do PACS pelos computadores (a cada ~30 min com o PACS aberto) × tabela de tarifas privada do banco (versão corrigida). Repasse estimado — o pagamento real depende do fechamento e das glosas.</div></main>`;
         ligar();
     } catch (e) { tela.innerHTML = `<main>${topo}<div class="vazio">Erro: ${esc(e.message)}</div></main>`; ligar(); }
