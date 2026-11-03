@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.2
+// @version      1.39.3
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -144,7 +144,7 @@
         if (!c.sites) c.sites = DEFAULT_SITES;
         if (!c.links) c.links = DEFAULT_LINKS;
         // v1.18: ocultar linhas da lista sem mexer no filtro do PACS; botões do CKEditor que não usa
-        c.ocultarLista = Object.assign({ lib: false, mods: [] }, c.ocultarLista || {});
+        c.ocultarLista = Object.assign({ lib: false, rev: false, mods: [] }, c.ocultarLista || {});
         if (!Array.isArray(c.ocultarLista.mods)) c.ocultarLista.mods = [];
         c.ocultarLista.mods = c.ocultarLista.mods.filter(m => m === 'CT' || m === 'US'); // v1.39: RX e Outros saíram do 👁 (não ficam ocultos sem botão)
         c.plantao = Object.assign({ on: false, ontem: false }, c.plantao || {});
@@ -2449,7 +2449,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                 const c = ev.target.closest('[data-oc]'); if (!c) return;
                 recarregarCfg();
                 const o = cfg.ocultarLista, k = c.dataset.oc;
-                if (k === 'lib') o.lib = !o.lib; else o.mods = o.mods.includes(k) ? o.mods.filter(x => x !== k) : o.mods.concat(k);
+                if (k === 'lib' || k === 'rev') o[k] = !o[k]; else o.mods = o.mods.includes(k) ? o.mods.filter(x => x !== k) : o.mods.concat(k);
                 saveCfg(); ocultarLinhasLista(); dockTick();
             };
             d.querySelector('#ppd-papel').onclick = () => {
@@ -2520,7 +2520,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const oc = d.querySelector('#ppd-oc'), o = cfg.ocultarLista || { lib: false, mods: [] };
         oc.hidden = !findListTable();
         if (!oc.hidden) {
-            oc.querySelectorAll('[data-oc]').forEach(c => { const ativo = c.dataset.oc === 'lib' ? o.lib : o.mods.includes(c.dataset.oc); c.classList.toggle('on', !!ativo); });
+            oc.querySelectorAll('[data-oc]').forEach(c => { const k = c.dataset.oc, ativo = k === 'lib' || k === 'rev' ? o[k] : o.mods.includes(k); c.classList.toggle('on', !!ativo); });
             const nt = oculStat.n ? `−${oculStat.n}` : '';
             const nel = oc.querySelector('.ppd-n'); if (nel.textContent !== nt) nel.textContent = nt;
             nel.title = oculStat.n ? `${oculStat.n} de ${oculStat.total} exames desta página ocultos` : '';
@@ -3799,7 +3799,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
         if ('page' in comp) comp.page = 1;
         // se a modalidade estiver oculta pelo 👁 da barra, mostra de novo (senão a lista filtrada ficaria vazia)
-        try { const o = cfg.ocultarLista; if (o && o.mods && o.mods.includes(m)) { o.mods = o.mods.filter(x => x !== m); saveCfg(); ocultarLinhasLista(); } } catch (e) { /* ok */ }
+        try { const o = cfg.ocultarLista; if (o && ((o.mods && o.mods.includes(m)) || o.rev)) { o.mods = (o.mods || []).filter(x => x !== m); o.rev = false; saveCfg(); ocultarLinhasLista(); } } catch (e) { /* ok */ }
         comp.getExames();
         const p = document.getElementById('pp-lp'); if (p) p.remove();
     }
@@ -4521,7 +4521,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     }
     // v1.18 — ocultar linhas da lista (liberados / modalidades) sem mexer no filtro do PACS.
     // A linha i da tabela é o exame i do componente da lista (conferido 19/10/2026: 50/50).
-    const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom']]; // v1.39: só LIB, TC e US
+    const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['rev', 'REV', 'Exames em REVISAR (Digitado continua aparecendo)'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom']]; // v1.39: só LIB, TC e US; v1.39.3: + REV
     const grupoMod = sig => { sig = String(sig || '').toUpperCase(); return sig === 'CT' || sig === 'US' ? sig : (sig === 'CR' || sig === 'DX') ? 'RX' : 'OUT'; };
     let oculStat = { n: 0, total: 0 };
     function ocultarLinhasLista() {
@@ -4539,7 +4539,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
                 // v1.39 Plantão: some TC NÃO urgente (US todos, TC urgente, liberados ficam); com "+ontem", some o que é de ontem e já foi liberado
                 const plOc = !!ex && cfg.master && plantaoAtivo() && ((String(mod || '').toUpperCase() === 'CT' && !ex.exa_idnurgente) || (cfg.plantao.ontem && sit === 'LIBERADO' && String(ex.exa_data || '').slice(0, 10) < chaveDia(new Date())));
                 if (plOc) nPl++;
-                const esconder = plOc || (!!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || o.mods.includes(grupoMod(mod))));
+                const esconder = plOc || (!!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || (o.rev && sit === 'REVISAR') || o.mods.includes(grupoMod(mod))));
                 if (esconder) { n++; if (!tr.hasAttribute('data-pp-oc')) tr.setAttribute('data-pp-oc', ''); }
                 else if (tr.hasAttribute('data-pp-oc')) tr.removeAttribute('data-pp-oc');
             });
