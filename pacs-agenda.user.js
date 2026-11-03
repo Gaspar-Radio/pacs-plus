@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.7.1
+// @version      9.8.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2480,6 +2480,7 @@
                         <button id="tabDashLaudos" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📝 Laudos pendentes</button>
                         <button id="tabDashProd" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;">📈 Produção</button>
                         <button id="tabDashVagas" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;" title="Vagas da escala × agendados, encaixes, desfechos e vagas ociosas">🗓️ Vagas</button>
+                        <button id="tabDashRel" style="background:#334155; color:#cbd5e1; border:none; padding:3px 8px; border-radius:4px; font-size:10px; font-weight:bold; cursor:pointer;" title="Relatórios para a Prefeitura, a direção, a recepção e uso interno — você escolhe o que entra">🖨️ Relatórios</button>
                     </div>
                 </div>
                 <button id="btnCloseModalDash" style="background:none; border:none; color:#fff; font-size:15px; cursor:pointer;">✕</button>
@@ -2515,6 +2516,7 @@
         $('tabDashLaudos').onclick = () => renderDashboardAba(3);
         $('tabDashProd').onclick = () => renderDashboardAba(4);
         $('tabDashVagas').onclick = () => renderDashboardAba(5);
+        $('tabDashRel').onclick = () => renderDashboardAba(6);
         $('btnZoomIn').onclick = () => changeZoom(1);
         $('btnZoomOut').onclick = () => changeZoom(-1);
         $('indicatorNuvem').onclick = () => { errorAlertShown = false; loadDayFromCloud(selectedDate); };
@@ -3064,11 +3066,11 @@
     }
 
     function renderDashboardAba(n) {
-        const bs = ['tabDashHoje', 'tabDashNuvem', 'tabDashLaudos', 'tabDashProd', 'tabDashVagas'].map(i => document.getElementById(i));
+        const bs = ['tabDashHoje', 'tabDashNuvem', 'tabDashLaudos', 'tabDashProd', 'tabDashVagas', 'tabDashRel'].map(i => document.getElementById(i));
         const on = b => { b.style.background = '#2563eb'; b.style.color = '#fff'; };
         const off = b => { b.style.background = '#334155'; b.style.color = '#cbd5e1'; };
         bs.forEach((b, i) => b && (i === n - 1 ? on(b) : off(b)));
-        if (n === 1) renderDashboardHoje(); else if (n === 2) renderDashboardNuvemFaltas(); else if (n === 3) renderLaudosPendentes(); else if (n === 4) renderProducao(); else renderVagas();
+        if (n === 1) renderDashboardHoje(); else if (n === 2) renderDashboardNuvemFaltas(); else if (n === 3) renderLaudosPendentes(); else if (n === 4) renderProducao(); else if (n === 6) renderRelatorios(); else renderVagas();
     }
 
     // v9.4 — 📝 Laudos pendentes (US e TC) — tabela laudos_pendentes, alimentada pelo PACS Plus 1.37+ (só números/datas)
@@ -4258,6 +4260,153 @@
         }
     }
 
+
+    // =====================================================================
+    // 16G. 🖨️ CENTRAL DE RELATÓRIOS (v9.8) — Prefeitura · Direção · Recepção · Espera · Urgências · Completo
+    // ---------------------------------------------------------------------
+    // RPCs relatorio_periodo + vagas_periodo (só agregados). Você escolhe o público, o período, o tipo de
+    // paciente e as seções; o modelo de cada público já vem com o que faz sentido (ex.: Prefeitura sem espera
+    // e sem valores). Valores: repasse perdido só no relatório interno; faturamento bruto do hospital
+    // ESTIMADO (convênio/particular/social: repasse ÷ % do acordo) só para a direção. Prefeitura sem valor.
+    // =====================================================================
+    const REL_SECOES = [
+        ['resumo', 'Resumo do período (números principais)'], ['comparar', 'Comparação com o período anterior'],
+        ['vagas', 'Vagas da escala: ofertadas, ocupadas, ociosas'], ['mes', 'Mês a mês (gráfico)'],
+        ['tipo', 'Faltas por tipo de paciente'], ['convenio', 'Faltas por convênio / particular / social'],
+        ['exame', 'Exames que mais deixaram de ser feitos'], ['horario', 'Faltas por dia da semana e horário (mapa)'],
+        ['reinc', 'Pacientes que faltaram 2 ou mais vezes (só quantidade)'], ['bruto', 'Faturamento bruto estimado que o hospital deixou de receber'],
+        ['repasse', 'Repasse médico perdido (uso interno)'], ['espera', 'Tempo de espera (pela ficha e pelo horário agendado)'],
+        ['urg', 'Urgências'], ['leitura', 'Leituras automáticas e o que fazer'], ['glossario', 'Como ler este relatório']
+    ];
+    const REL_MODELOS = {
+        prefeitura: { nome: 'Prefeitura', tipo: 'prefeitura', s: ['resumo', 'comparar', 'vagas', 'mes', 'exame', 'horario', 'reinc', 'leitura', 'glossario'] },
+        direcao: { nome: 'Direção do hospital', tipo: 'todos', s: ['resumo', 'comparar', 'vagas', 'mes', 'tipo', 'convenio', 'exame', 'horario', 'bruto', 'leitura', 'glossario'] },
+        recepcao: { nome: 'Recepção', tipo: 'todos', s: ['resumo', 'convenio', 'horario', 'reinc', 'leitura', 'glossario'] },
+        espera: { nome: 'Tempo de espera', tipo: 'todos', s: ['espera', 'glossario'] },
+        urg: { nome: 'Urgências', tipo: 'todos', s: ['urg', 'glossario'] },
+        completo: { nome: 'Completo (interno)', tipo: 'todos', s: REL_SECOES.map(x => x[0]) }
+    };
+    let relCfg = safeJsonParse(localStorage.getItem('agenda_rel_cfg_v98'), null) || { modelo: 'prefeitura', per: '3m', tipo: 'prefeitura', s: REL_MODELOS.prefeitura.s, ia: false };
+    const relSalvar = () => { try { localStorage.setItem('agenda_rel_cfg_v98', JSON.stringify(relCfg)); } catch (e) { /* ok */ } };
+    const REL_CAT = { prefeitura: 'Prefeitura', convenio_particular: 'Convênio / Particular / Social' };
+    function relExame(t) { // nomes padronizados para agrupar (planilha, PDF e PACS escrevem diferente)
+        const u = ` ${normName(t)} `;
+        const R = [[/DOPP?LER.*(CAROTID|VERTEBR)|CAROTID/, 'Doppler de carótidas'], [/DOPP?LER.*ARTERIA.*(MMII|MEMBR)|DAMI/, 'Doppler arterial de MMII'], [/DOPP?LER.*(VENOS|MMII|MEMBR|VARIZ)|DVMI/, 'Doppler venoso de MMII'], [/DOPP?LER/, 'Doppler (outros)'],
+            [/OBST|GESTA|MORFOL|TRANSLUC|PERFIL BIOF/, 'Obstétrico'], [/TRANSVAG|ENDOVAG|USTV| TV |TRSV/, 'Transvaginal'], [/PELV|ABDOME INFERIOR FEM/, 'Pélvico'], [/PROSTAT|ABDOME INFERIOR MASC/, 'Próstata / abdome inferior'],
+            [/MAMA/, 'Mamas'], [/TIREOID|TIROID/, 'Tireoide'], [/CERVICAL|PESCO|GLANDULA|SALIVAR/, 'Cervical / glândulas'], [/ABDOME TOTAL|ABBT/, 'Abdome total'], [/ABDOME SUP|ABSP/, 'Abdome superior'],
+            [/ RINS |RENA|URINAR|BEXIGA/, 'Rins / aparelho urinário'], [/ARTIC|ARTC|OMBRO|JOELH|PUNHO|COTOVEL|TORNOZ|QUADRIL| MAO | PE /, 'Articulação'], [/PARTES MOLES|ESTRUTURAS SUPERF|ESPP|MUSC|TEND/, 'Partes moles / estruturas superficiais'], [/BOLSA|TESTIC|ESCROT/, 'Bolsa escrotal']];
+        for (const [re, n] of R) if (re.test(u)) return n;
+        return 'Outros';
+    }
+    function relPeriodo(p) {
+        const h = new Date();
+        if (/^\d{4}$/.test(p)) return { ini: `${p}-01-01`, fim: `${p}-12-31`, rot: `Ano de ${p}` };
+        const n = { '1m': 1, '3m': 3, '6m': 6, '12m': 12 }[p];
+        if (n) { const ini = isoDe(new Date(h.getFullYear(), h.getMonth() - n, 1)), fim = isoDe(new Date(h.getFullYear(), h.getMonth(), 0)); return { ini, fim, rot: n === 1 ? mesNomeAno(ini.slice(0, 7)) : `${mesNomeAno(ini.slice(0, 7))} a ${mesNomeAno(fim.slice(0, 7))}` }; }
+        const [y, m] = p.split('-').map(Number); return { ini: `${p}-01`, fim: isoDe(new Date(y, m, 0)), rot: mesNomeAno(p) };
+    }
+    function relAnterior(per) { const a = dIso(per.ini), b = dIso(per.fim), dias = Math.round((b - a) / 864e5) + 1, fimA = new Date(a.getTime() - 864e5), iniA = new Date(fimA.getTime() - (dias - 1) * 864e5); return { ini: isoDe(iniA), fim: isoDe(fimA) }; }
+    function renderRelatorios() {
+        const c = document.getElementById('contentDashboard'), h = new Date(), meses = [];
+        for (let i = 1; i <= 14; i++) meses.push(isoDe(new Date(h.getFullYear(), h.getMonth() - i, 1)).slice(0, 7));
+        const ops = [['1m', 'Mês passado'], ['3m', 'Últimos 3 meses'], ['6m', 'Últimos 6 meses'], ['12m', 'Últimos 12 meses'], [String(h.getFullYear()), `Ano de ${h.getFullYear()}`], ...meses.map(m => [m, mesNomeAno(m)])];
+        const sel = 'font-size:11px; font-weight:700; padding:3px 6px; border-radius:4px; border:1px solid #94a3b8; background:#fff; color:#0f172a;';
+        c.innerHTML = `<div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:12px;">
+            <div style="font-weight:bold; font-size:12.5px; margin-bottom:8px;">🖨️ Montar relatório</div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:11px; margin-bottom:10px;">
+                <label>Para: <select id="relModelo" style="${sel}">${Object.entries(REL_MODELOS).map(([k, m]) => `<option value="${k}" ${k === relCfg.modelo ? 'selected' : ''}>${m.nome}</option>`).join('')}</select></label>
+                <label>Período: <select id="relPer" style="${sel}">${ops.map(([v, t]) => `<option value="${v}" ${v === relCfg.per ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+                <label>Pacientes: <select id="relTipo" style="${sel}"><option value="todos">Todos</option><option value="prefeitura">Só Prefeitura</option><option value="convenio_particular">Só convênio / particular / social</option></select></label>
+                <label title="Texto de leitura escrito pelo Claude Opus a partir dos números (sem pacientes)"><input type="checkbox" id="relIA" ${relCfg.ia ? 'checked' : ''}> leitura do Opus</label></div>
+            <div style="font-size:10.5px; color:#64748b; margin-bottom:4px;">Seções (o modelo marca as que fazem sentido para quem vai receber; marque ou desmarque à vontade — fica salvo):</div>
+            <div id="relSecoes" style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:3px 12px; font-size:11px; margin-bottom:10px;">${REL_SECOES.map(([k, t]) => `<label><input type="checkbox" data-rs="${k}" ${relCfg.s.includes(k) ? 'checked' : ''}> ${t}${k === 'repasse' ? ' 🔒' : ''}</label>`).join('')}</div>
+            <div style="display:flex; gap:8px; align-items:center;"><button id="btnRelGerar" class="btn-top-action" style="background:#1e3a8a; color:#fff;">🖨️ Gerar relatório</button><span id="relStatus" style="font-size:10.5px; color:#64748b;"></span></div>
+            <div style="font-size:9.5px; color:#94a3b8; margin-top:8px; line-height:1.5;">Abre em nova janela para imprimir ou salvar em PDF. Só números agregados — nenhum nome de paciente. 🔒 Repasse médico só faz sentido no relatório interno (não marque ao mandar para fora). Faturamento do hospital é estimado (convênio/particular/social pelo repasse ÷ % do acordo); da Prefeitura não há valor, só procedimentos e vagas. Meses de jan–ago/2026 reconstruídos pela planilha e pelo PDF do SPDATA (menos precisos).</div></div>`;
+        const $r = id => document.getElementById(id);
+        $r('relTipo').value = relCfg.tipo;
+        $r('relModelo').onchange = e => { const m = REL_MODELOS[e.target.value]; relCfg.modelo = e.target.value; relCfg.s = [...m.s]; relCfg.tipo = m.tipo; relSalvar(); renderRelatorios(); };
+        $r('relPer').onchange = e => { relCfg.per = e.target.value; relSalvar(); };
+        $r('relTipo').onchange = e => { relCfg.tipo = e.target.value; relSalvar(); };
+        $r('relIA').onchange = e => { relCfg.ia = e.target.checked; relSalvar(); };
+        c.querySelectorAll('[data-rs]').forEach(b => { b.onchange = () => { relCfg.s = [...c.querySelectorAll('[data-rs]:checked')].map(x => x.dataset.rs); relSalvar(); }; });
+        $r('btnRelGerar').onclick = gerarRelatorio;
+    }
+    // gráfico de barras em SVG (impressão): barras ≤ 22 px, rótulo no topo
+    function relBarras(itens, { cor = '#1e3a8a', fmt = v => String(v), alt = 150, larg = 680 } = {}) {
+        if (!itens.length) return '';
+        const max = Math.max(1, ...itens.map(i => i.v)), n = itens.length, passo = larg / n, bw = Math.min(22, passo * 0.6), H = alt - 34;
+        return `<svg width="${larg}" height="${alt}" viewBox="0 0 ${larg} ${alt}" style="display:block;margin:4px 0 8px;font-family:Arial;font-size:8px">${itens.map((it, i) => {
+            const hgt = Math.max(1, it.v / max * H), x = i * passo + (passo - bw) / 2, y = 14 + H - hgt;
+            return `<rect x="${x}" y="${y}" width="${bw}" height="${hgt}" rx="3" fill="${it.cor || cor}"/><text x="${x + bw / 2}" y="${y - 3}" text-anchor="middle" fill="#111">${escapeHtml(fmt(it.v))}</text><text x="${x + bw / 2}" y="${alt - 8}" text-anchor="middle" fill="#555">${escapeHtml(it.k)}</text>`;
+        }).join('')}</svg>`;
+    }
+    function relMapa(cells) { // dia da semana × hora, cor pela % de faltas
+        const dias = [1, 2, 3, 4, 5, 6], horas = [...new Set(cells.map(c => c.faixa))].sort();
+        if (!horas.length) return '';
+        const get = (d, h) => cells.filter(c => c.dia_semana === d && c.faixa === h).reduce((a, c) => ({ ag: a.ag + c.agendados, f: a.f + c.faltas }), { ag: 0, f: 0 });
+        const cor = p => (p == null ? '#fff' : p >= 0.35 ? '#b91c1c' : p >= 0.25 ? '#ef4444' : p >= 0.18 ? '#fca5a5' : p >= 0.1 ? '#fee2e2' : '#f1f5f9');
+        return `<table><tr><th>Hora</th>${dias.map(d => `<th class="n">${DOW_ISO[d]}</th>`).join('')}</tr>${horas.map(h => `<tr><td>${h}h</td>${dias.map(d => { const g = get(d, h), p = g.ag >= 5 ? g.f / g.ag : null; return `<td class="n" style="background:${cor(p)}; ${p >= 0.25 ? 'color:#fff;' : ''}">${g.ag ? `${g.f}/${g.ag}${p != null ? ` · ${Math.round(p * 100)}%` : ''}` : ''}</td>`; }).join('')}</tr>`).join('')}</table><div class="meta">Célula = faltas / agendados no horário (% só com 5+ agendados). Mais escuro = mais falta.</div>`;
+    }
+    async function gerarRelatorio() {
+        const st = document.getElementById('relStatus'), m = REL_MODELOS[relCfg.modelo], S = new Set(relCfg.s), per = relPeriodo(relCfg.per), ant = relAnterior(per), T = relCfg.tipo;
+        st.textContent = '⏳ Lendo os números…';
+        try {
+            const [r, ra, vg] = await Promise.all([requestSupabase('rpc/relatorio_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim }), S.has('comparar') ? requestSupabase('rpc/relatorio_periodo', 'POST', { p_ini: ant.ini, p_fim: ant.fim }) : null, S.has('vagas') || S.has('leitura') ? requestSupabase('rpc/vagas_periodo', 'POST', { p_ini: per.ini, p_fim: per.fim }) : null]);
+            const filt = a => (a || []).filter(x => T === 'todos' || !x.cat || x.cat === T), cats = T === 'todos' ? ['prefeitura', 'convenio_particular'] : [T];
+            const tot = rr => { const x = { ag: 0, f: 0, proc: 0, pac: 0, pf: 0, rein: 0 }; filt(rr && rr.resumo).forEach(c => { x.ag += c.agendados_desfecho; x.f += c.faltas_horarios; x.proc += c.proc_perdidos; x.pac += c.pacientes; x.pf += c.pacientes_faltosos; x.rein += c.reincidentes; }); return x; };
+            const A = tot(r), B = ra ? tot(ra) : null, pc = (a, b) => (b ? `${(a / b * 100).toFixed(1).replace('.', ',')}%` : '—'), nB = v => Number(v || 0).toLocaleString('pt-BR');
+            const brl = v => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            const vres = vg ? (vg.resumo || []).filter(x => cats.includes(x.tipo)) : [], VG = vres.reduce((a, x) => ({ of: a.of + x.ofertadas, oc: a.oc + x.ocupadas, oci: a.oci + x.ociosas, at: a.at + x.atendidos, fa: a.fa + x.faltas }), { of: 0, oc: 0, oci: 0, at: 0, fa: 0 });
+            const vals = filt(r.valores), rep = vals.reduce((a, x) => a + (+x.repasse || 0), 0), bruto = vals.filter(x => x.cat === 'convenio_particular').reduce((a, x) => a + (+x.bruto_hospital_est || 0), 0), semT = vals.reduce((a, x) => a + (+x.sem_tarifa || 0), 0);
+            const ex = {}; filt(r.por_exame).forEach(e => { const k = relExame(e.exame); const g = ex[k] = ex[k] || { k, ag: 0, f: 0, p: 0 }; g.ag += e.agendados; g.f += e.faltas; g.p += e.proc_perdidos; });
+            const exL = Object.values(ex).sort((a, b) => b.p - a.p).slice(0, 12);
+            const pm = {}; filt(r.por_mes).forEach(x => { const g = pm[x.mes] = pm[x.mes] || { ag: 0, f: 0, p: 0 }; g.ag += x.agendados; g.f += x.faltas; g.p += x.proc_perdidos; });
+            const heat = filt(r.heatmap), dsw = {}, fx = {};
+            heat.forEach(c => { const d = dsw[c.dia_semana] = dsw[c.dia_semana] || { ag: 0, f: 0 }; d.ag += c.agendados; d.f += c.faltas; const p = (+c.faixa < 12 ? 'manhã' : 'tarde'), q = fx[p] = fx[p] || { ag: 0, f: 0 }; q.ag += c.agendados; q.f += c.faltas; });
+            // leituras automáticas (regras simples sobre os números)
+            const L = [];
+            if (A.ag) L.push(`De cada 100 pacientes agendados com desfecho, <b>${Math.round(A.f / A.ag * 100)}</b> faltaram — ${nB(A.proc)} procedimentos deixaram de ser feitos no período (${nB(Math.round(A.proc / Math.max(1, Object.keys(pm).length)))} por mês, em média).`);
+            if (B && B.ag) { const d = A.f / A.ag - B.f / B.ag; L.push(`Comparado ao período anterior, a taxa de faltas ${Math.abs(d) < 0.01 ? 'ficou estável' : d > 0 ? `<b>subiu ${(d * 100).toFixed(1).replace('.', ',')} pontos</b>` : `caiu ${(-d * 100).toFixed(1).replace('.', ',')} pontos`} (${pc(B.f, B.ag)} → ${pc(A.f, A.ag)}).`); }
+            const dw = Object.entries(dsw).filter(([, x]) => x.ag >= 15).map(([d, x]) => ({ d: +d, t: x.f / x.ag })).sort((a, b) => b.t - a.t);
+            if (dw.length > 1) L.push(`Dia com mais falta: <b>${DOW_ISO[dw[0].d]}</b> (${Math.round(dw[0].t * 100)}%); com menos: ${DOW_ISO[dw[dw.length - 1].d]} (${Math.round(dw[dw.length - 1].t * 100)}%).`);
+            if (fx['manhã'] && fx.tarde && fx['manhã'].ag >= 15 && fx.tarde.ag >= 15) L.push(`Manhã ${pc(fx['manhã'].f, fx['manhã'].ag)} × tarde ${pc(fx.tarde.f, fx.tarde.ag)} de faltas.`);
+            if (exL[0]) L.push(`Exame com mais procedimentos perdidos: <b>${escapeHtml(exL[0].k)}</b> (${exL[0].p}, ${pc(exL[0].f, exL[0].ag)} de falta).`);
+            if (T !== 'prefeitura') { const cv = filt(r.por_convenio).filter(x => x.agendados >= 20).sort((a, b) => b.faltas / b.agendados - a.faltas / a.agendados); if (cv[0]) L.push(`Convênio com maior taxa de faltas (com 20+ agendados): <b>${escapeHtml(cv[0].convenio)}</b> (${pc(cv[0].faltas, cv[0].agendados)}).`); }
+            if (A.rein) L.push(`${nB(A.rein)} paciente(s) faltaram 2 ou mais vezes no período — candidatos a confirmação reforçada ou a perder a prioridade.`);
+            if (VG.of) L.push(`A escala ofereceu ${nB(VG.of)} vagas: ${pc(VG.oc, VG.of)} foram agendadas e ${nB(VG.oci)} ficaram ociosas. Somando ociosas e faltas, <b>${nB(VG.oci + VG.fa)} vagas</b> (${pc(VG.oci + VG.fa, VG.of)}) não viraram exame.`);
+            if (A.ag && A.f / A.ag >= 0.12) { const k = Math.floor(A.f / Math.max(1, A.ag - A.f) * 10); L.push(`Com a taxa atual, agendar ~${k} paciente(s) a mais a cada 10 vagas compensaria as faltas sem aumentar a fila — melhor depois da confirmação na véspera.`); }
+            const acoes = T === 'prefeitura' ? ['Confirmar a presença na véspera (telefone/WhatsApp) e repassar a vaga não confirmada à lista de espera da regulação.', 'Orientar o paciente sobre o preparo e o horário (chegar 15 min antes).', 'Agendar 1 paciente por horário e informar as desistências com antecedência para a vaga ser reaproveitada.', 'Acompanhar mensalmente as unidades/ESF com mais faltas.']
+                : ['Confirmação ativa na véspera pela recepção, priorizando os dias e horários com mais falta.', 'Lista de espera para reaproveitar as vagas desmarcadas.', 'Encaixe planejado (overbooking controlado) nos horários com taxa de falta alta.', 'Registro do motivo da falta/desmarcação para corrigir a causa (preparo, transporte, horário).'];
+            const tab = (head, rows) => `<table><tr>${head.map((x, i) => `<th class="${i ? 'n' : ''}">${x}</th>`).join('')}</tr>${rows.map(l => `<tr>${l.map((x, i) => `<td class="${i ? 'n' : ''}">${x ?? '—'}</td>`).join('')}</tr>`).join('')}</table>`;
+            let corpo = `<h1>Ultrassonografia — ${m.nome === 'Tempo de espera' ? 'Tempo de espera' : m.nome === 'Urgências' ? 'Urgências' : 'Faltas e vagas'}</h1><div class="meta">Período: <b>${escapeHtml(per.rot)}</b> · ${T === 'todos' ? 'todos os pacientes agendados' : REL_CAT[T]} · Serviço de Diagnóstico por Imagem HAMC/LADI · relatório para: ${escapeHtml(m.nome)}</div>`;
+            if (S.has('resumo')) corpo += `<div class="kpis"><div class="kpi"><b>${nB(A.ag)}</b>agendados com desfecho</div><div class="kpi"><b>${nB(A.f)} (${pc(A.f, A.ag)})</b>faltas</div><div class="kpi"><b>${nB(A.proc)}</b>procedimentos não realizados</div>${VG.of ? `<div class="kpi"><b>${nB(VG.oci)}</b>vagas ociosas</div>` : ''}${S.has('bruto') && bruto ? `<div class="kpi"><b>${brl(bruto)}</b>faturamento bruto estimado perdido*</div>` : ''}</div>`;
+            if (relCfg.ia) {
+                st.textContent = '⏳ Pedindo a leitura ao Opus…';
+                try { const { texto } = await chamarIA({ prompt: `Você é consultor de gestão de um serviço de ultrassonografia. Escreva em português, sem markdown, até 180 palavras, para ${m.nome}: leitura objetiva das faltas e vagas do período e 3 a 5 ações práticas, sem inventar dados.\nDADOS: ${JSON.stringify({ periodo: per.rot, pacientes: T, agendados: A.ag, faltas: A.f, procedimentos_perdidos: A.proc, reincidentes: A.rein, anterior: B, vagas: VG, por_mes: pm, exames: exL.slice(0, 6), dia_semana: dsw, periodo_dia: fx })}` }); corpo += `<h2>Leitura</h2><div class="ia">${escapeHtml(texto.trim())}</div>`; } catch (e) { /* segue sem IA */ }
+            }
+            if (S.has('comparar') && B) corpo += `<h2>Comparação com o período anterior (${fmtBR(ant.ini)} a ${fmtBR(ant.fim)})</h2>` + tab(['Indicador', 'Anterior', 'Atual'], [['Agendados com desfecho', nB(B.ag), nB(A.ag)], ['Faltas', `${nB(B.f)} (${pc(B.f, B.ag)})`, `${nB(A.f)} (${pc(A.f, A.ag)})`], ['Procedimentos não realizados', nB(B.proc), nB(A.proc)]]);
+            if (S.has('vagas') && VG.of) corpo += `<h2>Vagas da escala</h2>` + tab(['Tipo', 'Ofertadas', 'Agendadas', 'Ocupação', 'Atendidos', 'Faltas', 'Ociosas'], vres.map(x => [VG_TIPO[x.tipo] || x.tipo, nB(x.ofertadas), nB(x.ocupadas), pc(x.ocupadas, x.ofertadas), nB(x.atendidos), `${nB(x.faltas)} (${pc(x.faltas, x.atendidos + x.faltas)})`, nB(x.ociosas)]))
+                + relBarras([{ k: 'Atendidos', v: VG.at, cor: '#059669' }, { k: 'Faltas', v: VG.fa, cor: '#e11d48' }, { k: 'Ociosas', v: VG.oci, cor: '#94a3b8' }], { larg: 320, alt: 120 });
+            if (S.has('mes') && Object.keys(pm).length > 1) corpo += `<h2>Faltas mês a mês</h2>` + relBarras(Object.keys(pm).sort().map(k => ({ k: k.slice(5) + '/' + k.slice(2, 4), v: Math.round(pm[k].f / Math.max(1, pm[k].ag) * 1000) / 10 })), { cor: '#e11d48', fmt: v => `${String(v).replace('.', ',')}%` })
+                + tab(['Mês', 'Agendados', 'Faltas', '%', 'Proc. não realizados'], Object.keys(pm).sort().map(k => [mesNomeAno(k), nB(pm[k].ag), nB(pm[k].f), pc(pm[k].f, pm[k].ag), nB(pm[k].p)]));
+            if (S.has('tipo') && T === 'todos') corpo += `<h2>Faltas por tipo de paciente</h2>` + tab(['Tipo', 'Agendados', 'Faltas', '%', 'Proc. não realizados'], [...(r.resumo || []).map(c => [REL_CAT[c.cat], nB(c.agendados_desfecho), nB(c.faltas_horarios), pc(c.faltas_horarios, c.agendados_desfecho), nB(c.proc_perdidos)]), ...(r.por_categoria_conv || []).map(c => [`&nbsp;&nbsp;↳ ${escapeHtml(c.fcat)}`, nB(c.agendados), nB(c.faltas), pc(c.faltas, c.agendados), nB(c.proc_perdidos)])]);
+            if (S.has('convenio') && T !== 'prefeitura') { const cv = (r.por_convenio || []).filter(x => x.agendados >= 3); corpo += `<h2>Faltas por convênio / particular / social</h2>` + tab(['Convênio', 'Agendados', 'Faltas', '%', 'Proc. não realizados'], cv.slice(0, 20).map(x => [escapeHtml(x.convenio), nB(x.agendados), nB(x.faltas), pc(x.faltas, x.agendados), nB(x.proc_perdidos)])) + relBarras(cv.slice(0, 10).map(x => ({ k: String(x.convenio).slice(0, 10), v: Math.round(x.faltas / x.agendados * 100) })), { fmt: v => `${v}%`, cor: '#7c3aed' }); }
+            if (S.has('exame') && exL.length) corpo += `<h2>Exames que mais deixaram de ser feitos</h2>` + tab(['Exame', 'Agendados', 'Faltas', '%', 'Proc. não realizados'], exL.map(e => [escapeHtml(e.k), nB(e.ag), nB(e.f), pc(e.f, e.ag), nB(e.p)]));
+            if (S.has('horario')) corpo += `<h2>Faltas por dia da semana e horário</h2>` + relMapa(heat) + tab(['Dia', 'Agendados', 'Faltas', '%'], Object.keys(dsw).sort().map(d => [DOW_ISO[d], nB(dsw[d].ag), nB(dsw[d].f), pc(dsw[d].f, dsw[d].ag)]));
+            if (S.has('reinc')) corpo += `<h2>Pacientes que faltaram 2 ou mais vezes</h2><p>${nB(A.rein)} paciente(s) no período (de ${nB(A.pf)} que faltaram ao menos uma vez). Só a quantidade — a lista nominal fica na Agenda.</p>`;
+            if (S.has('bruto') && T !== 'prefeitura') corpo += `<h2>Faturamento que o hospital deixou de receber (estimado)*</h2>` + tab(['Mês', 'Proc. não realizados (conv./part./social)', 'Faturamento bruto estimado'], vals.filter(x => x.cat === 'convenio_particular').map(x => [mesNomeAno(x.mes), nB(x.proc), brl(x.bruto_hospital_est)]).concat([['<b>Total</b>', '', `<b>${brl(bruto)}</b>`]]))
+                + `<div class="meta">*Estimativa: valor pago ao médico ÷ percentual do acordo (80% Unimed/IPSEMG/Serpram; 60% demais). Prefeitura/SUS: sem valor de referência do hospital — veja os procedimentos e vagas perdidos.${semT ? ` ${semT} procedimento(s) sem tabela ficaram fora.` : ''}</div>`;
+            if (S.has('repasse')) corpo += `<h2>🔒 Repasse médico perdido com as faltas (uso interno)</h2>` + tab(['Mês', 'Tipo', 'Procedimentos', 'Repasse'], vals.map(x => [mesNomeAno(x.mes), REL_CAT[x.cat], nB(x.proc), brl(x.repasse)]).concat([['<b>Total</b>', '', '', `<b>${brl(rep)}</b>`]]));
+            if (S.has('espera')) { const es = filt(r.espera); corpo += `<h2>Tempo de espera (eletivos, sem urgências)</h2>` + tab(['Tipo', 'Atendidos', 'Pela ficha (mediana)', 'Pelo horário agendado (mediana)', 'Chegaram >15 min antes', 'Atrasados >15 min', '> 60 min (agendado)'], es.map(e => [REL_CAT[e.cat], nB(e.n), `${e.mediana_ficha} min`, `${e.mediana_agendado} min`, `${nB(e.chegou_antes_15)} (${pc(e.chegou_antes_15, e.n)}; ${e.antecipacao_media || 0} min antes, em média)`, `${nB(e.chegou_atrasado_15)} (${pc(e.chegou_atrasado_15, e.n)})`, `${nB(e.acima_60_agendado)} (${pc(e.acima_60_agendado, e.n)})`]))
+                + `<div class="meta">Pela ficha = da abertura da ficha à chegada das imagens no PACS. Pelo horário agendado = do horário marcado (ou da chegada, se o paciente chegou depois) até as imagens: quem abre a ficha às 8h, está agendado às 10h e é atendido às 10h30 esperou 30 min, não 2h30. Tempos acima de 12 h são erro de registro e ficam fora. A hora da imagem é a do envio ao PACS (pode ficar alguns minutos depois do fim do exame).</div>`; }
+            if (S.has('urg') && r.urgencias) corpo += `<h2>Urgências</h2><p>${nB(r.urgencias.n)} urgência(s) realizada(s) com tempo registrado · mediana do pedido (ficha) ao exame: <b>${r.urgencias.mediana ?? '—'} min</b>. Urgência é atendida fora da escala e não entra nas faltas nem na espera dos eletivos.</p>`;
+            if (S.has('leitura')) corpo += `<h2>Leituras</h2><ul>${L.map(x => `<li>${x}</li>`).join('')}</ul><h2>O que fazer</h2><ul>${acoes.map(x => `<li>${x}</li>`).join('')}</ul>`;
+            if (S.has('glossario')) corpo += `<h2>Como ler este relatório</h2><ul><li><b>Agendado com desfecho</b>: horário que terminou em atendido ou falta (desmarcados com antecedência não contam).</li><li><b>Falta</b>: paciente agendado que não compareceu.</li><li><b>Procedimentos não realizados</b> são mais que as faltas porque um mesmo paciente pode ter mais de um exame no mesmo horário (ex.: abdome + tireoide).</li><li><b>Vaga ociosa</b>: vaga da escala que passou sem paciente agendado. Ociosa + falta = vaga que não virou exame.</li><li><b>Reincidente</b>: paciente com 2+ faltas no período.</li>${S.has('espera') ? '<li><b>Espera</b>: ver a nota da tabela de espera.</li>' : ''}<li>Jan–ago/2026 foram reconstruídos da planilha da Prefeitura e da agenda do SPDATA cruzadas com o PACS; a partir de 20/08/2026 os dados são da agenda registrada no dia.</li></ul>`;
+            janelaRelatorio(`US — ${m.nome} — ${per.rot}`, corpo);
+            st.textContent = '';
+        } catch (e) { st.textContent = '⚠️ ' + (e.message || e); }
+    }
+
     // =====================================================================
     // 16E. 💰 FINANCEIRO (v9.6) — repasse estimado pela produção (US e TC)
     // ---------------------------------------------------------------------
@@ -4524,10 +4673,24 @@
             + `<div style="display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:10px;">${cartaoFin('🏷 Por categoria', tCat)}${cartaoFin('🧩 Por tipo de procedimento', tGrupo)}</div>`
             + cartaoFin('🏥 Por convênio', tConv, '≈ = valor estimado (sem tabela conferida) · ⚠ = sem tarifa (fora do total) · "tabela" = qual tabela de valores foi usada')
             + `<div style="display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:10px;">${cartaoFin('🔬 Exames (maiores valores)', tEx)}${cSem}</div>`
-            + cAb
+            + '<div id="finPerdas"></div>' + cAb
             + '<div style="font-size:10px; color:#94a3b8; line-height:1.5;">Base: produção lida do PACS pela data do exame ("meus" = radiologista do exame = Dr. Gabriel; pendentes sem radiologista: US todos, TC fora de ABERTO; pacientes TESTE fora) × tabela de tarifas privada do banco (versão corrigida: % do acordo aplicado uma única vez). Repasse estimado — o pagamento real depende do fechamento e de glosas do hospital. Nenhum valor fica no código e nenhum dado de paciente vai para a nuvem (só contagens).</div>';
         finLigarDicas(corpo);
         const bAb = document.getElementById('btnFinAbertos'); if (bAb) bAb.onclick = finAbertosListar;
+        finPerdasCarregar();
+    }
+    // v9.8 — 💸 perdas por faltas (só US agendado): repasse perdido + faturamento bruto estimado do hospital no convênio
+    async function finPerdasCarregar() {
+        const box = document.getElementById('finPerdas'); if (!box || !finUltimo) return;
+        try {
+            const r = await requestSupabase('rpc/relatorio_periodo', 'POST', { p_ini: finUltimo.per.ini, p_fim: finUltimo.per.fim });
+            const v = r.valores || []; if (!v.length) return;
+            const pm = {}; v.forEach(x => { const g = pm[x.mes] = pm[x.mes] || { pp: 0, pr: 0, cp: 0, cr: 0, cb: 0, st: 0 }; if (x.cat === 'prefeitura') { g.pp += x.proc; g.pr += +x.repasse || 0; } else { g.cp += x.proc; g.cr += +x.repasse || 0; g.cb += +x.bruto_hospital_est || 0; } g.st += +x.sem_tarifa || 0; });
+            const T = Object.values(pm).reduce((a, g) => { Object.keys(g).forEach(k => { a[k] = (a[k] || 0) + g[k]; }); return a; }, {});
+            box.innerHTML = cartaoFin(`💸 Perdas por faltas no US — repasse ${brl(T.pr + T.cr)} · ${nBR(T.pp + T.cp)} procedimentos`,
+                finTab(['Mês', 'Pref.: proc.', 'Pref.: repasse', 'Conv./Part./Social: proc.', 'Conv.: repasse', 'Conv.: bruto do hospital (est.)'], Object.keys(pm).sort().map(m => { const g = pm[m]; return [mesNomeAno(m), nBR(g.pp), brl(g.pr), nBR(g.cp), brl(g.cr), brl(g.cb)]; }).concat([['<b>Total</b>', `<b>${nBR(T.pp)}</b>`, `<b>${brl(T.pr)}</b>`, `<b>${nBR(T.cp)}</b>`, `<b>${brl(T.cr)}</b>`, `<b>${brl(T.cb)}</b>`]])),
+                `Procedimentos de pacientes agendados que faltaram × tarifa do exame (mesma base do repasse). Bruto do hospital = estimativa (repasse ÷ % do acordo: 80% Unimed/IPSEMG/Serpram, 60% demais); Prefeitura sem valor do hospital. ${T.st ? `${nBR(T.st)} procedimento(s) sem tarifa ficaram fora (perda real um pouco maior).` : ''} Relatórios para a direção/Prefeitura: Dashboard › 🖨️ Relatórios.`);
+        } catch (e) { console.warn('[Agenda] perdas por faltas', e); }
     }
     // v9.7.1 — exames em ABERTO (desde nov/2026, do dia seguinte em diante) × comentário do PACS, classificado pela IA.
     // No banco (aberto_revisao) só nº do exame, dia, modalidade, situação e motivo curto — nunca nome nem o texto do comentário.
