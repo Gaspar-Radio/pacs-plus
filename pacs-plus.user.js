@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.1
+// @version      1.39.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1035,7 +1035,25 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const [h, mi, s] = String(ex && ex.exa_hora || '').split(':').map(Number);
         return y && mo && d ? new Date(y, mo - 1, d, h || 0, mi || 0, s || 0) : null;
     }
-    const naEscala = ex => naEscalaData(dataHoraExame(ex));
+    // v1.39.2 — TC urgente também é seu quando a CONFIRMAÇÃO dos técnicos cai na escala
+    // (ficha da madrugada confirmada depois das 07:00). Lembra o exame no dia para não "sair"
+    // da escala quando o SLA muda para PENDENCIADO/LIBERADO.
+    const ESC_CONF_KEY = 'pp_escala_conf_v1';
+    function escConfMemo() { let m = null; try { m = JSON.parse(localStorage.getItem(ESC_CONF_KEY)); } catch (x) { m = null; } const hoje = chaveDia(new Date()); return m && m.dia === hoje && m.cods ? m : { dia: hoje, cods: {} }; }
+    function confirmadoEmEx(ex) {
+        const s = ex && ex.sla; if (!s || s.__ppProprio) return null;
+        if (s.ultimoacao_tipo !== 'CONFIRMADO' || !s.ultimoacao_created) return null;
+        const d = new Date(s.ultimoacao_created); return isNaN(d) ? null : d;
+    }
+    function naEscala(ex) {
+        if (naEscalaData(dataHoraExame(ex))) return true;
+        const cod = ex && ex.exa_codigo; if (cod == null) return false;
+        const m = escConfMemo();
+        if (m.cods[cod]) return true;
+        const c = confirmadoEmEx(ex);
+        if (c && chaveDia(c) === m.dia && naEscalaData(c)) { m.cods[cod] = 1; try { localStorage.setItem(ESC_CONF_KEY, JSON.stringify(m)); } catch (x) { /* ok */ } return true; }
+        return false;
+    }
 
     // ---- Prazo do TC (v1.8) ----
     // O TC é "seu" quando está em REVISAR com “Necessita de laudo”, ou quando é URGENTE com ficha
@@ -1442,7 +1460,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const j = await r.json(), hoje = chaveDia(new Date());
         const rows = (j.rows || []).filter(x => x && x.exa_idnurgente && x.paciente && mods.includes(modDe(x)) && x.exa_idnnecessitalaudo !== false);
         return teste ? rows.filter(x => /TESTE/i.test(x.paciente.pac_nome || ''))
-            : rows.filter(x => String(x.exa_data || '').slice(0, 10) === hoje && naEscala(x));
+            : rows.filter(x => String(x.exa_data || '').slice(0, 10) === hoje); // v1.39.2: escala conferida em urgLer, depois do SLA (hora da confirmação)
     }
     async function urgLer() {
         const tok = localStorage.getItem('lwtoken');
@@ -1460,7 +1478,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                 if (rs.ok) { const mp = new Map(((await rs.json()) || []).map(x => [x.exa_codigo, x.sla])); rows.forEach(x => { if (mp.has(x.exa_codigo)) x.sla = mp.get(x.exa_codigo); }); }
             } catch (e) { /* sem SLA: usa prazo provisório */ }
         }
-        return rows;
+        const teste = urgModoTeste();
+        return rows.filter(x => naEscala(x) || (teste && /TESTE/i.test((x.paciente && x.paciente.pac_nome) || ''))); // TESTE do modo teste não depende da escala
     }
 
     // ---- processamento da leitura ----
