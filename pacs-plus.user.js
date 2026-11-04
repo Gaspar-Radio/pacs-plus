@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.4
+// @version      1.39.5
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -4603,6 +4603,29 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             else if (!plPausa && plAssin(comp.filtro) !== plSig) { plPausa = true; ocultarLinhasLista(); } // filtro mudou à mão → pausa
         }
         plantaoDock();
+        plantaoExtras(comp);
+    }
+    // v1.39.5 — no Plantão, TC URGENTE de dia anterior ainda pendente e que é seu hoje (confirmado hoje na escala)
+    // entra no topo da lista (o filtro "hoje" do PACS não traz: a data do exame é a do pedido). Mesma leitura do
+    // monitor de urgências (urgLer), no máximo 1×/min; já liberado não entra.
+    let plxRows = [], plxEm = 0, plxBusy = false, plxArr = null;
+    async function plantaoExtras(comp) {
+        if (!comp || !Array.isArray(comp.exames) || !cfg.master || !plantaoAtivo() || (comp.page && comp.page > 1) || ehViewer()) return;
+        const novaLista = plxArr !== comp.exames;
+        if (!plxBusy && (Date.now() - plxEm > 60000 || (novaLista && Date.now() - plxEm > 10000))) {
+            plxBusy = true;
+            try {
+                const hoje = chaveDia(new Date()), enc = listaSit(cfg.urg.encerra || 'LIBERADO');
+                plxRows = (await urgLer()).filter(x => String(x.exa_data || '').slice(0, 10) < hoje && !enc.includes(String(x.exa_situacao || '').toUpperCase()));
+                plxEm = Date.now();
+            } catch (e) { console.warn('[PACS Plus] plantão: urgentes de dias anteriores', e); plxEm = Date.now(); }
+            plxBusy = false;
+        }
+        const atual = componenteLista(); if (!atual || atual.exames !== comp.exames || !plantaoAtivo()) return;
+        const tem = new Set(comp.exames.map(x => x && x.exa_codigo));
+        const add = plxRows.filter(x => !tem.has(x.exa_codigo)).map(x => Object.assign({}, x, { __ppExtra: true }));
+        if (add.length) comp.exames.unshift(...add);
+        plxArr = comp.exames;
     }
     function plantaoDock() {
         const d = document.getElementById('pp-dock');
