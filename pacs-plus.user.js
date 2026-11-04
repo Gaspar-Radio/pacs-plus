@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.3
+// @version      1.39.4
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1047,6 +1047,16 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     }
     function naEscala(ex) {
         if (naEscalaData(dataHoraExame(ex))) return true;
+        return confirmadoNaEscalaHoje(ex);
+    }
+    // v1.39.4 — monitor: entra o urgente de HOJE na escala, ou o de dias anteriores (pedido lançado ontem,
+    // exame feito hoje) CONFIRMADO hoje dentro da escala
+    function naEscalaHoje(ex) {
+        const dt = dataHoraExame(ex);
+        if (dt && chaveDia(dt) === chaveDia(new Date()) && naEscalaData(dt)) return true;
+        return confirmadoNaEscalaHoje(ex);
+    }
+    function confirmadoNaEscalaHoje(ex) {
         const cod = ex && ex.exa_codigo; if (cod == null) return false;
         const m = escConfMemo();
         if (m.cods[cod]) return true;
@@ -1450,9 +1460,15 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         } catch (e) { /* segue sem filtro de modalidade (filtra aqui) */ }
         return urgModCodes || {};
     }
+    const URG_DIAS_ATRAS = 4;
+    // exame de dia anterior já liberado não interessa (os de hoje continuam vindo, para o monitor encerrar o aviso)
+    const encerraSit = x => String(x.exa_data || '').slice(0, 10) < chaveDia(new Date()) && listaSit(cfg.urg.encerra || 'LIBERADO').includes(String(x.exa_situacao || '').toUpperCase()) && !escConfMemo().cods[x.exa_codigo];
     async function urgConsulta(tok, codes, mods, teste) {
-        const p = ['offset=0', 'limit=300', 'tela=EXAMES', 'pac_pacs_codigo=', 'data_inicial=', 'data_final=', 'exa_idnsomenteassinador=false', 'exa_dataparam=$exame.exa_data$',
-            'pac_nome=' + (teste ? 'TESTE' : ''), 'data_codigo=' + (teste ? 1 : 2), 'exa_idnurgente[]=true'];
+        // v1.39.4: últimos URG_DIAS_ATRAS dias (pedido lançado antes, exame/confirmação hoje)
+        const d0 = new Date(); d0.setDate(d0.getDate() - URG_DIAS_ATRAS);
+        const ini = teste ? '' : chaveDia(d0), fim = teste ? '' : chaveDia(new Date());
+        const p = ['offset=0', 'limit=400', 'tela=EXAMES', 'pac_pacs_codigo=', 'data_inicial=' + ini, 'data_final=' + fim, 'exa_idnsomenteassinador=false', 'exa_dataparam=$exame.exa_data$',
+            'pac_nome=' + (teste ? 'TESTE' : ''), 'data_codigo=1', 'exa_idnurgente[]=true'];
         mods.forEach(m => { if (codes[m] != null) p.push('mod_codigo[]=' + encodeURIComponent(codes[m])); });
         const r = await fetch('/backend/api/exame?' + p.join('&'), { headers: { 'x-access-token': tok } });
         if (r.status === 401 || r.status === 403) { const er = new Error('sessão do PACS expirada'); er.code = 'login'; throw er; }
@@ -1460,7 +1476,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const j = await r.json(), hoje = chaveDia(new Date());
         const rows = (j.rows || []).filter(x => x && x.exa_idnurgente && x.paciente && mods.includes(modDe(x)) && x.exa_idnnecessitalaudo !== false);
         return teste ? rows.filter(x => /TESTE/i.test(x.paciente.pac_nome || ''))
-            : rows.filter(x => String(x.exa_data || '').slice(0, 10) === hoje); // v1.39.2: escala conferida em urgLer, depois do SLA (hora da confirmação)
+            : rows.filter(x => String(x.exa_data || '').slice(0, 10) <= hoje && !encerraSit(x)); // v1.39.2/4: escala conferida em urgLer, depois do SLA (hora da confirmação)
     }
     async function urgLer() {
         const tok = localStorage.getItem('lwtoken');
@@ -1479,7 +1495,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             } catch (e) { /* sem SLA: usa prazo provisório */ }
         }
         const teste = urgModoTeste();
-        return rows.filter(x => naEscala(x) || (teste && /TESTE/i.test((x.paciente && x.paciente.pac_nome) || ''))); // TESTE do modo teste não depende da escala
+        return rows.filter(x => naEscalaHoje(x) || (teste && /TESTE/i.test((x.paciente && x.paciente.pac_nome) || ''))); // TESTE do modo teste não depende da escala
     }
 
     // ---- processamento da leitura ----
@@ -5484,5 +5500,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
