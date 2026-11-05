@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.5
+// @version      1.39.6
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -4569,7 +4569,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     // NÃO urgentes (exa_idnurgente). US (urgente e eletivo, inclusive em aberto), TC urgente e liberados aparecem. Liga/desliga na
     // barra (lembra em cada computador). Se você mudar o filtro à mão (busca por nome, 📝 Filtrar…), o Plantão pausa sozinho.
     const PL_CHAVES = ['data_codigo', 'data_inicial', 'data_final', 'mod_codigo', 'exa_situacao', 'exa_idnurgente', 'pac_nome', 'pac_pacs_codigo'];
-    let plAntes = null, plSig = '', plPausa = false, plAplicado = false;
+    let plAntes = null, plSig = '', plPausa = false, plAplicado = false, plIppAntes = null;
+    const PL_POR_PAG = 300;
     const plAssin = f => JSON.stringify(PL_CHAVES.map(k => f && f[k]));
     const plantaoAtivo = () => !!(cfg.plantao && cfg.plantao.on) && !plPausa;
     function plantaoFiltro(comp) {
@@ -4580,6 +4581,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (cfg.plantao.ontem) { set('data_codigo', 1); set('data_inicial', ontem); set('data_final', hoje); } else { set('data_codigo', 2); set('data_inicial', ''); set('data_final', ''); }
         set('mod_codigo', [LP_MOD.US, LP_MOD.CT]); set('exa_situacao', []); set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
         if ('page' in comp) comp.page = 1;
+        // v1.39.6 — página única de até 300 (o PACS pagina de 50: com +ontem, liberados ocultos ocupavam a página 1
+        // e parte dos pendentes de ontem ficava na página 2)
+        if ('itemsPerPage' in comp && comp.itemsPerPage < PL_POR_PAG) { if (plIppAntes == null) plIppAntes = comp.itemsPerPage; comp.itemsPerPage = PL_POR_PAG; }
         plSig = plAssin(comp.filtro); plPausa = false; plAplicado = true;
         comp.getExames();
         return true;
@@ -4590,6 +4594,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (on) { if (!plantaoFiltro(comp)) alertaCurto('Abra a página Exames — o Plantão entra assim que a lista aparecer.'); }
         else {
             plPausa = false; plAplicado = false;
+            if (comp && plIppAntes != null && 'itemsPerPage' in comp) comp.itemsPerPage = plIppAntes;
+            plIppAntes = null;
             if (comp && plAntes) { Object.entries(plAntes).forEach(([k, v]) => (comp.$set ? comp.$set(comp.filtro, k, v) : (comp.filtro[k] = v))); if ('page' in comp) comp.page = 1; comp.getExames(); }
             plAntes = null;
         }
