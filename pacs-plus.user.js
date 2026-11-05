@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.40.0
+// @version      1.41.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -406,7 +406,9 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #datatableExamesHistorico .pp-hist-txt-c { white-space: pre-wrap; background: #111; color: #e5e7eb; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; max-height: 320px; overflow: auto; font-size: 12.5px; line-height: 1.4; user-select: text; text-align: left; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha[data-on="anexo"] { color: #2196f3 !important; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha[data-on="roxo"] { color: #c50ec5 !important; }
-#datatableExamesHistorico .pp-hist-acoes .pp-ha[data-n]::after { content: attr(data-n); position: absolute; top: -6px; right: -7px; min-width: 13px; height: 13px; padding: 0 2px; border-radius: 7px; background: #4caf50; color: #fff; font: 700 9px/13px Roboto, Arial, sans-serif; text-align: center; }
+#datatableExamesHistorico .pp-hist-acoes .pp-ha { overflow: visible !important; }
+#datatableExamesHistorico .pp-hist-acoes .pp-ha > .pp-ha-n { position: absolute; top: -7px; right: -8px; z-index: 2; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: #4caf50; color: #fff; font: 700 9.5px/14px Roboto, Arial, sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1px rgba(0,0,0,.25); }
+#datatableExamesHistorico .pp-hist-acoes .pp-ha[data-tipo="radiant"] { color: #64b5f6 !important; }
 #datatableExamesHistorico th:nth-child(1), #datatableExamesHistorico td:nth-child(1) { width: 40% !important; max-width: 40% !important; }
 #datatableExamesHistorico th:nth-child(10), #datatableExamesHistorico td:nth-child(10) { width: 26% !important; max-width: 26% !important; }`,
         buscaCompacta: `
@@ -862,7 +864,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const obs = new MutationObserver(muts => {
         if (pend) return;
         // ignora mudanças feitas dentro do próprio painel do PACS Plus
-        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel, #pp-urg, #pp-anexos, .pp-hist-acoes, #pp-dock, #pp-rev, .ck-content, .ck-editor__editable'); })) return;
+        if (muts.every(m => { const el = m.target.nodeType === 1 ? m.target : m.target.parentElement; return el && el.closest && el.closest('#pp-panel, #pp-urg, #pp-anexos, #pp-hl, .pp-hist-acoes, #pp-dock, #pp-rev, .ck-content, .ck-editor__editable'); })) return;
         pend = true;
         setTimeout(() => { pend = false; applyDynamic(); aplicarPrazosLista(); }, 120);
     });
@@ -2174,19 +2176,52 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!r.ok) throw new Error('PACS respondeu HTTP ' + r.status);
         return r.json();
     }
-    function histContagens(exa) {
+    // v1.41.0: aceita a resposta {exame:{…}} ou o objeto direto; usa o arq_count_arquivo que já veio no item, se houver
+    function histContagens(exa, it) {
         const c = HIST_CACHE.get(exa);
         if (c && (c.carregando || Date.now() - c.t < HIST_TTL)) return c;
         const novo = { t: Date.now(), arq: null, com: null, carregando: true };
         HIST_CACHE.set(exa, novo);
-        Promise.allSettled([pacsGet('exame/' + exa), pacsGet('exame/' + exa + '/comentario')]).then(([e, cm]) => {
-            if (e.status === 'fulfilled') novo.arq = parseInt(e.value && e.value.arq_count_arquivo, 10) || 0;
-            if (cm.status === 'fulfilled') novo.com = parseInt(cm.value && (cm.value.count != null ? cm.value.count : (cm.value.rows || []).length), 10) || 0;
+        histFila.push(async () => {
+            const num = v => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : null; };
+            // anexos: 1º o campo que o PACS já mandou no item; senão exame/{id}; se ainda faltar, a lista de anexos (count)
+            let arq = it ? num(it.arq_count_arquivo) : null;
+            const [e, cm] = await Promise.allSettled([arq == null ? pacsGet('exame/' + exa) : Promise.resolve(null), pacsGet('exame/' + exa + '/comentario')]);
+            if (arq == null && e.status === 'fulfilled' && e.value) { const ex = e.value.exame && typeof e.value.exame === 'object' ? e.value.exame : e.value; arq = num(ex.arq_count_arquivo); }
+            if (arq == null) {
+                try { const j = await pacsGet(`arquivo/exame/${exa}?arq_tipoarquivo=ARQUIVO&offset=0`); arq = Array.isArray(j) ? j.length : j && j.count != null ? num(j.count) : j && Array.isArray(j.rows) ? j.rows.length : j && j.arq_blob ? 1 : 0; } catch (er) { /* fica sem número */ }
+            }
+            novo.arq = arq;
+            if (cm.status === 'fulfilled') { const v = cm.value; novo.com = num(Array.isArray(v) ? v.length : v && (v.count != null ? v.count : (Array.isArray(v.rows) ? v.rows : []).length)); }
             novo.carregando = false; novo.t = Date.now();
             pintarHistAcoes();
+            if (typeof hlPintarContagens === 'function') hlPintarContagens();
         });
+        // trava de segurança: se algo falhar no meio, libera para nova tentativa em 1 min
+        setTimeout(() => { if (novo.carregando) { novo.carregando = false; novo.t = Date.now() - HIST_TTL + 60000; } }, 20000);
+        histProximo();
         return novo;
     }
+    // no máximo 3 exames consultados ao mesmo tempo (histórico grande não dispara dezenas de pedidos juntos)
+    const histFila = []; let histAtivos = 0;
+    function histProximo() {
+        while (histAtivos < 3 && histFila.length) {
+            const job = histFila.shift(); histAtivos++;
+            Promise.resolve().then(job).catch(() => { /* a entrada expira e é refeita na próxima pintura */ }).finally(() => { histAtivos--; histProximo(); });
+        }
+    }
+    // v1.41.0 — balão numérico como ELEMENTO (o ::after do .v-icon é do Vuetify: opacity 0 → balão invisível)
+    function ppBalaoNum(el, n, cls) {
+        let bd = el.querySelector(':scope > .' + cls);
+        if (!(n > 0)) { if (bd) bd.remove(); if (el.dataset.n) delete el.dataset.n; return; }
+        if (!bd) { bd = document.createElement('span'); bd.className = cls; el.appendChild(bd); }
+        const t = n > 99 ? '99+' : String(n);
+        if (bd.textContent !== t) bd.textContent = t;
+        if (el.dataset.n !== t) el.dataset.n = t;
+    }
+    // v1.41.0 — RadiAnt (script próprio "LADI - Abrir no RadiAnt" ≥ 0.4.0, só nos Windows). Sem ele (Mac), o ícone não aparece.
+    function radiantPronto() { const c = window.__LADI_RADIANT_USERSCRIPT_CONTROLLER__; return !!(c && typeof c.openExam === 'function'); }
+    function radiantAbrir(x, nome) { const c = window.__LADI_RADIANT_USERSCRIPT_CONTROLLER__; if (c && typeof c.openExam === 'function') c.openExam(x, { patientName: nome || '' }); }
     const dataBR = d => { const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
     // Liga cada linha da tabela ao objeto do exame (pela ordem, conferindo data/hora; senão procura pela data/hora)
     function itemDaLinha(vm, tr, idx) {
@@ -2209,17 +2244,20 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             const td = tr.children[9];
             let box = td.querySelector(':scope > .pp-hist-acoes');
             if (!it) { if (box) box.remove(); return; }
-            if (box && box.dataset.exa === String(it.exa_codigo)) return;
+            const rad = radiantPronto() && !!it.exa_idnexecutadopacs ? '1' : '';
+            if (box && box.dataset.exa === String(it.exa_codigo) && (box.dataset.rad || '') === rad) return;
             if (box) box.remove();
             box = document.createElement('span');
             box.className = 'pp-hist-acoes';
             box.dataset.exa = String(it.exa_codigo);
+            box.dataset.rad = rad;
             const ico = (tipo, mdi, titulo) => `<i class="v-icon notranslate mdi ${mdi} pp-ha" data-tipo="${tipo}" title="${titulo}"></i>`;
             box.innerHTML =
                 (vm.btnListarAnexosExame !== false ? ico('anexos', 'mdi-paperclip', 'Anexos') : '') +
                 (vm.btnComentarioExame !== false ? ico('comentarios', 'mdi-chat', 'Comentários') : '') +
                 (vm.btnListarAnamneseExame !== false ? ico('anamnese', 'mdi-file-document', 'Anamnese') : '') +
-                (String(it.exa_situacao || '').toUpperCase() === 'LIBERADO' ? ico('ler', 'mdi-text-box-outline', 'Ler o texto do laudo aqui (clique de novo para fechar)') : '');
+                (String(it.exa_situacao || '').toUpperCase() === 'LIBERADO' ? ico('ler', 'mdi-text-box-outline', 'Ler o texto do laudo aqui (clique de novo para fechar)') : '') +
+                (rad ? ico('radiant', 'mdi-open-in-new', 'Abrir este exame no RadiAnt') : '');
             box.addEventListener('click', ev => {
                 const el = ev.target.closest('.pp-ha');
                 if (!el) return;
@@ -2235,16 +2273,16 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         document.querySelectorAll('#datatableExamesHistorico .pp-hist-acoes').forEach(box => {
             const exa = Number(box.dataset.exa);
             const it = vm && (vm.examesPacienteHistorico || []).find(x => x.exa_codigo === exa);
-            const c = histContagens(exa);
+            const c = histContagens(exa, it);
             const set = (tipo, cor, n, extra) => {
                 const el = box.querySelector(`[data-tipo="${tipo}"]`);
                 if (!el) return;
                 if (cor) { if (el.dataset.on !== cor) el.dataset.on = cor; } else if (el.dataset.on) delete el.dataset.on;
-                if (n > 0) { if (el.dataset.n !== String(n)) el.dataset.n = String(n); } else if (el.dataset.n) delete el.dataset.n;
+                ppBalaoNum(el, n, 'pp-ha-n');
                 const tit = el.getAttribute('title').split(' (')[0] + (extra || '');
                 if (el.getAttribute('title') !== tit) el.setAttribute('title', tit);
             };
-            set('anexos', c.arq > 0 ? 'anexo' : '', 0, c.arq > 0 ? ` (${c.arq})` : (c.carregando ? ' (verificando…)' : ' (nenhum)'));
+            set('anexos', c.arq > 0 ? 'anexo' : '', c.arq, c.arq > 0 ? ` (${c.arq})` : (c.carregando ? ' (verificando…)' : ' (nenhum)'));
             set('comentarios', c.com > 0 ? 'roxo' : '', c.com, c.com > 0 ? ` (${c.com})` : (c.carregando ? ' (verificando…)' : ' (nenhum)'));
             const anam = it && String(it.exa_anamnese || '').trim();
             set('anamnese', anam ? 'roxo' : '', 0, anam ? ' (' + anam.slice(0, 120).replace(/\s+/g, ' ') + (anam.length > 120 ? '…' : '') + ')' : ' (vazia)');
@@ -2256,6 +2294,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const it = (vm.examesPacienteHistorico || []).find(x => x.exa_codigo === exa);
         if (!it) return;
         const atual = vm.exame && vm.exame.exa_codigo === exa;
+        if (tipo === 'radiant') { radiantAbrir(it, vm.exame && vm.exame.paciente && vm.exame.paciente.pac_nome); return; }
         if (tipo === 'comentarios') {
             vm.abrirEditarComentarioExame({ item: { exa_codigo: exa }, callBackClose: () => { HIST_CACHE.delete(exa); pintarHistAcoes(); } });
             // o diálogo nativo não avisa ao fechar sem salvar: reconta quando ele some
@@ -3905,12 +3944,15 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 #pp-hl .hl-top b { font-size: 14px; } #pp-hl .hl-top .hl-sub { color: #9ca3af; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #pp-hl .hl-x { background: none; border: 0; color: #9ca3af; font-size: 18px; cursor: pointer; }
 #pp-hl .hl-lista { overflow: auto; padding: 4px 0; }
-#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 112px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
+#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 172px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
 #pp-hl .hl-l.atual { background: rgba(167,139,250,.10); }
 #pp-hl .hl-ex { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } #pp-hl .hl-mod { color: #9ca3af; font-weight: 700; font-size: 12px; }
 #pp-hl .hl-sit { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; text-align: center; background: #3f3f46; } #pp-hl .hl-sit.LIBERADO { background: #2e7d32; color: #fff; }
 #pp-hl .hl-ac { display: flex; gap: 2px; justify-content: flex-end; } #pp-hl .hl-ac .v-icon { cursor: pointer; font-size: 19px !important; width: 24px; height: 24px; border-radius: 4px; }
 #pp-hl .hl-ac .v-icon:hover { background: rgba(127,127,127,.2); } #pp-hl .hl-ac .v-icon.off { opacity: .35; cursor: default; }
+#pp-hl .hl-ac .v-icon { position: relative; overflow: visible !important; }
+#pp-hl .hl-ac .v-icon > .hl-n { position: absolute; top: -6px; right: -7px; z-index: 2; min-width: 15px; height: 15px; padding: 0 3px; box-sizing: border-box; border-radius: 8px; background: #4caf50; color: #fff; font: 700 10px/15px Roboto, Arial, sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
+#pp-hl .hl-ac .v-icon[data-a="anx"].tem { color: #2196f3 !important; } #pp-hl .hl-ac .v-icon[data-a="com"].tem { color: #c50ec5 !important; }
 #pp-hl .hl-txt { grid-column: 1 / -1; white-space: pre-wrap; background: #111; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; margin: 4px 0 6px; max-height: 320px; overflow: auto; font-size: 12.5px; user-select: text; }
 #pp-hl .hl-msg { padding: 14px; color: #9ca3af; }`);
     async function hlAbrir(pac, exaAtual) {
@@ -3932,6 +3974,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         p.dataset.pac = pac;
         const lista = p.querySelector('.hl-lista');
         if (!exs.length) { lista.innerHTML = '<div class="hl-msg">Nenhum exame encontrado.</div>'; return; }
+        const rad = radiantPronto();
+        p.__exs = exs;
         lista.innerHTML = exs.map((x, i) => {
             const lib = String(x.exa_situacao || '').toUpperCase() === 'LIBERADO', img = !!x.exa_idnexecutadopacs;
             const sit = String(x.exa_situacao || '').toUpperCase();
@@ -3940,7 +3984,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 <span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
 <span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
 <span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
-<span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
+<span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${rad ? `<i class="v-icon notranslate mdi mdi-open-in-new ${img ? '' : 'off'}" data-a="rad" title="${img ? 'Abrir este exame no RadiAnt' : 'Exame ainda sem imagens'}" style="color:${img ? '#64b5f6' : 'gray'}"></i>` : ''}${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-paperclip" data-a="anx" title="Anexos (só leitura)" style="color:#9ca3af"></i><i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
         }).join('');
         lista.onclick = async ev => {
             const el = ev.target.closest('[data-a]'); if (!el || el.classList.contains('off')) return;
@@ -3948,8 +3992,14 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             const a = el.dataset.a;
             try {
                 if (a === 'img') { if (comp && comp.abrirVisualizador) comp.abrirVisualizador(x, 'HISTORICOPACIENTE'); }
+                else if (a === 'rad') radiantAbrir(x, nomePac);
+                else if (a === 'anx') abrirAnexosHist(x);
                 else if (a === 'imp') { if (comp && comp.imprimirLaudo) comp.imprimirLaudo(x); }
-                else if (a === 'com') document.querySelector('#app').__vue__.$store.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: x.exa_codigo }, callBackClose: () => {} });
+                else if (a === 'com') {
+                    const recontar = () => { HIST_CACHE.delete(x.exa_codigo); hlPintarContagens(); };
+                    document.querySelector('#app').__vue__.$store.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: x.exa_codigo }, callBackClose: recontar });
+                    vigiarFechamento(recontar);
+                }
                 else if (a === 'ler') {
                     const ja = linha.querySelector('.hl-txt'); if (ja) { ja.remove(); return; }
                     const box = document.createElement('div'); box.className = 'hl-txt'; box.textContent = '⏳ carregando…'; linha.appendChild(box);
@@ -3958,6 +4008,18 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 }
             } catch (e) { const m = document.createElement('div'); m.className = 'hl-txt'; m.textContent = '⚠ PACS: ' + e.message; linha.appendChild(m); setTimeout(() => m.remove(), 6000); }
         };
+        hlPintarContagens();
+    }
+    // v1.41.0 — balões de anexos (📎) e comentários (💬) no painel 🕘, mesma contagem/cache do histórico do laudo
+    function hlPintarContagens() {
+        const p = document.getElementById('pp-hl'); if (!p || !Array.isArray(p.__exs)) return;
+        p.querySelectorAll('.hl-l[data-i]').forEach(l => {
+            const x = p.__exs[Number(l.dataset.i)]; if (!x) return;
+            const c = histContagens(x.exa_codigo, x);
+            const anx = l.querySelector('[data-a="anx"]'), com = l.querySelector('[data-a="com"]');
+            if (anx) { ppBalaoNum(anx, c.arq || 0, 'hl-n'); anx.classList.toggle('tem', c.arq > 0); anx.title = 'Anexos (só leitura)' + (c.arq > 0 ? ` (${c.arq})` : c.carregando ? ' (verificando…)' : ' (nenhum)'); }
+            if (com) { ppBalaoNum(com, c.com || 0, 'hl-n'); com.classList.toggle('tem', c.com > 0); com.title = 'Comentários' + (c.com > 0 ? ` (${c.com})` : c.carregando ? ' (verificando…)' : ' (nenhum)'); }
+        });
     }
     // v1.28.2 — exames antigos ainda têm o bloco [FICHA TC HAMC … /FICHA TC] dentro da Anamnese (Anamnese TC ≤ 1.8).
     // Só na TELA: esconde o bloco no cabeçalho do laudo (o PACS não é alterado; a ficha está nos Comentários/PDF).
@@ -5560,5 +5622,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();

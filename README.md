@@ -10,6 +10,7 @@ Scripts de interface para o PACS Laudo Web. Contêm **apenas código** — nenhu
 | Cartografia Venosa MMII | Desenho do Doppler venoso de MMII com PDF anexado ao exame | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/cartografia-venosa.user.js |
 | Contador de Anexos | Número de anexos no clipe 📎 da lista de exames | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/contador-anexos.user.js |
 | Anamnese TC (HAMC) | Ficha de anamnese de TC: botão 📋 nas linhas de TC, grava contraste, resumo e PDF no exame | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/anamnese-tc.user.js |
+| Abrir no RadiAnt (só Windows) | Botão por exame (lista e históricos) que abre o estudo no RadiAnt pela ponte local do Windows | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/ladi-radiant.user.js |
 | WhatsApp Web — Suíte | Reescrever/responder com IA (Gemini), transcrição de áudio, agenda Outlook/Google, lembretes, mensagens apagadas, layout compacto, fixadas extras, privacidade | https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js |
 
 O Tampermonkey verifica novas versões automaticamente (`@updateURL`).
