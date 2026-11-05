@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.8.0
+// @version      9.8.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2396,12 +2396,13 @@
                     </div>
                 </div>
 
-                <div class="slim-panel-bar" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:5px 8px; display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                    <div style="display:flex; align-items:center; gap:3px;">
+                <div class="slim-panel-bar" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:5px 8px; display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:6px;">
+                    <div style="display:flex; align-items:center; gap:3px; flex-wrap:wrap;">
                         <button id="btnPrevDay" style="padding:1.5px 6px; border-radius:3px; border:1px solid #cbd5e1; background:#f8fafc; font-size:9.5px; cursor:pointer;">◀</button>
                         <input type="date" id="nativeDatePicker" style="padding:1.5px 4px; border-radius:3px; border:1px solid #cbd5e1; font-weight:700; font-size:10.5px; cursor:pointer;">
                         <button id="btnNextDay" style="padding:1.5px 6px; border-radius:3px; border:1px solid #cbd5e1; background:#f8fafc; font-size:9.5px; cursor:pointer;">▶</button>
                         <button id="btnToday" style="padding:1.5px 8px; border-radius:3px; border:1px solid #93c5fd; background:#eff6ff; font-weight:700; font-size:10px; color:#1d4ed8; cursor:pointer;">Hoje</button>
+                        <span id="agFiltros" style="display:inline-flex; gap:3px; margin-left:8px;" title="Mostrar só parte da agenda (os contadores continuam com o total do dia)"></span>
                     </div>
                     <div style="display:flex; align-items:center; gap:10px; font-size:10.5px; font-weight:600;">
                         <span title="Pacientes únicos no dia">👤 Pacientes: <strong id="cntPacientes">0</strong></span>
@@ -2911,6 +2912,15 @@
     const ehSaida = i => i.status === 'cancelado' || (!!i.removidoOrigemEm && (!i.status || i.status === 'pendente'));
     const notasDe = i => (Array.isArray(i && i.notas) ? i.notas : []);
 
+    // v9.8.1 — filtros da agenda: mostra só parte das linhas (contadores e relatórios seguem com o dia inteiro)
+    const AG_FILTROS = [['todos', 'Todos', 'Todos os pacientes'], ['abertos', '⏳ A atender', 'Pendentes + em espera (esconde atendidos e faltas)'], ['esperando', '⏱️ Em espera', 'Só quem já chegou e está esperando'], ['pendente', 'Não chegaram', 'Só quem ainda não chegou'], ['atendido', '🟢 Atendidos', 'Só atendidos'], ['faltou', '🔴 Faltas', 'Só faltas']];
+    let agFiltro = localStorage.getItem('agenda_filtro_v981') || 'todos';
+    const agPassa = i => agFiltro === 'todos' || (agFiltro === 'abertos' ? (i.status === 'pendente' || i.status === 'esperando' || !i.status) : agFiltro === 'pendente' ? (i.status === 'pendente' || !i.status) : i.status === agFiltro);
+    function agPintarFiltros() {
+        const box = document.getElementById('agFiltros'); if (!box) return;
+        box.innerHTML = AG_FILTROS.map(([k, t, d]) => `<button data-agf="${k}" title="${d}" style="white-space:nowrap; padding:1.5px 7px; border-radius:10px; font-size:9.5px; font-weight:700; cursor:pointer; border:1px solid ${k === agFiltro ? '#1d4ed8' : '#cbd5e1'}; background:${k === agFiltro ? '#1d4ed8' : (isDarkMode ? '#1e293b' : '#f8fafc')}; color:${k === agFiltro ? '#fff' : (isDarkMode ? '#cbd5e1' : '#334155')};">${t}</button>`).join('');
+        box.querySelectorAll('[data-agf]').forEach(b => { b.onclick = () => { agFiltro = b.dataset.agf; try { localStorage.setItem('agenda_filtro_v981', agFiltro); } catch (e) { /* ok */ } renderAgenda(); }; });
+    }
     function renderAgenda() {
         const tbM = document.getElementById('tbodyNativeManha');
         const tbT = document.getElementById('tbodyNativeTarde');
@@ -2935,11 +2945,12 @@
         document.getElementById('cntFaltou').innerText = count('faltou');
         document.getElementById('cntSaidas').innerText = saidas.length;
 
-        const m = ativos.filter(i => i.periodo === 'manha');
-        const t = ativos.filter(i => i.periodo === 'tarde');
-        const sm = dayStats(m), stt = dayStats(t);
-        document.getElementById('badgeCountManha').innerText = `${sm.pacientes} pacientes · ${sm.procedimentos} proc.`;
-        document.getElementById('badgeCountTarde').innerText = `${stt.pacientes} pacientes · ${stt.procedimentos} proc.`;
+        const mT = ativos.filter(i => i.periodo === 'manha'), tT = ativos.filter(i => i.periodo === 'tarde');
+        const m = mT.filter(agPassa), t = tT.filter(agPassa);
+        const sm = dayStats(mT), stt = dayStats(tT), fil = agFiltro !== 'todos';
+        document.getElementById('badgeCountManha').innerText = `${fil ? `mostrando ${m.length} de ${mT.length} · ` : ''}${sm.pacientes} pacientes · ${sm.procedimentos} proc.`;
+        document.getElementById('badgeCountTarde').innerText = `${fil ? `mostrando ${t.length} de ${tT.length} · ` : ''}${stt.pacientes} pacientes · ${stt.procedimentos} proc.`;
+        agPintarFiltros();
         tbM.innerHTML = '';
         tbT.innerHTML = '';
         m.forEach(i => tbM.appendChild(createRow(i)));
