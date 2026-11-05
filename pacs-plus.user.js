@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.39.6
+// @version      1.40.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3636,7 +3636,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); hlAbrir(Number(b.dataset.pac), Number(b.dataset.exa)); });
                 td.appendChild(b);
             }
-            if (b.dataset.pac !== String(ex.pac_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; }
+            if (b.dataset.pac !== String(ex.pac_codigo) || b.dataset.exa !== String(ex.exa_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; b.dataset.dia = String(ex.exa_data || '').slice(0, 10); b.removeAttribute('data-hln'); }
+            hlContar(b);
             // v1.36.1: fica ANTES dos botões de outros scripts (RadiAnt / Horos), que continuam por último
             const ext = td.querySelector('[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"]');
             if (ext && ext.parentNode && (ext.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) ext.parentNode.insertBefore(b, ext);
@@ -3644,6 +3645,33 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         // v1.36.1: nome do exame mais curto na lista — SEM CONTRASTE → SC, COM CONTRASTE → CC (só a tela)
         const iEx = f.names.indexOf('exame');
         if (iEx >= 0 && on('historicoLista')) linhas.forEach(tr => { const td = tr.children[iEx]; if (td) abreviarNo(td); });
+    }
+    // v1.40.0 — contador no 🕘: nº de exames do paciente em OUTROS dias (os do mesmo dia são o atendimento atual).
+    // Sem balão = sem exame em outro dia. 1 consulta por paciente (GET paciente/{pac}), 2 por vez, guardada 10 min.
+    const hlCache = new Map(); let hlFila = [], hlAtivos = 0;
+    function hlContar(b) {
+        const pac = b.dataset.pac, c = hlCache.get(pac);
+        if (c && Date.now() - c.t < 10 * 60000) { hlBalao(b, c.exs); return; }
+        if (!c || !c.pend) { hlCache.set(pac, { t: 0, pend: true, exs: c && c.exs }); hlFila.push(pac); hlProximo(); }
+        if (c && c.exs) hlBalao(b, c.exs);
+    }
+    function hlProximo() {
+        while (hlAtivos < 2 && hlFila.length) {
+            const pac = hlFila.shift(); hlAtivos++;
+            pacsGet('paciente/' + pac)
+                .then(d => { hlCache.set(pac, { t: Date.now(), exs: (d && Array.isArray(d.exames) ? d.exames : []).map(x => String(x.exa_data || '').slice(0, 10)) }); })
+                .catch(() => { hlCache.set(pac, { t: Date.now() - 8 * 60000, exs: null }); }) // erro: tenta de novo em ~2 min
+                .finally(() => { hlAtivos--; document.querySelectorAll(`[data-pp-hl][data-pac="${pac}"]`).forEach(x => { const c = hlCache.get(pac); if (c && c.exs) hlBalao(x, c.exs); }); hlProximo(); });
+        }
+    }
+    function hlBalao(b, dias) {
+        const dia = b.dataset.dia || '', outros = dias.filter(d => d !== dia).length, mesmo = dias.length - outros;
+        const k = outros + '|' + mesmo; if (b.getAttribute('data-hln') === k) return;
+        b.setAttribute('data-hln', k);
+        let bd = b.querySelector(':scope > .pp-hl-n');
+        if (!outros) { if (bd) bd.remove(); }
+        else { if (!bd) { bd = document.createElement('span'); bd.className = 'pp-hl-n'; b.appendChild(bd); } bd.textContent = outros > 99 ? '99+' : String(outros); bd.classList.toggle('muitos', outros >= 3); }
+        b.title = `Histórico de exames do paciente — ${outros ? outros + ' exame(s) em outros dias' : 'nenhum exame em outro dia'}${mesmo > 1 ? ` (+${mesmo - 1} hoje no mesmo atendimento)` : ''}`;
     }
     function abreviarExame(t) {
         return String(t)
@@ -3869,6 +3897,9 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     setCss('pp-hl-css', `
 .pp-hl-ico { cursor: pointer; font-size: 19px !important; color: #a78bfa !important; margin-left: 2px; border-radius: 4px; }
 .pp-hl-ico:hover { background: rgba(167,139,250,.18); }
+.pp-hl-ico { position: relative; overflow: visible !important; }
+.pp-hl-ico .pp-hl-n { position: absolute; top: -8px; right: -9px; z-index: 2; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #4caf50; color: #fff; font: 700 11px/18px Roboto,-apple-system,"Segoe UI",sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1.5px rgba(0,0,0,.25); }
+.pp-hl-ico .pp-hl-n.muitos { background: #2e7d32; }
 #pp-hl { position: fixed; z-index: 2147483000; top: 90px; right: 24px; width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 110px); display: flex; flex-direction: column; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
 #pp-hl .hl-top { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #3f3f46; }
 #pp-hl .hl-top b { font-size: 14px; } #pp-hl .hl-top .hl-sub { color: #9ca3af; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
