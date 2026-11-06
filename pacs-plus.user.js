@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.43.1
+// @version      1.43.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -39,7 +39,7 @@
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
-        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), ainda NÃO liberada: pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
+        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -3842,9 +3842,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
         if (linhas.length !== comp.exames.length) return;
         const ehTC = ex => ex && ex.exa_idnexecutadopacs && ex.exa_pacs_iuid
-            && String(((ex.tipoexame || {}).modalidade || {}).mod_sigla || '').toUpperCase() === 'CT'
-            && String(ex.exa_situacao || '').toUpperCase() !== 'LIBERADO';
-        // grupos: mesmo paciente + mesmo dia, 2+ TCs com imagem ainda não liberadas
+            && String(((ex.tipoexame || {}).modalidade || {}).mod_sigla || '').toUpperCase() === 'CT';
+        // grupos: mesmo paciente + mesmo dia, 2+ TCs com imagem (qualquer situação, inclusive LIBERADO — v1.43.2)
         const grupos = new Map();
         comp.exames.forEach((ex, i) => { if (!ehTC(ex)) return; const g = (ex.pac_codigo || (ex.paciente || {}).pac_codigo) + '|' + ex.exa_data; if (!grupos.has(g)) grupos.set(g, []); grupos.get(g).push(i); });
         const alvo = new Map(); grupos.forEach(ix => { if (ix.length > 1) ix.forEach(i => alvo.set(i, ix)); });
