@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.43.0
+// @version      1.43.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2719,7 +2719,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             sexo: String(pac.pac_sexo || '').toUpperCase(), idade: idadeAnos(pac.pac_dtnasc),
             indicacao: typeof e.exa_anamnese === 'string' ? e.exa_anamnese.replace(/\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/g, '').trim().slice(0, 600) : '',
             critico: !!(critInput && (critInput.checked || critInput.getAttribute('aria-checked') === 'true')),
-            texto: htmlParaTexto(ed.getData())
+            texto: htmlParaTexto(ed.getData()),
+            dataExame: String(e.exa_data || '').slice(0, 10)
         };
     }
 
@@ -2958,7 +2959,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     }
 
     // ---------- IA ----------
-    const REV_BASE = `Você é um REVISOR DE SEGURANÇA de laudos radiológicos em português do Brasil. Objetivo único: encontrar ERROS DE INCOMPATIBILIDADE que possam prejudicar o paciente ou expor o médico. NÃO comente estilo, redação aceitável, nem dê recomendações clínicas genéricas.
+    const REV_BASE = `ATENÇÃO À DATA: a mensagem traz a DATA DE HOJE real. Seu calendário interno está desatualizado — NUNCA aponte uma data como "futura" se ela for igual ou anterior à DATA DE HOJE informada.
+Você é um REVISOR DE SEGURANÇA de laudos radiológicos em português do Brasil. Objetivo único: encontrar ERROS DE INCOMPATIBILIDADE que possam prejudicar o paciente ou expor o médico. NÃO comente estilo, redação aceitável, nem dê recomendações clínicas genéricas.
 Procure:
 1. lateralidade (direito/esquerdo) incoerente entre nome do exame, corpo e conclusão;
 2. anatomia incompatível com sexo ou idade;
@@ -3020,7 +3022,10 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
         categoria: { type: 'STRING', enum: REV_CATS }, gravidade: { type: 'STRING', enum: ['grave', 'atencao'] },
         trecho: { type: 'STRING' }, explicacao: { type: 'STRING' }, sugestao: { type: 'STRING' } }, required: ['categoria', 'gravidade', 'trecho', 'explicacao'] } } }, required: ['achados'] };
     function revMensagem(c) {
-        return `Modalidade: ${c.tipo === 'TC' ? 'Tomografia computadorizada' : c.tipo === 'US' ? 'Ultrassonografia' : c.mod}
+        // v1.43.1 — data real (os modelos acham que ainda estão no ano do treinamento e chamavam 2026 de "futuro")
+        const br = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+        return `DATA DE HOJE (real, use esta): ${br(chaveDia(new Date()))}${c.dataExame ? `\nData deste exame: ${br(c.dataExame)}` : ''}
+Modalidade: ${c.tipo === 'TC' ? 'Tomografia computadorizada' : c.tipo === 'US' ? 'Ultrassonografia' : c.mod}
 Exame: ${c.exame}
 Sexo: ${c.sexo || 'não informado'}
 Idade: ${c.idade != null ? c.idade + ' anos' : 'não informada'}
@@ -3205,9 +3210,17 @@ ${c.texto}`;
         let inter = 0; ta.forEach(w => { if (tb.has(w)) inter++; });
         return inter / Math.min(ta.size, tb.size) >= 0.5;
     }
+    // v1.43.1 — descarta "data no futuro" quando todas as datas citadas são até hoje (erro de calendário da IA)
+    function falsaDataFutura(a) {
+        if (!a || (a.fontes || []).includes('regra')) return false;
+        const txt = [a.explicacao, a.sugestao, a.trecho].join(' ');
+        if (!/futur|posterior (à|a) (data|hoje)|ainda n[ãa]o ocorr/i.test(txt)) return false;
+        const ds = [...txt.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)].map(m => `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`);
+        return ds.length > 0 && ds.every(d => d <= chaveDia(new Date()));
+    }
     function juntarAchados(listas) {
         const out = [];
-        listas.flat().forEach(a => {
+        listas.flat().filter(a => !falsaDataFutura(a)).forEach(a => {
             const igual = out.find(o => parecidos(o, a) && !(o.fontes.includes('regra') && a.fontes.includes('regra'))); // dois itens de regra nunca se fundem (cada um tem a sua correção)
             if (igual) { if (a.explicacao && norm(a.explicacao) !== norm(igual.explicacao)) (igual.outras = igual.outras || []).push({ fonte: a.fontes.join('+'), explicacao: a.explicacao }); a.fontes.forEach(f => { if (!igual.fontes.includes(f)) igual.fontes.push(f); }); if (a.gravidade === 'grave') igual.gravidade = 'grave'; if (!igual.sugestao && a.sugestao) igual.sugestao = a.sugestao; }
             else out.push(Object.assign({}, a, { fontes: a.fontes.slice() }));
