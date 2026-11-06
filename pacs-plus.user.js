@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.42.1
+// @version      1.43.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2181,14 +2181,22 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     function histContagens(exa, it) {
         const c = HIST_CACHE.get(exa);
         if (c && (c.carregando || Date.now() - c.t < HIST_TTL)) return c;
-        const novo = { t: Date.now(), arq: null, com: null, carregando: true };
+        const novo = { t: Date.now(), arq: null, com: null, anam: null, carregando: true };
         HIST_CACHE.set(exa, novo);
         histFila.push(async () => {
             const num = v => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : null; };
             // anexos: 1º o campo que o PACS já mandou no item; senão exame/{id}; se ainda faltar, a lista de anexos (count)
             let arq = it ? num(it.arq_count_arquivo) : null;
-            const [e, cm] = await Promise.allSettled([arq == null ? pacsGet('exame/' + exa) : Promise.resolve(null), pacsGet('exame/' + exa + '/comentario')]);
-            if (arq == null && e.status === 'fulfilled' && e.value) { const ex = e.value.exame && typeof e.value.exame === 'object' ? e.value.exame : e.value; arq = num(ex.arq_count_arquivo); }
+            // v1.43.0: anamnese (texto sem o bloco da Ficha TC) — do item, senão de exame/{id}
+            const anamTxt = v => String(v || '').replace(/\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/gi, '').trim();
+            let anam = it && 'exa_anamnese' in it ? anamTxt(it.exa_anamnese) : null;
+            const [e, cm] = await Promise.allSettled([arq == null || anam == null ? pacsGet('exame/' + exa) : Promise.resolve(null), pacsGet('exame/' + exa + '/comentario')]);
+            if (e.status === 'fulfilled' && e.value) {
+                const ex = e.value.exame && typeof e.value.exame === 'object' ? e.value.exame : e.value;
+                if (arq == null) arq = num(ex.arq_count_arquivo);
+                if (anam == null && 'exa_anamnese' in ex) anam = anamTxt(ex.exa_anamnese);
+            }
+            novo.anam = anam;
             if (arq == null) {
                 try { const j = await pacsGet(`arquivo/exame/${exa}?arq_tipoarquivo=ARQUIVO&offset=0`); arq = Array.isArray(j) ? j.length : j && j.count != null ? num(j.count) : j && Array.isArray(j.rows) ? j.rows.length : j && j.arq_blob ? 1 : 0; } catch (er) { /* fica sem número */ }
             }
@@ -4088,7 +4096,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 #pp-hl .hl-top b { font-size: 14px; } #pp-hl .hl-top .hl-sub { color: #9ca3af; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #pp-hl .hl-x { background: none; border: 0; color: #9ca3af; font-size: 18px; cursor: pointer; }
 #pp-hl .hl-lista { overflow: auto; padding: 4px 0; }
-#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 172px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
+#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 200px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
 #pp-hl .hl-l.atual { background: rgba(167,139,250,.10); }
 #pp-hl .hl-ex { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } #pp-hl .hl-mod { color: #9ca3af; font-weight: 700; font-size: 12px; }
 #pp-hl .hl-sit { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; text-align: center; background: #3f3f46; } #pp-hl .hl-sit.LIBERADO { background: #2e7d32; color: #fff; }
@@ -4128,7 +4136,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 <span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
 <span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
 <span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
-<span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${rad ? `<i class="v-icon notranslate mdi mdi-open-in-new ${img ? '' : 'off'}" data-a="rad" title="${img ? 'Abrir este exame no RadiAnt' : 'Exame ainda sem imagens'}" style="color:${img ? '#64b5f6' : 'gray'}"></i>` : ''}${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-paperclip" data-a="anx" title="Anexos (só leitura)" style="color:#9ca3af"></i><i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
+<span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${rad ? `<i class="v-icon notranslate mdi mdi-open-in-new ${img ? '' : 'off'}" data-a="rad" title="${img ? 'Abrir este exame no RadiAnt' : 'Exame ainda sem imagens'}" style="color:${img ? '#64b5f6' : 'gray'}"></i>` : ''}${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-file-document" data-a="anam" title="Anamnese" style="color:#808080"></i><i class="v-icon notranslate mdi mdi-paperclip" data-a="anx" title="Anexos (só leitura)" style="color:#9ca3af"></i><i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
         }).join('');
         lista.onclick = async ev => {
             const el = ev.target.closest('[data-a]'); if (!el || el.classList.contains('off')) return;
@@ -4138,6 +4146,12 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 if (a === 'img') { if (comp && comp.abrirVisualizador) comp.abrirVisualizador(x, 'HISTORICOPACIENTE'); }
                 else if (a === 'rad') radiantAbrir(x, nomePac);
                 else if (a === 'anx') abrirAnexosHist(x);
+                else if (a === 'anam') {
+                    const recontar = () => { HIST_CACHE.delete(x.exa_codigo); delete x.exa_anamnese; hlPintarContagens(); };
+                    const st = document.querySelector('#app').__vue__.$store;
+                    st.dispatch('editarAnamnese/abrirEditarAnamnese', { item: { exa_codigo: x.exa_codigo }, callBackClose: recontar });
+                    vigiarFechamento(recontar);
+                }
                 else if (a === 'imp') { if (comp && comp.imprimirLaudo) comp.imprimirLaudo(x); }
                 else if (a === 'com') {
                     const recontar = () => { HIST_CACHE.delete(x.exa_codigo); hlPintarContagens(); };
@@ -4160,7 +4174,13 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         p.querySelectorAll('.hl-l[data-i]').forEach(l => {
             const x = p.__exs[Number(l.dataset.i)]; if (!x) return;
             const c = histContagens(x.exa_codigo, x);
-            const anx = l.querySelector('[data-a="anx"]'), com = l.querySelector('[data-a="com"]');
+            const anx = l.querySelector('[data-a="anx"]'), com = l.querySelector('[data-a="com"]'), an = l.querySelector('[data-a="anam"]');
+            if (an) {
+                const cor = c.anam ? '#c50ec5' : '#808080';
+                if (an.dataset.cor !== cor) { an.style.setProperty('color', cor, 'important'); an.dataset.cor = cor; }
+                const tt = c.anam ? 'Anamnese: ' + c.anam.slice(0, 160).replace(/\s+/g, ' ') + (c.anam.length > 160 ? '…' : '') : c.carregando ? 'Anamnese (verificando…)' : 'Anamnese (vazia) — clique para preencher';
+                if (an.title !== tt) an.title = tt;
+            }
             if (anx) { ppBalaoNum(anx, c.arq || 0, 'hl-n'); anx.classList.toggle('tem', c.arq > 0); anx.title = 'Anexos (só leitura)' + (c.arq > 0 ? ` (${c.arq})` : c.carregando ? ' (verificando…)' : ' (nenhum)'); }
             if (com) { ppBalaoNum(com, c.com || 0, 'hl-n'); com.classList.toggle('tem', c.com > 0); com.title = 'Comentários' + (c.com > 0 ? ` (${c.com})` : c.carregando ? ' (verificando…)' : ' (nenhum)'); }
         });
