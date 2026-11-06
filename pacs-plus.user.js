@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.41.0
+// @version      1.42.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -39,6 +39,7 @@
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
+        ['contarSeries', 'Lista: 🖼 nº de imagens nas TCs de laudo conjunto', 'Quando o mesmo paciente tem 2+ TCs no mesmo dia (ex.: abdome superior + inferior), mostra no 👁 quantas imagens cada código recebeu: o de 1–2 imagens é só o scout; o maior fica verde. Uma consulta pequena por exame (~4 KB), só nesses casos'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -3724,6 +3725,99 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         if (el.title && /CONTRASTE/i.test(el.title)) el.title = abreviarExame(el.title);
     }
     setInterval(() => { try { if (cfg.master) { hlIconesLista(); sitMarcar(); } } catch (e) { /* segue */ } }, 1500);
+
+    // ---------- v1.42.0: 🖼 nº de imagens por exame de TC em laudo conjunto ----------
+    // Mesma consulta do visualizador: URL do visualizador (exame/{id}/imagens/url/viewer → aet + chave) e a lista de séries
+    // do dcm4chee do próprio domínio (/dcm4chee-arc/aets/<AET>/rs/studies/<UID>/series → 00201209 = nº de imagens da série).
+    // Só para TCs do MESMO paciente no MESMO dia (o caso do scout num código e o volume no outro). Guarda só números.
+    const SER_NAO_IMAGEM = /^(SR|PR|KO|DOC|OT)$/;
+    const serMem = new Map(); const serFila = []; let serAtivos = 0;
+    function serChave(ex) { return ex.exa_codigo + '|' + (ex.exa_pacs_data || '') + ' ' + (ex.exa_pacs_hora || ''); }
+    function serLer(ex) {
+        const k = serChave(ex);
+        if (serMem.has(k)) return serMem.get(k);
+        try { const v = JSON.parse(sessionStorage.getItem('ppser_' + k) || 'null'); if (v && v.st === 'ok') { serMem.set(k, v); return v; } } catch (e) { /* sem cache */ }
+        return null;
+    }
+    async function serBuscar(ex) {
+        const tok = localStorage.getItem('lwtoken');
+        if (!tok) throw new Error('PACS sem login');
+        const r1 = await fetch(`/backend/api/exame/${ex.exa_codigo}/imagens/url/viewer?tela=EXAMES`, { headers: { 'x-access-token': tok } });
+        if (!r1.ok) throw new Error('URL do visualizador: HTTP ' + r1.status);
+        const txt = await r1.text();
+        let url = txt; try { const j = JSON.parse(txt); url = typeof j === 'string' ? j : (j.url || j.link || j.data || txt); } catch (e) { /* texto puro */ }
+        const chave = (String(url).match(/[?&]token=([^&"'\s]+)/) || [])[1];
+        const aet = (String(url).match(/[?&]aet=([A-Za-z0-9_.-]+)/) || String(ex.exa_pacs_link || '').match(/[?&]aet=([A-Za-z0-9_.-]+)/) || [])[1];
+        if (!chave || !aet) throw new Error('URL do visualizador sem chave/AET');
+        const uid = String(ex.exa_pacs_iuid || '');
+        if (!/^\d+(\.\d+)+$/.test(uid)) throw new Error('exame sem UID');
+        const r2 = await fetch(`/dcm4chee-arc/aets/${encodeURIComponent(aet)}/rs/studies/${uid}/series`, {
+            headers: { Accept: 'application/dicom+json', Authorization: 'Bearer ' + decodeURIComponent(chave) },
+        });
+        if (r2.status === 204) return { st: 'ok', img: 0, ser: 0, desc: '' };
+        if (!r2.ok) throw new Error('séries: HTTP ' + r2.status);
+        const lista = await r2.json();
+        let img = 0, ser = 0; const partes = [];
+        (Array.isArray(lista) ? lista : []).forEach(v => {
+            const mod = String(((v['00080060'] || {}).Value || [''])[0]).toUpperCase();
+            if (SER_NAO_IMAGEM.test(mod)) return;
+            const n = parseInt(((v['00201209'] || {}).Value || ['0'])[0], 10) || 0;
+            const d = String(((v['0008103E'] || {}).Value || [''])[0]).trim();
+            ser++; img += n; partes.push(`${d || 'série'}: ${n}`);
+        });
+        return { st: 'ok', img, ser, desc: partes.slice(0, 8).join(' · ') };
+    }
+    function serProximo(depois) {
+        while (serAtivos < 2 && serFila.length) {
+            const ex = serFila.shift(), k = serChave(ex); serAtivos++;
+            serBuscar(ex).then(v => {
+                serMem.set(k, v);
+                try { sessionStorage.setItem('ppser_' + k, JSON.stringify(v)); } catch (e) { /* cheio */ }
+            }).catch(e => { serMem.set(k, { st: 'erro', msg: String(e.message || e), t: Date.now() }); })
+              .finally(() => { serAtivos--; depois(); serProximo(depois); });
+        }
+    }
+    function serBotaoOlho(td) {
+        const b = td.querySelector('button[title="Abrir Visualizador"]');
+        if (b) return b;
+        const i = td.querySelector('.mdi-eye'); return i ? i.closest('button') : null;
+    }
+    function serIconesLista() {
+        const f = findListTable(), comp = f && componenteLista();
+        const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => x.remove());
+        if (!f || !comp || !on('contarSeries')) { limpar(); return; }
+        const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        const ehTC = ex => ex && ex.exa_idnexecutadopacs && ex.exa_pacs_iuid && String(((ex.tipoexame || {}).modalidade || {}).mod_sigla || '').toUpperCase() === 'CT';
+        // grupos: mesmo paciente + mesmo dia, 2+ TCs com imagem
+        const grupos = new Map();
+        comp.exames.forEach((ex, i) => { if (!ehTC(ex)) return; const g = (ex.pac_codigo || (ex.paciente || {}).pac_codigo) + '|' + ex.exa_data; if (!grupos.has(g)) grupos.set(g, []); grupos.get(g).push(i); });
+        const alvo = new Map(); grupos.forEach(ix => { if (ix.length > 1) ix.forEach(i => alvo.set(i, ix)); });
+        linhas.forEach((tr, i) => {
+            const td = tr.children[iAc]; if (!td) return;
+            const olho = serBotaoOlho(td);
+            let bd = olho && olho.querySelector(':scope > .pp-ser');
+            const ex = comp.exames[i];
+            if (!olho || !alvo.has(i)) { if (bd) bd.remove(); return; }
+            let v = serLer(ex);
+            if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
+            if (!v) { serMem.set(serChave(ex), { st: 'carregando' }); serFila.push(ex); serProximo(serIconesLista); v = serMem.get(serChave(ex)); }
+            if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; olho.style.position = 'relative'; olho.style.overflow = 'visible'; olho.appendChild(bd); }
+            let txt = '…', cls = 'pp-ser', tit = 'Contando as imagens deste exame…';
+            if (v.st === 'ok') {
+                const maior = Math.max(...alvo.get(i).map(j => { const w = serLer(comp.exames[j]); return w && w.st === 'ok' ? w.img : -1; }));
+                txt = v.img > 999 ? '999+' : String(v.img);
+                cls += v.img <= 2 ? ' pp-ser-pouco' : (v.img === maior ? ' pp-ser-maior' : '');
+                tit = `${v.ser} série(s) · ${v.img} imagem(ns)` + (v.img <= 2 ? ' — provavelmente só o scout/topograma' : v.img === maior ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
+            } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar as imagens: ' + v.msg; }
+            if (bd.textContent !== txt) bd.textContent = txt;
+            if (bd.className !== cls) bd.className = cls;
+            if (bd.title !== tit) bd.title = tit;
+        });
+    }
+    setInterval(() => { try { if (cfg.master) serIconesLista(); } catch (e) { /* segue */ } }, 1500);
+
     // ---------- v1.36: trocar a situação (Aberto ↔ Digitado ↔ Revisar) clicando na lista ----------
     // Mesmo caminho do botão do laudo (salvarLaudo): GET exame/{id} → laudo atual (ou laudo vazio padrão via limparLaudo
     // da própria componente) → lau_situacao → POST /backend/api/laudo. Conferido com paciente TESTE em 27/10/2026.
@@ -3936,6 +4030,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     setCss('pp-hl-css', `
 .pp-hl-ico { cursor: pointer; font-size: 19px !important; color: #a78bfa !important; margin-left: 2px; border-radius: 4px; }
 .pp-hl-ico:hover { background: rgba(167,139,250,.18); }
+.pp-ser { position: absolute; top: -7px; right: -10px; z-index: 3; min-width: 16px; height: 15px; padding: 0 3px; box-sizing: border-box; border-radius: 8px; background: #475569; color: #fff; font: 700 9.5px/15px Roboto, Arial, sans-serif; text-align: center; pointer-events: auto; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
+.pp-ser.pp-ser-maior { background: #16a34a; } .pp-ser.pp-ser-pouco { background: #6b7280; opacity: .75; } .pp-ser.pp-ser-erro { background: #b45309; }
 .pp-hl-ico { position: relative; overflow: visible !important; }
 .pp-hl-ico .pp-hl-n { position: absolute; top: -8px; right: -9px; z-index: 2; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #4caf50; color: #fff; font: 700 11px/18px Roboto,-apple-system,"Segoe UI",sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1.5px rgba(0,0,0,.25); }
 .pp-hl-ico .pp-hl-n.muitos { background: #2e7d32; }
@@ -5622,5 +5718,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
