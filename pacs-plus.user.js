@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.42.0
+// @version      1.42.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -39,7 +39,7 @@
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
-        ['contarSeries', 'Lista: 🖼 nº de imagens nas TCs de laudo conjunto', 'Quando o mesmo paciente tem 2+ TCs no mesmo dia (ex.: abdome superior + inferior), mostra no 👁 quantas imagens cada código recebeu: o de 1–2 imagens é só o scout; o maior fica verde. Uma consulta pequena por exame (~4 KB), só nesses casos'],
+        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), ainda NÃO liberada: pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -3739,7 +3739,19 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         try { const v = JSON.parse(sessionStorage.getItem('ppser_' + k) || 'null'); if (v && v.st === 'ok') { serMem.set(k, v); return v; } } catch (e) { /* sem cache */ }
         return null;
     }
-    async function serBuscar(ex) {
+    // chave do visualizador guardada SÓ na memória da página (nunca em storage); reaproveitada entre exames do mesmo AET
+    // para gerar o mínimo de pedidos de URL do visualizador (cada pedido fica no log do exame como acesso às imagens)
+    const serChaves = new Map();
+    async function serChaveVisualizador(ex, forcar) {
+        const aetItem = (String(ex.exa_pacs_link || '').match(/[?&]aet=([A-Za-z0-9_.-]+)/) || [])[1] || '';
+        const c = serChaves.get(aetItem);
+        if (c && !forcar && c.pend) return Object.assign({ reaproveitada: true }, await c.pend);
+        if (c && !forcar && c.chave && Date.now() - c.t < 20 * 60000) return Object.assign({ reaproveitada: true }, c);
+        const pend = serNovaChave(ex, aetItem);
+        serChaves.set(aetItem, { pend });
+        try { return await pend; } catch (e) { serChaves.delete(aetItem); throw e; }
+    }
+    async function serNovaChave(ex, aetItem) {
         const tok = localStorage.getItem('lwtoken');
         if (!tok) throw new Error('PACS sem login');
         const r1 = await fetch(`/backend/api/exame/${ex.exa_codigo}/imagens/url/viewer?tela=EXAMES`, { headers: { 'x-access-token': tok } });
@@ -3747,13 +3759,21 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const txt = await r1.text();
         let url = txt; try { const j = JSON.parse(txt); url = typeof j === 'string' ? j : (j.url || j.link || j.data || txt); } catch (e) { /* texto puro */ }
         const chave = (String(url).match(/[?&]token=([^&"'\s]+)/) || [])[1];
-        const aet = (String(url).match(/[?&]aet=([A-Za-z0-9_.-]+)/) || String(ex.exa_pacs_link || '').match(/[?&]aet=([A-Za-z0-9_.-]+)/) || [])[1];
+        const aet = (String(url).match(/[?&]aet=([A-Za-z0-9_.-]+)/) || [])[1] || aetItem;
         if (!chave || !aet) throw new Error('URL do visualizador sem chave/AET');
+        const v = { chave: decodeURIComponent(chave), aet, t: Date.now() };
+        serChaves.set(aetItem, v);
+        return v;
+    }
+    async function serBuscar(ex) {
         const uid = String(ex.exa_pacs_iuid || '');
         if (!/^\d+(\.\d+)+$/.test(uid)) throw new Error('exame sem UID');
-        const r2 = await fetch(`/dcm4chee-arc/aets/${encodeURIComponent(aet)}/rs/studies/${uid}/series`, {
-            headers: { Accept: 'application/dicom+json', Authorization: 'Bearer ' + decodeURIComponent(chave) },
+        let k = await serChaveVisualizador(ex, false);
+        const pedir = kk => fetch(`/dcm4chee-arc/aets/${encodeURIComponent(kk.aet)}/rs/studies/${uid}/series`, {
+            headers: { Accept: 'application/dicom+json', Authorization: 'Bearer ' + kk.chave },
         });
+        let r2 = await pedir(k);
+        if ((r2.status === 401 || r2.status === 403) && k.reaproveitada) { k = await serChaveVisualizador(ex, true); r2 = await pedir(k); }
         if (r2.status === 204) return { st: 'ok', img: 0, ser: 0, desc: '' };
         if (!r2.ok) throw new Error('séries: HTTP ' + r2.status);
         const lista = await r2.json();
@@ -3782,18 +3802,44 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         if (b) return b;
         const i = td.querySelector('.mdi-eye'); return i ? i.closest('button') : null;
     }
+    let serAlvo = new Map(), serComp = null, serTimer = 0;
+    function serPedirGrupo(i) {
+        const ix = serAlvo.get(i); if (!ix || !serComp) return;
+        let algum = false;
+        ix.forEach(j => {
+            const ex = serComp.exames[j], k = ex && serChave(ex);
+            if (!ex || serLer(ex)) return;
+            serMem.set(k, { st: 'carregando' }); serFila.push(ex); algum = true;
+        });
+        if (algum) { serProximo(serIconesLista); serIconesLista(); }
+    }
     function serIconesLista() {
         const f = findListTable(), comp = f && componenteLista();
         const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => x.remove());
-        if (!f || !comp || !on('contarSeries')) { limpar(); return; }
+        if (!f || !comp || !on('contarSeries')) { limpar(); serAlvo = new Map(); return; }
         const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
         if (linhas.length !== comp.exames.length) return;
-        const ehTC = ex => ex && ex.exa_idnexecutadopacs && ex.exa_pacs_iuid && String(((ex.tipoexame || {}).modalidade || {}).mod_sigla || '').toUpperCase() === 'CT';
-        // grupos: mesmo paciente + mesmo dia, 2+ TCs com imagem
+        const ehTC = ex => ex && ex.exa_idnexecutadopacs && ex.exa_pacs_iuid
+            && String(((ex.tipoexame || {}).modalidade || {}).mod_sigla || '').toUpperCase() === 'CT'
+            && String(ex.exa_situacao || '').toUpperCase() !== 'LIBERADO';
+        // grupos: mesmo paciente + mesmo dia, 2+ TCs com imagem ainda não liberadas
         const grupos = new Map();
         comp.exames.forEach((ex, i) => { if (!ehTC(ex)) return; const g = (ex.pac_codigo || (ex.paciente || {}).pac_codigo) + '|' + ex.exa_data; if (!grupos.has(g)) grupos.set(g, []); grupos.get(g).push(i); });
         const alvo = new Map(); grupos.forEach(ix => { if (ix.length > 1) ix.forEach(i => alvo.set(i, ix)); });
+        serAlvo = alvo; serComp = comp;
+        // consulta só quando o mouse PARA na linha (0,4 s) — nada automático
+        const tbody = f.t.querySelector('tbody');
+        if (tbody && !tbody.__ppSer) {
+            tbody.__ppSer = true;
+            tbody.addEventListener('mouseover', ev => {
+                const tr = ev.target.closest && ev.target.closest('tr'); if (!tr || !on('contarSeries')) return;
+                const i = [...tbody.children].indexOf(tr);
+                clearTimeout(serTimer);
+                if (serAlvo.has(i)) serTimer = setTimeout(() => serPedirGrupo(i), 400);
+            });
+            tbody.addEventListener('mouseleave', () => clearTimeout(serTimer));
+        }
         linhas.forEach((tr, i) => {
             const td = tr.children[iAc]; if (!td) return;
             const olho = serBotaoOlho(td);
@@ -3802,15 +3848,17 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             if (!olho || !alvo.has(i)) { if (bd) bd.remove(); return; }
             let v = serLer(ex);
             if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
-            if (!v) { serMem.set(serChave(ex), { st: 'carregando' }); serFila.push(ex); serProximo(serIconesLista); v = serMem.get(serChave(ex)); }
+            if (!v) { if (bd) bd.remove(); return; } // ainda não pedido: sem selo
             if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; olho.style.position = 'relative'; olho.style.overflow = 'visible'; olho.appendChild(bd); }
-            let txt = '…', cls = 'pp-ser', tit = 'Contando as imagens deste exame…';
+            let txt = '…', cls = 'pp-ser', tit = 'Contando as séries deste exame…';
             if (v.st === 'ok') {
-                const maior = Math.max(...alvo.get(i).map(j => { const w = serLer(comp.exames[j]); return w && w.st === 'ok' ? w.img : -1; }));
-                txt = v.img > 999 ? '999+' : String(v.img);
-                cls += v.img <= 2 ? ' pp-ser-pouco' : (v.img === maior ? ' pp-ser-maior' : '');
-                tit = `${v.ser} série(s) · ${v.img} imagem(ns)` + (v.img <= 2 ? ' — provavelmente só o scout/topograma' : v.img === maior ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
-            } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar as imagens: ' + v.msg; }
+                const vals = alvo.get(i).map(j => serLer(comp.exames[j])).filter(w => w && w.st === 'ok');
+                const maior = Math.max(...vals.map(w => w.img));
+                const scout = v.img <= 2;
+                txt = String(v.ser);
+                cls += scout ? ' pp-ser-pouco' : (vals.length > 1 && v.img === maior ? ' pp-ser-maior' : '');
+                tit = `${v.ser} série(s) de imagem · ${v.img} imagem(ns)` + (scout ? ' — só o scout/topograma' : vals.length > 1 && v.img === maior ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
+            } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar: ' + v.msg; }
             if (bd.textContent !== txt) bd.textContent = txt;
             if (bd.className !== cls) bd.className = cls;
             if (bd.title !== tit) bd.title = tit;
@@ -5718,5 +5766,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
 })();
