@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.8.1
+// @version      9.8.2
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -333,6 +333,8 @@
     function explainHttp(status, body) {
         const b = String(body || '').slice(0, 300);
         if (status === 0) return 'Sem resposta. O Tampermonkey pode ter BLOQUEADO a conexão com supabase.co (Painel Tampermonkey > script > Configurações > "Domínios permitidos/@connect"), ou o PC está sem internet.';
+        // v9.8.2 — 42501 = a chave está certa, mas este computador está SEM LOGIN (ou a sessão expirou): o banco só aceita logado
+        if (/42501|row-level security/i.test(b)) return `Este computador está SEM LOGIN na nuvem (ou a sessão expirou). A chave está certa — o banco só aceita quem está logado. Entre em ⚙️ API → 🔐 Login (e-mail e senha da Agenda), uma vez. Detalhe técnico: HTTP ${status} ${b.slice(0, 120)}`;
         if (status === 401 || status === 403) return `HTTP ${status}: chave (anon/publishable) inválida, incompleta ou de outro projeto. Copie de novo em Supabase > Project Settings > API Keys. Detalhe: ${b}`;
         if (status === 404) return `HTTP 404: endereço errado. A Project URL deve ser só "https://xxxx.supabase.co" (sem /rest/v1). Detalhe: ${b}`;
         if (status === 409) return `HTTP 409: conflito de registro duplicado. Detalhe: ${b}`;
