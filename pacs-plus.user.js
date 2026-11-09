@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.43.2
+// @version      1.43.3
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1834,6 +1834,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // =====================================================================
     const CHEG_ESTADO_KEY = 'pp_cheg_estado_v1', CHEG_LIDER_KEY = 'pp_cheg_lider_v1', CHEG_HIST_KEY = 'pp_cheg_hist_v1';
     const CHEG_POLL_MS = 60000, CHEG_TICK_MS = 20000, CHEG_LIDER_TTL = 150000, CHEG_TOLERANCIA_MS = 5 * 60000;
+    // v1.43.3 — sem ficha até o fim da janela: continua vigiando (a cada 2 min) por mais 2 h e avisa a 1ª ficha que entrar
+    const CHEG_ESTENDE_MS = 120 * 60000, CHEG_POLL_TARDE_MS = 120000;
     const CHEG_TAB = Math.random().toString(36).slice(2, 10);
     const AGENDA_DB_KEY = 'agenda_multidatas_master_db'; // agenda (outro script): só leitura, para "agendado HH:MM"
     const chegNtfyBase = () => String(cfg.cheg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
@@ -1873,7 +1875,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const d = new Date(agora);
         if (!chegDiaValido(d)) return null;
         const t = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
-        return chegJanelas().find(j => t >= j.ini && t < j.fim + CHEG_TOLERANCIA_MS / 60000) || null;
+        return chegJanelas().find(j => t >= j.ini && t < j.fim + CHEG_ESTENDE_MS / 60000) || null;
     }
     function inicioJanela(d, j) { const x = new Date(d); x.setHours(Math.floor(j.ini / 60), j.ini % 60, 0, 0); return x.getTime(); }
     function fimJanela(d, j) { const x = new Date(d); x.setHours(Math.floor(j.fim / 60), j.fim % 60, 0, 0); return x.getTime(); }
@@ -2041,26 +2043,28 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     // ---- processamento de uma leitura dentro da janela ----
     async function chegProcessar(rows, e, j, agora) {
         const per = e.periodos[j.periodo] = e.periodos[j.periodo] || { estado: 'vigiando' };
-        if (per.estado !== 'vigiando') return;
+        if (per.estado !== 'vigiando' && per.estado !== 'nenhum') return;
         const p = chegPrimeiro(rows, j.periodo);
         const sid = `pc-${e.dia.replace(/-/g, '')}-${j.periodo}`;
         if (p) {
             const m = chegMsg(p, j.periodo, false);
+            if (per.estado === 'nenhum') m.titulo += ' (depois da janela)';
             Object.assign(per, { estado: 'chegou', ficha: p.ficha, avisadoEm: agora, resumo: m.msg, nome: p.nome });
             chegSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
             chegHistSalvar(e.dia, j.periodo, p.ficha);
             chegTela(m.titulo, m.tela, sid);
             if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, vibrar: true, tags: 'stethoscope' }));
-        } else if (agora >= fimJanela(new Date(agora), j)) {
+        } else if (per.estado === 'vigiando' && agora >= fimJanela(new Date(agora), j)) {
             Object.assign(per, { estado: 'nenhum', avisadoEm: agora });
             chegSalvar(e);
             chegHistSalvar(e.dia, j.periodo, '—');
             if (cfg.cheg.avisarNenhum) {
                 const t = `⌛ Nenhuma ficha de US até ${hm(agora)} (${NOME_PER[j.periodo]})`;
                 const ag = chegAgenda(j.periodo, null, '');
-                const msg = ag ? `Agenda: 1º horário ${ag.primeiro} · ${ag.total} paciente${ag.total > 1 ? 's' : ''}. O monitor desta janela encerrou.` : 'O monitor desta janela encerrou.';
+                const ate = hm(fimJanela(new Date(agora), j) + CHEG_ESTENDE_MS);
+                const msg = (ag ? `Agenda: 1º horário ${ag.primeiro} · ${ag.total} paciente${ag.total > 1 ? 's' : ''}. ` : '') + `Continuo vigiando até ${ate}: aviso quando a 1ª ficha entrar.`;
                 chegTela(t, msg, sid);
-                if (cfg.cheg.ntfyTopico) await chegNtfy({ sid, titulo: t, msg, prio: 3, tags: 'hourglass' });
+                if (cfg.cheg.ntfyTopico) await chegNtfy({ sid: sid + '-nenhum', titulo: t, msg, prio: 3, vibrar: true, tags: 'hourglass' });
             }
         }
         if (per.estado !== 'vigiando') await chegAgendarVigia(e, agora);
@@ -2081,8 +2085,11 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             e.vivo = agora;
             if (!j) { if (!e.vigiaPara || e.vigiaPara < agora) await chegAgendarVigia(e, agora); return; }
             const per = e.periodos[j.periodo];
-            if (per && per.estado !== 'vigiando') return;
-            if (agora - (e.ultTentativa || 0) < CHEG_POLL_MS - 5000 && agora < fimJanela(new Date(agora), j)) return;
+            if (per && per.estado !== 'vigiando' && per.estado !== 'nenhum') return;
+            const fim = fimJanela(new Date(agora), j), vig = !per || per.estado === 'vigiando';
+            const leituraFinal = vig && agora >= fim; // fim da janela: lê já e decide "nenhum"
+            const intervalo = agora >= fim ? CHEG_POLL_TARDE_MS : CHEG_POLL_MS;
+            if (!leituraFinal && agora - (e.ultTentativa || 0) < intervalo - 5000) return;
             e.ultTentativa = agora;
             try {
                 const rows = await chegLer(false);
