@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.44.0
+// @version      1.44.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -770,7 +770,10 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (key.startsWith('ORGAOS SUPERFICIAIS ')) return 'ORGAOS SUPERFICIAIS';
         if (/^APARELHO URINARIO(?: FEMININO| MASCULINO)? RINS URETERES (?:E )?BEXIGA$/.test(key)) return 'APARELHO URINARIO';
         if (/^ABDOM(?:E|EM) INFERIOR MASCULINO BEXIGA PROSTATA E VESICULAS SEMINAIS$/.test(key)) return 'ABDOME INFERIOR MASCULINO';
-        return original.replace(/\bTOMOGRAFIA(?:\s+COMPUTADORIZADA)?(?:\s+DE)?(?=\s|$)/i, 'TC').replace(/\bDOPPLER\s+COLORIDO\b/gi, 'DOPPLER').replace(/\s+/g, ' ').trim();
+        return original
+            .replace(/\bANGIO\s*-?\s*TOMOGRAFIA(?:\s+COMPUTADORIZADA)?(?:\s+(?:DE|DO|DA|DOS|DAS))?(?=\s|$)/gi, 'ANGIOTC') // v1.44.1
+            .replace(/\bCOLUNA\b/gi, 'COL.') // v1.44.1
+            .replace(/\bTOMOGRAFIA(?:\s+COMPUTADORIZADA)?(?:\s+DE)?(?=\s|$)/i, 'TC').replace(/\bDOPPLER\s+COLORIDO\b/gi, 'DOPPLER').replace(/\s+/g, ' ').trim();
     }
     function transformInsuranceText(value) {
         const original = String(value == null ? '' : value);
@@ -781,6 +784,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         };
         if (Object.prototype.hasOwnProperty.call(nomes, key)) return nomes[key];
         if (key === 'PREFEITURA MUNICIPAL') return 'PMRSRS';
+        if (key === 'PARTICULAR') return 'PART.'; // v1.44.1
+        if (key === 'SOCIAL') return 'SOC.';
         if (/^SERPRAM(?:\s|-|$)/.test(key)) return 'SERPRAM';
         return original.trim();
     }
@@ -814,7 +819,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
                     if (iC >= 0 && c[iC]) transformCell(c[iC], transformInsuranceText);
                 });
             }
-            document.querySelectorAll('#datatableExamesHistorico tbody td:first-child .v-list-item__title').forEach(el => transformCell(el, transformExamText));
+            document.querySelectorAll('#datatableExamesHistorico tbody td:first-child .v-list-item__title').forEach(el => transformCell(el, v => abreviarExame(transformExamText(v))));
         }
         if (on('historicoLinha')) {
             document.querySelectorAll('#datatableExamesHistorico tbody td:first-child .v-list-item__subtitle').forEach(el => transformCell(el, siglaModalidade));
@@ -4183,7 +4188,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             const lib = String(x.exa_situacao || '').toUpperCase() === 'LIBERADO', img = !!x.exa_idnexecutadopacs;
             const sit = String(x.exa_situacao || '').toUpperCase();
             return `<div class="hl-l${x.exa_codigo === exaAtual ? ' atual' : ''}" data-i="${i}">
-<span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc(abreviarExame((x.tipoexame && x.tipoexame.tpe_descricao) || '—'))}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
+<span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc(abreviarExame(transformExamText((x.tipoexame && x.tipoexame.tpe_descricao) || '—')))}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
 <span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
 <span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
 <span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
