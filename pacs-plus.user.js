@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.43.3
+// @version      1.44.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -125,7 +125,8 @@
         tela: true,                  // notificação do sistema neste computador (nome completo)
         avisarNenhum: true,          // avisa se a janela terminar sem ficha
         dias: '1,2,3,4,5',
-        janelas: '07:45-08:15\n12:45-13:15',
+        janelas: '07:00-09:00\n12:00-14:00', // v1.44: janelas largas (antes 07:45-08:15 / 12:45-13:15)
+        reserva: false,              // v1.44: computador reserva — só avisa se o principal não avisou em 2 min
         corteTarde: '12:00',         // ficha antes = manhã; a partir = tarde
         modalidades: 'US',
         ntfyServidor: 'https://ntfy.sh', ntfyTopico: '',
@@ -154,6 +155,7 @@
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
         c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
         c.cheg = Object.assign({}, CHEG_PADRAO, c.cheg || {});
+        if (String(c.cheg.janelas).replace(/\s+/g, ' ').trim() === '07:45-08:15 12:45-13:15') c.cheg.janelas = CHEG_PADRAO.janelas; // v1.44: migra o padrão antigo
         // v1.6.1: inclui o SLA eletivo do ultrassom em configurações já salvas (uma única vez)
         if (!c.slaMigUS) {
             const linhas = String(c.sla.slas || '').split('\n').map(l => l.trim().toUpperCase().replace(/\s+/g, ' ')).filter(Boolean);
@@ -1836,6 +1838,24 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     const CHEG_POLL_MS = 60000, CHEG_TICK_MS = 20000, CHEG_LIDER_TTL = 150000, CHEG_TOLERANCIA_MS = 5 * 60000;
     // v1.43.3 — sem ficha até o fim da janela: continua vigiando (a cada 2 min) por mais 2 h e avisa a 1ª ficha que entrar
     const CHEG_ESTENDE_MS = 120 * 60000, CHEG_POLL_TARDE_MS = 120000;
+    // v1.44 — dois computadores: o RESERVA espera 2 min e só avisa se o principal não avisou (confere no próprio ntfy)
+    const CHEG_RESERVA_MS = 120000;
+    function reservaEspera(per, tipo, agora) {
+        if (!cfg.cheg.reserva) return false;
+        const k = 'visto_' + tipo;
+        if (!per[k]) { per[k] = agora; return true; }
+        return agora - per[k] < CHEG_RESERVA_MS;
+    }
+    async function principalJaAvisou(j, tipo, agora) {
+        if (!cfg.cheg.reserva || !cfg.cheg.ntfyTopico) return false;
+        try {
+            const desde = Math.floor(inicioJanela(new Date(agora), j) / 1000) - 3600;
+            const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(cfg.cheg.ntfyTopico)}/json?poll=1&since=${desde}`);
+            if (!r.ok) return false;
+            const per = `(${NOME_PER[j.periodo]})`, pre = tipo === 'chegou' ? '🩺 1º paciente' : '⌛ Nenhuma ficha';
+            return (await r.text()).split('\n').some(l => { try { const m = JSON.parse(l); return m.event === 'message' && String(m.title || '').startsWith(pre) && String(m.title || '').includes(per); } catch (x) { return false; } });
+        } catch (e) { return false; }
+    }
     const CHEG_TAB = Math.random().toString(36).slice(2, 10);
     const AGENDA_DB_KEY = 'agenda_multidatas_master_db'; // agenda (outro script): só leitura, para "agendado HH:MM"
     const chegNtfyBase = () => String(cfg.cheg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
@@ -2025,7 +2045,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
 
     // ---- vigia: "monitor não iniciou" agendado no ntfy para a próxima janela ----
     async function chegAgendarVigia(e, apos) {
-        if (!cfg.cheg.ligado || !cfg.cheg.ntfyTopico) return;
+        if (!cfg.cheg.ligado || !cfg.cheg.ntfyTopico || cfg.cheg.reserva) return; // o reserva não agenda o "não iniciou" (é do principal)
         const prox = proximaJanela(apos || Date.now());
         if (!prox) return;
         const em = prox.em + 3 * 60000;
@@ -2047,18 +2067,27 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const p = chegPrimeiro(rows, j.periodo);
         const sid = `pc-${e.dia.replace(/-/g, '')}-${j.periodo}`;
         if (p) {
+            if (reservaEspera(per, 'chegou', agora)) return;
             const m = chegMsg(p, j.periodo, false);
             if (per.estado === 'nenhum') m.titulo += ' (depois da janela)';
+            if (await principalJaAvisou(j, 'chegou', agora)) {
+                Object.assign(per, { estado: 'chegou', ficha: p.ficha, avisadoEm: agora, resumo: m.msg, nome: p.nome, peloPrincipal: true });
+                chegSalvar(e); chegHistSalvar(e.dia, j.periodo, p.ficha);
+                await chegAgendarVigia(e, agora);
+                return;
+            }
             Object.assign(per, { estado: 'chegou', ficha: p.ficha, avisadoEm: agora, resumo: m.msg, nome: p.nome });
             chegSalvar(e); // marca antes de enviar (não repete se outra aba assumir)
             chegHistSalvar(e.dia, j.periodo, p.ficha);
             chegTela(m.titulo, m.tela, sid);
             if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, vibrar: true, tags: 'stethoscope' }));
         } else if (per.estado === 'vigiando' && agora >= fimJanela(new Date(agora), j)) {
+            if (reservaEspera(per, 'nenhum', agora)) return;
+            const jaAvisou = await principalJaAvisou(j, 'nenhum', agora);
             Object.assign(per, { estado: 'nenhum', avisadoEm: agora });
             chegSalvar(e);
             chegHistSalvar(e.dia, j.periodo, '—');
-            if (cfg.cheg.avisarNenhum) {
+            if (cfg.cheg.avisarNenhum && !jaAvisou) {
                 const t = `⌛ Nenhuma ficha de US até ${hm(agora)} (${NOME_PER[j.periodo]})`;
                 const ag = chegAgenda(j.periodo, null, '');
                 const ate = hm(fimJanela(new Date(agora), j) + CHEG_ESTENDE_MS);
@@ -2087,13 +2116,16 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             const per = e.periodos[j.periodo];
             if (per && per.estado !== 'vigiando' && per.estado !== 'nenhum') return;
             const fim = fimJanela(new Date(agora), j), vig = !per || per.estado === 'vigiando';
-            const leituraFinal = vig && agora >= fim; // fim da janela: lê já e decide "nenhum"
+            const leituraFinal = vig && agora >= fim && !(per && per.visto_nenhum); // fim da janela: lê já e decide "nenhum"
             const intervalo = agora >= fim ? CHEG_POLL_TARDE_MS : CHEG_POLL_MS;
             if (!leituraFinal && agora - (e.ultTentativa || 0) < intervalo - 5000) return;
             e.ultTentativa = agora;
             try {
                 const rows = await chegLer(false);
                 e.ultLeitura = Date.now(); e.erro = ''; e.sessaoAvisada = false;
+                // reserva lendo bem → apaga o "monitor não iniciou" pré-agendado pelo principal (o monitor está funcionando)
+                const kJ = e.dia + j.periodo;
+                if (cfg.cheg.reserva && e.reservaApagou !== kJ) { e.reservaApagou = kJ; await chegNtfyApagar('pc-inicio'); }
                 if (e.vigiaPara && Math.abs(e.vigiaPara - (inicioJanela(new Date(agora), j) + 3 * 60000)) < 60000) await chegCancelarVigia(e);
                 await chegProcessar(rows, e, j, Date.now());
             } catch (err) {
@@ -5592,7 +5624,8 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-res" style="margin-top:0;"><b>${estado}</b>
 <div class="pp-muted">Janelas: ${js.map(x => x.txt).join(' e ') || '<span class="pp-warn">nenhuma válida</span>'}${prox ? ' · próxima: ' + fmtD(chaveDia(new Date(prox.em))) + ' ' + hm(prox.em) : ''} · última leitura: ${e.ultLeitura ? hm(e.ultLeitura) : '—'}${c.ligado ? ' · ' + (vigiaAqui ? 'esta aba é a que vigia' : 'outra aba deste computador vigia') : ''}${e.erro ? ' · <span class="pp-warn">' + esc(e.erro) + '</span>' : ''}</div>
 ${linhaPer('manha')}${linhaPer('tarde')}</div>
-<label class="pp-tog"><input type="checkbox" id="pp-c-lig" ${c.ligado ? 'checked' : ''}><span>Vigiar a chegada do 1º paciente neste computador<small>Ligue em UM computador só (o de casa), que fica acordado com o PACS aberto.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-lig" ${c.ligado ? 'checked' : ''}><span>Vigiar a chegada do 1º paciente neste computador<small>Pode ligar em DOIS computadores: um principal e um reserva (marque abaixo), com o MESMO tópico do celular.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-res2" ${c.reserva ? 'checked' : ''}><span>Este computador é o RESERVA<small>Só avisa se o principal não avisou em 2 min (confere no ntfy) — sem aviso duplicado. Desmarcado = principal.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-tela" ${c.tela ? 'checked' : ''}><span>Notificação também neste computador<small>Aviso do sistema (Mac/Windows) com o nome completo — o celular recebe só as iniciais.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-nenhum" ${c.avisarNenhum ? 'checked' : ''}><span>Avisar quando a janela terminar sem nenhuma ficha</span></label>
 <div class="pp-h">Dias e janelas de vigilância</div>
@@ -5621,7 +5654,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
             const antes = Object.assign({}, cfg.cheg);
             const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
             const n = {
-                ligado: $('#pp-c-lig').checked, tela: $('#pp-c-tela').checked, avisarNenhum: $('#pp-c-nenhum').checked,
+                ligado: $('#pp-c-lig').checked, reserva: $('#pp-c-res2').checked, tela: $('#pp-c-tela').checked, avisarNenhum: $('#pp-c-nenhum').checked,
                 dias: [...body.querySelectorAll('[data-cdia]')].filter(x => x.checked).map(x => x.dataset.cdia).join(','),
                 janelas: $('#pp-c-jan').value.trim() || CHEG_PADRAO.janelas,
                 corteTarde: hora($('#pp-c-corte').value, CHEG_PADRAO.corteTarde),
