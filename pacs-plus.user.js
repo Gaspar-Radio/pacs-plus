@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.44.1
+// @version      1.44.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -756,20 +756,35 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
 
     // ---- Abreviação de textos (antigo “AM2 - Otimizar textos e colunas” v2.3.3) ----
     const normU = v => String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
-    function transformExamText(value) {
+    // v1.44.2 — abreviações curtas (sempre no masculino): Dop., Ven., Art., MI, MS, Uni., Inf., Sup., Tot.
+    function abreviarCurto(t) {
+        return String(t)
+            .replace(/\b(?:(?:DE|DO|DOS|DA|DAS)\s+)?MEMBROS?\s+INFERIOR(?:ES)?\b/gi, 'MI')
+            .replace(/\b(?:(?:DE|DO|DOS|DA|DAS)\s+)?MEMBROS?\s+SUPERIOR(?:ES)?\b/gi, 'MS')
+            .replace(/\bDOPPLER\b/gi, 'DOP.')
+            .replace(/\bVENOS[OA]S?\b/gi, 'VEN.')
+            .replace(/\bARTERIA(?:L|IS)\b/gi, 'ART.')
+            .replace(/\bUNILATERA(?:L|IS)\b/gi, 'UNI.')
+            .replace(/\bINFERIOR(?:ES)?\b/gi, 'INF.')
+            .replace(/\bSUPERIOR(?:ES)?\b/gi, 'SUP.')
+            .replace(/\bTOTA(?:L|IS)\b/gi, 'TOT.')
+            .replace(/\s+/g, ' ').trim();
+    }
+    function transformExamText(value) { return abreviarCurto(transformExamBase(value)); }
+    function transformExamBase(value) {
         const original = String(value == null ? '' : value);
         const key = normU(original.replace(/&#(?:x20|32);/gi, ' '));
         if (/^DOPPLER(?: COLORIDO)? DE VASOS CERVICAIS ARTERIAIS BILATERAL CAROTIDAS? E VERTEBRAIS$/.test(key)) return 'DOPPLER CAROTIDA E VERTEBRAIS';
         if (key === 'DOPPLER ARTERIAL DE MEMBRO INFERIOR UNILATERAL') return 'DOPPLER ARTERIAL MI';
         if (key === 'ABDOME SUPERIOR FIGADO VIAS BILIARES VESICULA PANCREAS BACO') return 'ABDOME SUPERIOR';
         if (key === 'DOPPLER VENOSO DE MEMBRO INFERIOR UNILATERAL') return 'DOPPLER VENOSO MI';
-        if (/^ABDOM(?:E|EM) INFERIOR FEMININO BEXIGA UTERO OVARIO E ANEXOS$/.test(key)) return 'ABDOME INFERIOR FEMININO';
+        if (/^ABDOM(?:E|EM|EN) INFERIOR FEMININO BEXIGA UTERO OVARIO E ANEXOS$/.test(key)) return 'ABDOME INFERIOR FEMININO';
         if (key === 'ARTICULAR POR ARTICULACAO') return 'ARTICULAR';
         if (key === 'TRANSVAGINAL INCLUI ABDOME INFERIOR FEMININO') return 'TRANSVAGINAL';
         if (key.startsWith('ESTRUTURAS SUPERFICIAIS ')) return 'ESTRUTURAS SUPERFICIAIS';
         if (key.startsWith('ORGAOS SUPERFICIAIS ')) return 'ORGAOS SUPERFICIAIS';
         if (/^APARELHO URINARIO(?: FEMININO| MASCULINO)? RINS URETERES (?:E )?BEXIGA$/.test(key)) return 'APARELHO URINARIO';
-        if (/^ABDOM(?:E|EM) INFERIOR MASCULINO BEXIGA PROSTATA E VESICULAS SEMINAIS$/.test(key)) return 'ABDOME INFERIOR MASCULINO';
+        if (/^ABDOM(?:E|EM|EN) INFERIOR MASCULINO BEXIGA PROSTATA E VESICULAS SEMINAIS$/.test(key)) return 'ABDOME INFERIOR MASCULINO';
         return original
             .replace(/\bANGIO\s*-?\s*TOMOGRAFIA(?:\s+COMPUTADORIZADA)?(?:\s+(?:DE|DO|DA|DOS|DAS))?(?=\s|$)/gi, 'ANGIOTC') // v1.44.1
             .replace(/\bCOLUNA\b/gi, 'COL.') // v1.44.1
