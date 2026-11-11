@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.8.2
+// @version      9.9.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -652,6 +652,8 @@
             removido_origem_em: item.removidoOrigemEm || item.removido_origem_em || null,
             // v8.7.2 — nome como veio da planilha/PDF quando a linha passou a usar o nome do PACS
             nome_origem: item.nomeOrigem || item.nome_origem || null,
+            // v9.9 — exame como veio da origem ("NÃO INFORMADO") quando a linha passou a usar o exame lançado no PACS
+            exame_origem: item.exameOrigem || item.exame_origem || null,
             // v9.3 — urgência (null = não classificado; o banco aplica a regra do SUS e não deixa null apagar o que já foi marcado)
             urgente: item.urgente == null ? null : !!item.urgente,
             urgente_fonte: item.urgente == null ? null : (item.urgenteFonte || null),
@@ -778,6 +780,7 @@
             obs: r.obs || null,
             removidoOrigemEm: r.removido_origem_em || null,
             nomeOrigem: r.nome_origem || null,
+            exameOrigem: r.exame_origem || null,
             urgente: r.urgente == null ? null : !!r.urgente,
             urgenteFonte: r.urgente_fonte || null,
             setor: r.setor || null,
@@ -969,8 +972,10 @@
 
     function persistPacsDecisions() {
         // guarda só as decisões dos últimos dias
-        const hoje = getTodayIso();
-        Object.keys(pacsDecisions).forEach(k => { if (k.slice(0, 10) < hoje) delete pacsDecisions[k]; });
+        // v9.9 — 8 dias: o fechamento automático dos dias anteriores respeita as decisões tomadas
+        const lim = new Date(); lim.setDate(lim.getDate() - 8);
+        const corte = `${lim.getFullYear()}-${String(lim.getMonth() + 1).padStart(2, '0')}-${String(lim.getDate()).padStart(2, '0')}`;
+        Object.keys(pacsDecisions).forEach(k => { if (k.slice(0, 10) < corte) delete pacsDecisions[k]; });
         localStorage.setItem(PACS_DECISIONS_KEY, JSON.stringify(pacsDecisions));
     }
 
@@ -1114,6 +1119,13 @@
         }
         r.pacsPacienteId = g.pacId;
         r.pacsExameIds = examIds && examIds.length ? examIds : null;
+        // v9.9 — agenda sem exame ("NÃO INFORMADO"): usa o que foi lançado no PACS (como no encaixe).
+        // O texto da origem fica em exameOrigem (casa reimportações); acompanha o PACS enquanto vier dele.
+        const veioDoPacs = r.exameOrigem && exameVazio(r.exameOrigem) && normText(r.exame).split(/\s*\+\s*/).every(p => g.examDescs.includes(p)); // editado à mão: não mexe
+        if (r.pacsExameIds && (exameVazio(r.exame) || veioDoPacs)) {
+            const descs = [...new Set(r.pacsExameIds.map(id => g.examDescs[g.examIds.indexOf(Number(id))]).filter(Boolean))];
+            if (descs.length) { if (!r.exameOrigem) r.exameOrigem = normText(r.exame) || 'NÃO INFORMADO'; r.exame = descs.join(' + '); }
+        }
         r.pacsAtendimento = g.atendimento;
         r.pacsQtdExames = r.pacsExameIds ? r.pacsExameIds.length : null;
         if (g.fichaEm) { r.chegouEm = g.fichaEm; r.chegadaFonte = 'pacs'; }
@@ -1137,7 +1149,8 @@
         return r;
     }
 
-    const PACS_FIELDS = ['paciente', 'nomeOrigem', 'status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem', 'urgente', 'urgenteFonte', 'setor'];
+    const exameVazio = s => { const t = normText(s); return !t || /N[AÃ]O INFORMADO/.test(t); };
+    const PACS_FIELDS = ['paciente', 'nomeOrigem', 'exame', 'exameOrigem', 'status', 'chegouEm', 'atendidoEm', 'tempoEsperaMin', 'pacsPacienteId', 'pacsExameIds', 'pacsAtendimento', 'pacsQtdExames', 'chegadaFonte', 'imagemEm', 'atendidoFonte', 'origem', 'urgente', 'urgenteFonte', 'setor'];
     function rowChanged(a, b) {
         return PACS_FIELDS.some(f => JSON.stringify(a[f] == null ? null : a[f]) !== JSON.stringify(b[f] == null ? null : b[f]));
     }
@@ -1156,17 +1169,30 @@
         return applyPacsToRow(base, g, g.examIds);
     }
 
-    // Distribui os exames do PACS entre as linhas da agenda do mesmo paciente
+    // Distribui os exames do PACS entre as linhas da agenda do mesmo paciente.
+    // v9.9 — pelo TIPO do exame (abdome, tireoide, pelve, mama…) quando a agenda informa; o que sobrar vai na ordem.
+    function distribuirExames(g, rows) {
+        const ids = rows.map(() => []);
+        if (rows.length === 1) { ids[0] = [...g.examIds]; return ids; }
+        const exs = g.examIds.map((id, k) => ({ id, fam: histFamilias(g.examDescs[k] || '') }));
+        const usado = new Set();
+        rows.forEach((r, i) => {
+            if (exameVazio(r.exame)) return;
+            normText(r.exame).split(/\s*\+\s*/).filter(Boolean).forEach(parte => {
+                const f = histFamilias(parte); if (!f.size) return;
+                const e = exs.find(x => !usado.has(x.id) && histCompat(f, x.fam));
+                if (e) { usado.add(e.id); ids[i].push(e.id); }
+            });
+        });
+        const resto = exs.filter(x => !usado.has(x.id)).map(x => x.id);
+        rows.forEach((r, i) => { if (!ids[i].length && resto.length) ids[i].push(resto.shift()); });
+        if (resto.length) ids[rows.length - 1].push(...resto); // a última linha recebe o restante (ex.: 2 punhos numa linha só)
+        return ids.map(a => a.sort((x, y) => x - y));
+    }
     function linkGroupToRows(g, rows) {
         rows = [...rows].sort((a, b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
-        const out = [];
-        rows.forEach((row, i) => {
-            let ids;
-            if (i < rows.length - 1) ids = g.examIds[i] != null ? [g.examIds[i]] : [];
-            else ids = g.examIds.slice(i); // a última linha recebe o restante (ex.: 2 punhos numa linha só)
-            out.push(applyPacsToRow(row, g, ids));
-        });
-        return out;
+        const ids = distribuirExames(g, rows);
+        return rows.map((row, i) => applyPacsToRow(row, g, ids[i]));
     }
 
     async function syncPacsToday(manual = false) {
@@ -1265,6 +1291,7 @@
                 persistDb();
             }
 
+            try { fecharHoje(grupos); } catch (e) { console.error('[Agenda fechamento]', e); } // v9.9
             pacsState.pendentes = pendentes;
             pacsState.grupos = grupos.length;
             pacsState.exames = exams.length;
@@ -1308,15 +1335,152 @@
         pacsDecisions[`${selectedDate}|fusao|${pacId}`] = { tipo: 'nao' }; // não mescla de novo sozinho
         persistPacsDecisions();
         // volta o nome como estava na origem (planilha/PDF), se ele tinha sido trocado pelo do PACS
-        if (row.nomeOrigem && row.origem !== 'encaixe_pacs') enqueueDelete(row, selectedDate);
+        if ((row.nomeOrigem && row.origem !== 'encaixe_pacs') || row.exameOrigem) enqueueDelete(row, selectedDate);
         updateItem(id, i => ({
             ...i, pacsPacienteId: -pacId, pacsExameIds: null, pacsAtendimento: null, pacsQtdExames: null,
             paciente: (i.nomeOrigem && i.origem !== 'encaixe_pacs') ? i.nomeOrigem : i.paciente,
+            exame: i.exameOrigem || i.exame, exameOrigem: null,
             nomeOrigem: i.origem !== 'encaixe_pacs' ? null : i.nomeOrigem,
             status: i.origem === 'encaixe_pacs' ? i.status : 'pendente',
             chegouEm: null, chegadaFonte: null, imagemEm: null, atendidoEm: null, atendidoFonte: null, tempoEsperaMin: null
         }));
         syncPacsToday();
+    }
+
+    // =====================================================================
+    // 7B2. FECHAMENTO DO DIA (v9.9.0) — falta automática
+    // ---------------------------------------------------------------------
+    // Regra do Dr. Gabriel (11/11/2026): ao fim do dia, quem estava na agenda e não tem ficha no PACS = FALTA.
+    //   • só linhas "pendente" (sem chegada), da agenda (não encaixe), que não saíram da origem;
+    //   • nome parecido com alguém do PACS sem par (≥ PACS_LINK_ASK) → NÃO marca: fica em "conferir";
+    //   • período (manhã/tarde) sem NENHUM exame de US no PACS = sem expediente → não marca nada;
+    //   • hoje: a partir das 19:00 (fim da tarde); dias anteriores (até 7): ao abrir o PACS e a cada 6 h;
+    //   • dias anteriores também recebem o vínculo automático (nome ≥ PACS_LINK_AUTO, sem ambiguidade);
+    //   • a falta automática leva uma anotação; se a ficha aparecer depois, o PACS desfaz (volta a "em espera").
+    // =====================================================================
+    const FECHAR_HOJE_MIN = 19 * 60, FECHAR_DIAS = 7, FECHAMENTO_KEY = 'agenda_fechamento_v99';
+    let fechamentoInfo = safeJsonParse(localStorage.getItem(FECHAMENTO_KEY), {});
+    function persistFechamento() {
+        const lim = new Date(); lim.setDate(lim.getDate() - 14);
+        const corte = `${lim.getFullYear()}-${String(lim.getMonth() + 1).padStart(2, '0')}-${String(lim.getDate()).padStart(2, '0')}`;
+        Object.keys(fechamentoInfo).forEach(d => { if (d < corte) delete fechamentoInfo[d]; });
+        try { localStorage.setItem(FECHAMENTO_KEY, JSON.stringify(fechamentoInfo)); } catch (e) { /* cheio: só não guarda o resumo */ }
+    }
+
+    // Cálculo puro (testável): rows = linhas do dia; grupos = groupPacsExams(exames do dia no PACS)
+    function fecharDiaCalc(dateStr, rows, grupos, { vincular = false, decisoes = {}, agoraIso = new Date().toISOString() } = {}) {
+        const res = { updates: [], faltas: [], conferir: [], semExpediente: 0, encaixesSemPar: 0, semPacs: !grupos.length };
+        if (!grupos.length) return res; // nenhum US no PACS no dia: sem expediente (ou PACS fora) → não decide nada
+        const hm = x => normalizeTime(String(x || '').slice(0, 5));
+        const periodosPacs = new Set(grupos.flatMap(g => g.exames.map(x => periodoFromHora(hm(x.exa_hora)))));
+        const vinculados = new Set(rows.filter(r => r.pacsPacienteId > 0 && !ehEncaixe(r)).map(r => r.pacsPacienteId));
+        const encaixeDe = new Map(rows.filter(r => ehEncaixe(r) && r.pacsPacienteId > 0).map(r => [r.pacsPacienteId, r]));
+        const livres = grupos.filter(g => !vinculados.has(g.pacId) && !(decisoes[`${dateStr}|${g.pacId}`] && decisoes[`${dateStr}|${g.pacId}`].tipo === 'encaixe'));
+        const cand = rows.filter(r => (r.status === 'pendente' || !r.status) && !ehEncaixe(r) && !r.removidoOrigemEm && !(r.pacsPacienteId > 0));
+        const porNome = new Map();
+        cand.forEach(r => { const k = normName(r.paciente); if (!porNome.has(k)) porNome.set(k, []); porNome.get(k).push(r); });
+        const usados = new Set();
+        porNome.forEach(lin => {
+            const r0 = lin[0], negados = new Set(lin.filter(r => r.pacsPacienteId < 0).map(r => -r.pacsPacienteId));
+            let best = null, bs = 0, sec = 0;
+            livres.forEach(g => {
+                if (usados.has(g.pacId) || negados.has(g.pacId)) return;
+                const sc = Math.max(nameScore(r0.paciente, g.nome), r0.nomeOrigem ? nameScore(r0.nomeOrigem, g.nome) : 0);
+                if (sc > bs) { sec = bs; bs = sc; best = g; } else if (sc > sec) sec = sc;
+            });
+            const ambiguo = bs < 1 && sec >= PACS_LINK_ASK;
+            if (best && vincular && bs >= PACS_LINK_AUTO && !ambiguo && !encaixeDe.has(best.pacId)) {
+                usados.add(best.pacId);
+                linkGroupToRows(best, lin).forEach(neu => { const old = lin.find(r => String(r.id) === String(neu.id)); res.updates.push({ old, neu }); });
+                return;
+            }
+            if (best && bs >= PACS_LINK_ASK) {
+                lin.forEach(r => res.conferir.push({ hora: normalizeTime(r.hora), paciente: r.paciente, pacs: best.nome, ficha: best.horaFicha, score: bs,
+                    motivo: encaixeDe.has(best.pacId) ? 'há um encaixe do PACS com nome parecido' : 'nome parecido no PACS' }));
+                return;
+            }
+            lin.forEach(r => {
+                if (!periodosPacs.has(periodoFromHora(normalizeTime(r.hora)))) { res.semExpediente++; return; }
+                const neu = { ...r, status: 'faltou', chegouEm: null, chegadaFonte: null, atendidoEm: null, atendidoFonte: null, tempoEsperaMin: null,
+                    notas: [...notasDe(r), { em: agoraIso, tag: 'Outra', txt: '🤖 Falta automática (fechamento do dia): sem ficha no PACS', por: 'Fechamento' }] };
+                res.updates.push({ old: r, neu }); res.faltas.push({ hora: normalizeTime(r.hora), paciente: r.paciente });
+            });
+        });
+        // chegou (clique) mas sem ficha no PACS: não decide, só avisa
+        rows.filter(r => r.status === 'esperando' && !(r.pacsPacienteId > 0) && !ehEncaixe(r))
+            .forEach(r => res.conferir.push({ hora: normalizeTime(r.hora), paciente: r.paciente, motivo: 'marcado como chegou, mas sem ficha no PACS' }));
+        res.encaixesSemPar = [...encaixeDe.keys()].filter(id => !usados.has(id)).length;
+        return res;
+    }
+
+    function aplicarFechamento(dateStr, res) {
+        if (!res.updates.length) return;
+        const lista = agendaDatabase[dateStr];
+        res.updates.forEach(({ old, neu }) => {
+            if (naturalKey(old) !== naturalKey(neu)) enqueueDelete(old, dateStr);
+            enqueueUpsert(neu, dateStr);
+        });
+        if (Array.isArray(lista)) {
+            const m = new Map(res.updates.map(u => [String(u.old.id), u.neu]));
+            agendaDatabase[dateStr] = sortPatientsList(lista.map(r => m.get(String(r.id)) || r));
+            persistDb();
+        }
+    }
+
+    function registrarFechamento(dateStr, res) {
+        const ant = fechamentoInfo[dateStr] || { faltas: [] };
+        const faltas = [...ant.faltas, ...res.faltas].filter((f, i, a) => a.findIndex(x => x.hora === f.hora && x.paciente === f.paciente) === i);
+        fechamentoInfo[dateStr] = { em: new Date().toISOString(), faltas, conferir: res.conferir, semExpediente: res.semExpediente, encaixesSemPar: res.encaixesSemPar };
+        persistFechamento();
+    }
+
+    // hoje, depois das 19:00 — chamado no fim de cada leitura do PACS
+    function fecharHoje(grupos) {
+        const hoje = getTodayIso(), now = new Date();
+        if (now.getHours() * 60 + now.getMinutes() < FECHAR_HOJE_MIN) return;
+        const res = fecharDiaCalc(hoje, agendaDatabase[hoje] || [], grupos, { decisoes: pacsDecisions });
+        aplicarFechamento(hoje, res);
+        if (!res.semPacs) registrarFechamento(hoje, res);
+    }
+
+    async function fetchPacsExamsDia(dateStr) {
+        const tok = pacsToken(), rows = [];
+        if (!tok) throw new Error('PACS sem login nesta aba.');
+        for (let off = 0; off < 3000; off += 300) {
+            const q = new URLSearchParams({ offset: off, limit: 300, tela: 'EXAMES', pac_nome: '', pac_pacs_codigo: '', data_codigo: 1, data_inicial: dateStr, data_final: dateStr, exa_idnsomenteassinador: false, exa_dataparam: '$exame.exa_data$' });
+            q.append('mod_codigo[]', PACS_MOD_US);
+            const r = await fetch(`${location.origin}/backend/api/exame?${q}`, { headers: { 'x-access-token': tok } });
+            if (r.status === 401 || r.status === 403) throw new Error('sessão do PACS expirada');
+            if (!r.ok) throw new Error('PACS HTTP ' + r.status);
+            const j = await r.json(), lote = Array.isArray(j) ? j : (j.rows || []);
+            rows.push(...lote);
+            if (lote.length < 300) break;
+        }
+        return rows.filter(x => x && x.paciente && x.exa_data === dateStr && x.exa_situacao !== 'CANCELADO');
+    }
+
+    // dias anteriores (até FECHAR_DIAS) com alguém ainda "pendente"
+    let fechandoAnteriores = false;
+    async function fecharDiasAnteriores() {
+        if (fechandoAnteriores || !pacsToken() || !getSupabaseConfig()) return;
+        fechandoAnteriores = true;
+        try {
+            const hoje = getTodayIso(), d0 = new Date(); d0.setDate(d0.getDate() - FECHAR_DIAS);
+            const ini = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`;
+            const pend = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lt.${hoje}&status=eq.pendente&select=data_agenda&limit=2000`, 'GET');
+            const datas = [...new Set((Array.isArray(pend) ? pend : []).map(r => r.data_agenda))].sort();
+            for (const d of datas) {
+                const [exames, linhas] = await Promise.all([fetchPacsExamsDia(d), requestSupabase(`${TABLE}?data_agenda=eq.${d}&select=*&order=hora.asc`, 'GET')]);
+                const rows = (Array.isArray(linhas) ? linhas : []).map(mapCloudRow);
+                const res = fecharDiaCalc(d, rows, groupPacsExams(exames), { vincular: true, decisoes: pacsDecisions });
+                if (!agendaDatabase[d]) agendaDatabase[d] = rows; // para aplicar e manter o cache coerente
+                aplicarFechamento(d, res);
+                if (!res.semPacs) registrarFechamento(d, res);
+            }
+            if (datas.includes(selectedDate)) renderAgenda();
+        } catch (e) {
+            console.error('[Agenda fechamento]', e);
+        } finally { fechandoAnteriores = false; }
     }
 
     // =====================================================================
@@ -1523,9 +1687,18 @@
         const box = document.getElementById('pacsPendBox');
         if (!box) return;
         const pend = selectedDate === getTodayIso() ? pacsState.pendentes : [];
-        if (!pend.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+        // v9.9 — resumo do fechamento automático do dia (faltas marcadas e o que ficou para conferir)
+        const fc = fechamentoInfo[selectedDate];
+        const fcHtml = fc && (fc.faltas.length || fc.conferir.length || fc.semExpediente || fc.encaixesSemPar) ? `
+            <div style="${pend.length ? 'margin-top:6px; padding-top:5px; border-top:1px solid #f59e0b;' : ''}">
+                <b>🔒 Fechamento do dia</b> (${new Date(fc.em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}):
+                ${fc.faltas.length} falta(s) automática(s)${fc.semExpediente ? ` · ${fc.semExpediente} sem marcar (período sem nenhum exame no PACS)` : ''}${fc.encaixesSemPar ? ` · ${fc.encaixesSemPar} encaixe(s) do PACS sem par na agenda` : ''}
+                ${fc.faltas.length ? `<div style="opacity:.85;">Faltas: ${fc.faltas.map(f => `${escapeHtml(f.hora)} ${escapeHtml(f.paciente)}`).join(' · ')}</div>` : ''}
+                ${fc.conferir.length ? `<div><b>Conferir:</b> ${fc.conferir.map(c => `${escapeHtml(c.hora)} <b>${escapeHtml(c.paciente)}</b> — ${escapeHtml(c.motivo)}${c.pacs ? ` (PACS: ${escapeHtml(c.pacs)}${c.ficha ? ', ficha ' + escapeHtml(c.ficha) : ''})` : ''}`).join(' · ')}</div>` : ''}
+            </div>` : '';
+        if (!pend.length && !fcHtml) { box.style.display = 'none'; box.innerHTML = ''; return; }
         box.style.display = 'block';
-        box.innerHTML = `<div style="font-weight:700; margin-bottom:4px;">🔗 Confirmar vínculo com o PACS (nome parecido, não idêntico)</div>` +
+        box.innerHTML = (pend.length ? `<div style="font-weight:700; margin-bottom:4px;">🔗 Confirmar vínculo com o PACS (nome parecido, não idêntico)</div>` : '') +
             pend.map(p => `
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; padding:3px 0; border-top:1px dashed #fcd34d;">
                     <span>PACS <b>${escapeHtml(p.nomePacs)}</b> (ficha ${escapeHtml(p.ficha)} · ${escapeHtml(p.exames.join(' + '))})
@@ -1534,7 +1707,7 @@
                         <button class="btn-act btn-atend" data-pacs="vincular" data-pacid="${escapeHtml(p.pacId)}">É a mesma pessoa</button>
                         <button class="btn-act btn-chegou" data-pacs="encaixe" data-pacid="${escapeHtml(p.pacId)}">É encaixe</button>
                     </span>
-                </div>`).join('');
+                </div>`).join('') + fcHtml;
     }
 
     // =====================================================================
@@ -1799,9 +1972,10 @@
 
     async function sincronizarOrigem(origem, ini, fim, novosBrutos, { cancelarAusentes = false, sinalizarAusentes = true, datas = null } = {}) {
         const novos = agruparPorHorario(novosBrutos);
-        const exist = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&select=id,data_agenda,hora,paciente,nome_origem,exame,status,origem,removido_origem_em,obs,qtd_exames&limit=10000`, 'GET');
+        const exist = await requestSupabase(`${TABLE}?data_agenda=gte.${ini}&data_agenda=lte.${fim}&select=id,data_agenda,hora,paciente,nome_origem,exame,exame_origem,status,origem,removido_origem_em,obs,qtd_exames&limit=10000`, 'GET');
         // v8.7.2 — linha renomeada para o nome do PACS casa pelo nome original da origem
-        const lista = (Array.isArray(exist) ? exist : []).map(r => r.nome_origem ? { ...r, paciente: r.nome_origem } : r);
+        // v9.9 — idem para o exame preenchido pelo PACS (origem "NÃO INFORMADO")
+        const lista = (Array.isArray(exist) ? exist : []).map(r => ({ ...r, paciente: r.nome_origem || r.paciente, exame: r.exame_origem || r.exame }));
         const mapa = new Map(lista.map(r => [chaveLinha(r), r]));
         const slotsOutra = new Set(lista.filter(r => r.origem !== origem).map(chaveSlot));
         const novosK = new Set(novos.map(chaveLinha));
@@ -2708,6 +2882,7 @@
         if (field === 'exame') updated.qtdExames = Math.max(1, v.split(/\s*\+\s*/).filter(Boolean).length);
         // nome corrigido à mão numa linha importada: guarda o original p/ a próxima importação casar
         if (field === 'paciente' && !ehEncaixe(old) && !old.nomeOrigem) updated.nomeOrigem = old.paciente;
+        if (field === 'exame' && !ehEncaixe(old) && !old.exameOrigem) updated.exameOrigem = old.exame; // v9.9 — idem para o exame
         // hora/paciente/exame fazem parte da chave única: apaga o registro antigo na nuvem antes de gravar o novo
         if (['hora', 'paciente', 'exame'].includes(field)) enqueueDelete(old, selectedDate);
         enqueueUpsert(updated, selectedDate);
@@ -4019,7 +4194,7 @@
         if (/MAMA/.test(t)) f.add('mama');
         if (/PELV|TRANSVAG|ENDOVAG|USTV| TV |UTER|OVARI/.test(t)) f.add('pelve');
         if (/OBSTET|GESTA|MORFOL/.test(t)) f.add('obstetrica');
-        if (/ARTIC|ARTC|OMBRO|JOELH|PUNHO|COTOVEL|TORNOZ|QUADRIL| MAO | PE |TEND|MUSC|PARTES MOLES/.test(t)) f.add('msk');
+        if (/ARTIC|ARTC|OMBRO|JOELH|PUNHO|COTOVEL|TORNOZ|QUADRIL| MAO | PE |TEND|MUSC|PARTES MOLES|ESTRUTURA|SUPERFIC/.test(t)) f.add('msk');
         if (/BOLSA|TESTIC|ESCROT/.test(t)) f.add('bolsa');
         return f;
     }
@@ -5066,6 +5241,9 @@ Responda APENAS com JSON, sem texto fora dele:
     // Leitura automática do PACS (chegada / imagens / encaixes) a cada 60 s, só com o PACS logado
     setInterval(() => { if (pacsToken()) syncPacsToday(); }, PACS_SYNC_MS);
     setTimeout(() => { if (pacsToken()) syncPacsToday(); }, 4000);
+    // v9.9 — fechamento automático dos dias anteriores (falta de quem não tem ficha no PACS)
+    setTimeout(fecharDiasAnteriores, 25000);
+    setInterval(fecharDiasAnteriores, 6 * 3600000);
 
     // v9.6 — 💰 Financeiro / 📈 Produção sempre atualizados: com o PACS logado (aba principal) e login na nuvem,
     // relê do PACS o mês corrente quando a última leitura (de qualquer computador) passou de 30 min, e o mês
