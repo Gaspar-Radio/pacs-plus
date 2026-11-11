@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.44.2
+// @version      1.45.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -384,7 +384,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -2808,7 +2808,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     const BLOQ_REF = /cist|n[óo]dul|c[áa]lcul|les[ãa]o|imagem|forma[çc][ãa]o|massa|cole[çc][ãa]o|par[êe]nquima|cortical|cortex|c[óo]rtex|pelve|pielo|espessura|parede|ectasi|dilata|abscess|linfonod|hemangiom|calcifica|fluxo|velocidade|[íi]ndice/i;
     const ehEx = (c, re) => re.test(norm(c.exame));
     const REFS_SERVICO = [
-        { nome: 'Rim', org: '\\brim (?:direito|esquerdo)\\b', tipo: 'lin', pega: 'max', un: 'cm', min: 9, max: 13, ref: '9–13 cm', gap: 220,
+        { nome: 'Rim', org: '\\brim (?:direito|esquerdo)\\b', tipo: 'lin', pega: 'max', un: 'cm', min: 9, max: 13, ref: '9–13 cm', gap: 220, adulto: true, // v1.45: criança tem rim menor (8 ignorados)
           alt: /aumentad|reduzid|nefromegalia|atr[óo]fic|redu[çc][ãa]o (?:volum|dimens)|dimens[õo]es (?:aumentadas|reduzidas)|assim[ée]tric|pequeno|transplant|rim [úu]nico|vic[áa]ri|hipertrofia compensat/i },
         { nome: 'Baço', org: '\\bba[çc]o\\b', tipo: 'lin', pega: 'max', un: 'cm', max: 12, ref: 'até 12 cm (longitudinal)', gap: 160, alt: /esplenomegalia|aumentad|limite superior/i },
         { nome: 'Lobo hepático direito', org: '\\blobo (?:hep[áa]tico )?direito\\b', tipo: 'lin', pega: 'first', un: 'cm', max: 15, ref: '≤ 15 cm', ex: /abdom|figado|hepat|superior/, nex: /tireo|tiroi|pulm|torax/, alt: /hepatomegalia|aumentad|limite superior/i },
@@ -2912,11 +2912,12 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const buscaNaoNegada = (txt, re) => { const g = new RegExp(re.source, 'g'); let m; while ((m = g.exec(txt))) { if (!negado(txt, m.index)) return m.index; } return -1; };
         // contraste
         if (/sem contraste/.test(ex)) { const i = buscaNaoNegada(tl, /apos (a )?(injecao|administracao)|contraste (iodado )?(endovenoso|intravenoso)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|realce (pelo|ao|apos o) (meio de )?contraste/); if (i >= 0) add('exame_texto', 'grave', i, 'Exame SEM contraste, mas o texto descreve uso de contraste/fases.', 'Conferir técnica e matriz.'); }
-        if (/com contraste/.test(ex)) { const i = tl.search(/sem (a )?(injecao|uso|administracao) (de|do) (meio de )?contraste|\bsem contraste\b/); if (i >= 0) add('exame_texto', 'atencao', i, 'Exame COM contraste, mas o texto diz “sem contraste”.', 'Conferir técnica.'); }
+        if (/com contraste/.test(ex) && !/sem e com|s\/?\s*e\s*c\//.test(ex) && tl.search(/apos (a )?(injecao|administracao)|fases? (arterial|portal|venosa|tardia|de equilibrio|excretora)|meio de contraste (iodado )?(endovenoso|intravenoso)/) < 0) { const i = tl.search(/sem (a )?(injecao|uso|administracao) (de|do) (meio de )?contraste|\bsem contraste\b/); if (i >= 0) add('exame_texto', 'atencao', i, 'Exame COM contraste, mas o texto diz “sem contraste”.', 'Conferir técnica.'); }
         // unidades implausíveis (linear: não pega cm³/cm²/cm3/cm/s)
         const reU = /(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![³²0-9a-z])(?!\s*\/\s*s)/gi;
         let u;
-        while ((u = reU.exec(t))) { const v = numBR(u[1]), un = u[2].toLowerCase(); if ((un === 'cm' && v > 40) || (un === 'mm' && v > 300)) { add('medidas', 'atencao', u.index, `Medida implausível: ${u[0]}.`, 'Conferir a unidade (mm × cm).'); break; } }
+        const limCm = /obstet|gestac|morfolog|fetal/.test(ex) ? 70 : 40; // v1.45: biometria fetal passa de 40 cm
+        while ((u = reU.exec(t))) { const v = numBR(u[1]), un = u[2].toLowerCase(); if ((un === 'cm' && v > limCm) || (un === 'mm' && v > 300)) { add('medidas', 'atencao', u.index, `Medida implausível: ${u[0]}.`, 'Conferir a unidade (mm × cm).'); break; } }
         // unidade × grandeza: volume em cm³/mL; área em mm²/cm²
         let g;
         if ((g = /volume[^.\n]{0,60}?\d+(?:[.,]\d+)?\s*(cm²|cm2|mm²|mm2)(?![0-9])/i.exec(t))) add('medidas', 'atencao', g.index, `Volume com unidade de área (${g[1]}).`, 'Volume em cm³ ou mL.');
@@ -3046,7 +3047,7 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
 • Fígado: aumento da ecogenicidade = "doença de depósito, mais comumente relacionada à esteatose hepática"; Grau I/II/III só com os descritores correspondentes (ecogenicidade; atenuação posterior; visualização dos vasos e do diafragma); NÃO chamar hepatopatia crônica/cirrose/fibrose só pela ecogenicidade (exige contornos/superfície irregular, hipertrofia do caudado, sinais de hipertensão portal etc.); hepatomegalia em linha separada; "limite superior da normalidade" não é hepatomegalia.`;
     // Referências aprovadas pelo usuário (15/10/2026) — vão só no exame correspondente (economia de tokens/latência)
     const REV_REFS = [
-        { ex: /tireo|tiroi/, txt: `ACR TI-RADS 2017 (conduta do serviço = ACR): pontos — composição (cístico/espongiforme 0, misto 1, sólido 2), ecogenicidade (anecoico 0, hiper/iso 1, hipo 2, muito hipo 3), forma (mais alto que largo 3), margens (lisa/mal definida 0, lobulada/irregular 2, extensão extratireoidiana 3), focos (macro 1, periféricos 2, puntiformes 3). TR1 0 · TR2 2 · TR3 3 · TR4 4–6 · TR5 ≥ 7. PAAF: TR3 ≥ 2,5 cm; TR4 ≥ 1,5 cm; TR5 ≥ 1,0 cm. Seguimento: TR3 ≥ 1,5; TR4 ≥ 1,0; TR5 ≥ 0,5 cm. Aponte categoria incoerente com os descritores e conduta incoerente com categoria/tamanho. Volume tireoidiano adulto 6–15 cm³ (elipsoide 0,52).` },
+        { ex: /tireo|tiroi/, txt: `ACR TI-RADS 2017 (conduta do serviço = ACR): pontos — composição (cístico/espongiforme 0, misto 1, sólido 2), ecogenicidade (anecoico 0, hiper/iso 1, hipo 2, muito hipo 3), forma (mais alto que largo 3), margens (lisa/mal definida 0, lobulada/irregular 2, extensão extratireoidiana 3), focos (macro 1, periféricos 2, puntiformes 3). TR1 0 · TR2 2 · TR3 3 · TR4 4–6 · TR5 ≥ 7. ATENÇÃO: nódulo ESPONGIFORME soma 0 em composição e não recebe pontos das outras categorias (ACR) → total 0 = TR1 (benigno, sem conduta); classificar espongiforme como TR1 está CORRETO. PAAF: TR3 ≥ 2,5 cm; TR4 ≥ 1,5 cm; TR5 ≥ 1,0 cm. Seguimento: TR3 ≥ 1,5; TR4 ≥ 1,0; TR5 ≥ 0,5 cm. Aponte categoria incoerente com os descritores e conduta incoerente com categoria/tamanho. Volume tireoidiano adulto 6–15 cm³ (elipsoide 0,52).` },
         { ex: /mama|mamar/, txt: `BI-RADS 5ª ed.: 0 incompleto · 1 negativo · 2 benigno · 3 provavelmente benigno (≤ 2%, seguimento curto) · 4A/4B/4C suspeito (biópsia) · 5 altamente sugestivo (≥ 95%) · 6 malignidade comprovada. Descritores de suspeição (forma irregular, orientação não paralela, margem não circunscrita: indistinta, angulada, microlobulada, espiculada) com categoria 2/3 = incoerente.` },
         { ex: /pelv|transvag|endovag|anex|ovari|ginec|utero/, txt: `O-RADS US v2022: 1 normal (folículo ≤ 3 cm, corpo lúteo) · 2 quase certamente benigno (cisto simples/unilocular liso < 10 cm; hemorrágico, dermoide, endometrioma típicos < 10 cm) · 3 baixo risco (unilocular/bilocular liso ≥ 10 cm; multilocular liso < 10 cm sem fluxo/fluxo leve; sólido liso) · 4 intermediário (multilocular irregular ou fluxo moderado; unilocular com componente sólido/1–3 papilas) · 5 alto risco (≥ 4 papilas; sólido irregular; ascite/nódulos peritoneais). Volume ovariano menacme 3–10 cm³, menopausa 1–5; endométrio menopausa < 4 mm.` },
         { ex: /rim|rins|renal|urotom|abdom|urinar/, tipo: 'TC', txt: `Bosniak 2019 (TC/RM): I parede fina lisa sem septo/calcificação/realce, −9 a 20 UH · II até 3 septos finos, calcificação, hiperatenuante ≥ 70 UH sem contraste · IIF parede/septo minimamente espessado (3 mm) liso com realce ou ≥ 4 septos finos · III parede/septo ≥ 4 mm ou irregular com realce · IV nódulo com realce. Aponte categoria incoerente com a descrição.` },
@@ -3135,7 +3136,7 @@ ${c.texto}`;
         regiao_errada: ['exame_texto', 'grave', 'O laudo descreve região anatômica ou tipo de exame diferente do nome do exame (provável matriz errada). Considere coberta a região quando estiver na soma dos "Procedimentos do mesmo atendimento" e quando o nome for genérico do serviço (US estruturas superficiais = parede, inguinal, axila, cervical, partes moles; órgãos superficiais = tireoide, bolsa escrotal; articular; Doppler de órgão ou estrutura isolada).'],
         contradicao_interna: ['redacao_sentido', 'grave', 'O laudo afirma e nega o mesmo achado em trechos diferentes.'],
         frase_sem_sentido: ['redacao_sentido', 'atencao', 'Há frase truncada, sem sentido ou palavra trocada pelo ditado que altera o significado.'],
-        classificacao_incoerente: ['classificacao', 'grave', 'Alguma classificação (TI-RADS, BI-RADS, O-RADS, Bosniak, LI-RADS, Fleischner) é incoerente com a descrição do achado.'],
+        classificacao_incoerente: ['classificacao', 'grave', 'Alguma classificação (TI-RADS, BI-RADS, O-RADS, Bosniak, LI-RADS, Fleischner) é incoerente com a descrição do achado. (No ACR TI-RADS, nódulo espongiforme = 0 ponto = TR1: isso é coerente, não é erro.)'],
         campo_vazio: ['campo_vazio', 'grave', 'O laudo contém campo de modelo não preenchido (XX, ___, colchetes vazios).']
     };
     const JEV_ESP = {
@@ -3181,11 +3182,16 @@ ${c.texto}`;
         try { return await iaProxy({ acao: CK[eng].acao, state, questions }); }
         catch (e) { if (eng === 'luna' && /OPENAI_API_KEY|nuvem 400 acao/.test(String(e.message))) lunaSemChave = true; throw e; }
     }
+    const JUIZ_SEM = { jev: ['unidade_grandeza', 'esvaziamento_incoerente'], luna: ['unidade_grandeza', 'esvaziamento_incoerente', 'lado_exame'] };
+    const JUIZ_MIN = { achado_omitido: 0.9 }; // v1.45: 16 ignorados × 3 corrigidos com média 0,79 → só acima de 0,9
     async function revJev(c, eng = 'jev') {
         const t0 = performance.now(), N = CK[eng].nome;
         const mapa = Object.assign({}, JEV_COMUNS, JEV_ESP[c.tipo] || {}, c.tipo !== 'TC' && ehUro(c) ? JEV_ESP.URO : {});
         const nEx = norm(c.exame);
         JEV_EXAME.forEach(g => { if (g.re.test(nEx) && (!g.so || g.so === c.tipo)) Object.assign(mapa, g.q); });
+        // v1.45 (levantamento de 505 apontamentos, 27/10–11/11): perguntas com quase só falso alarme saem do juiz —
+        // resíduo/esvaziamento e unidade já são conferidos pelas REGRAS (contas exatas); lado do exame pela Luna: 6 ignorados, 0 corrigidos
+        (JUIZ_SEM[eng] || []).forEach(k => { delete mapa[k]; });
         const questions = {};
         Object.entries(mapa).forEach(([k, v]) => { questions[k] = { type: 'noul', instructions: v[2] }; });
         if (!c.critico) questions.critico_presente = { type: 'noul', instructions: JEV_CRITICO };
@@ -3200,7 +3206,7 @@ ${c.texto}`;
             probs[k] = p;
             if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (${N} ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: [eng], [CK[eng].pk]: p }); return; }
             const m = mapa[k];
-            if (!m || p < JEV_LIM.mostrar) return;
+            if (!m || p < Math.max(JEV_LIM.mostrar, JUIZ_MIN[k] || 0)) return;
             achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (${N} ${fmt(p, 2)})`, sugestao: '', fontes: [eng], [CK[eng].pk]: p });
         });
         // v1.23: lados por escolha (só com confiança ≥ 0,75)
@@ -3217,10 +3223,12 @@ ${c.texto}`;
         const t0 = performance.now();
         let d;
         try {
-            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: fonte === 'opus' ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
-                system: revSistema(c, (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.'),
+            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: fonte === 'sonnet' ? 6000 : 12000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
+                system: revSistema(c, (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : fonte === 'fable' ? '\nVocê é o REVISOR MASTER (última instância, acima do sênior): leia o laudo inteiro, confira cada número, classificação e conduta, e aponte SÓ o que é erro de verdade — falso alarme custa tempo do médico.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.'),
                 tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
         } catch (e) { if (tentativa < 2) return revClaude(c, modelo, esforco, fonte, tentativa + 1); throw e; }
+        // v1.45: o servidor troca modelo desconhecido pelo padrão — não deixa o Sonnet passar por Fable/Opus
+        if (d.modelo && !String(d.modelo).startsWith(modelo.replace(/-\d+(-\d+)?$/, ''))) throw new Error(`o servidor ainda não tem o ${modelo} (atualizar o ia-proxy)`);
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'revisao');
         let lista = blk && blk.input && blk.input.achados;
         if (!lista) { const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n'); const m = txt.match(/\{[\s\S]*\}/); if (m) { try { lista = JSON.parse(m[0]).achados; } catch (e) { /* segue */ } } }
@@ -3234,6 +3242,7 @@ ${c.texto}`;
     const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
     const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
     const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
+    const revFable = c => revClaude(c, 'claude-fable-5-2', 'high', 'fable'); // v1.45: revisor MASTER (só sob pedido)
     const GEMINI_REVISOR = 'gemini-3.8-flash'; // v1.24: custo × benefício (Argon = papel do Opus, 2–5× o preço); o servidor cai para 3.6 Flash se falhar
     const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     async function revGemini(c) {
@@ -4549,7 +4558,7 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <label title="Gemini 3.8 Flash como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
-<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
+<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-fable" ${r.ativos.includes('fable') ? 'disabled' : ''} title="Revisor MASTER — Claude Fable 5.2, acima do Opus. Use em laudo complexo ou quando quiser a palavra final (≈ 2× o custo do Opus, ~10–30 s)">👑 Master (Fable)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
         p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
@@ -4572,6 +4581,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
+        const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarFable(r);
         p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => { if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', b.dataset.mot)]); r.ultIgn = null; renderRevisao(); }; });
         const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; renderRevisao(); };
         p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); renderRevisao(); }; });
@@ -4605,6 +4615,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         sonnet: { nome: 'Sonnet', fn: c => revSonnet(c) },
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
         opus: { nome: 'Opus', fn: c => revOpus(c) },
+        fable: { nome: 'Fable', fn: c => revFable(c) },
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
     const REV_MODOS = { // v1.25: Gemini e Grok viraram caixinhas opcionais (+ Gemini / + Grok)
@@ -4615,7 +4626,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const motoresDo = modo => REV_MODOS[modo].motores.filter(m => m !== 'luna' || lunaLigada());
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
-    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku'];
+    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable'];
     // v1.23 — limiares do Jev num só lugar (calibrar com o registro de Ignorar/Corrigir): mostrar ≥ 0,5; sozinho ≥ 0,7; grave ≥ 0,85; juiz < 0,3 = provável falso alarme
     const JEV_LIM = Object.assign({ mostrar: 0.5, sozinho: 0.7, grave: 0.85, falso: 0.3 }, (cfg.rev && cfg.rev.jevLim) || {});
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
@@ -4675,6 +4686,15 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             if (m === 'luna' && lunaSemChave) { r.ativos = r.ativos.filter(x => x !== 'luna'); return; } // sem chave/proxy antigo: some em silêncio
             r.err[m] = e.message;
         }).finally(() => { if (revAtual === r) renderRevisao(); });
+    }
+    const GROK_ESPERA_MS = 6000;
+    async function rodarFable(r) {
+        if (r.ativos.includes('fable') && (r.res.fable || !r.err.fable)) return;
+        r.carregando = true; renderRevisao();
+        await rodarMotor(r, 'fable');
+        await revJevJuiz(r);
+        r.carregando = false;
+        if (revAtual === r) renderRevisao();
     }
     async function rodarOpus(r, motivo) {
         if (r.ativos.includes('opus') && (r.res.opus || !r.err.opus)) return;
@@ -4808,10 +4828,13 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         }
         if (c.texto.length >= 30 && r.triagem !== 'normal') {
             const onda = motoresDo(modo).filter(m => !((m === 'jev' || m === 'luna') && r.res[m])).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
-            if (rc.grok && !grokSemChave) onda.push(rodarMotor(r, 'grok')); // v1.22.1: Grok opcional, junto de qualquer modo
+            // v1.45: Grok demora 4–47 s (mediana ~16 s; Opus ~4 s) → corre em paralelo, mas a revisão espera por ele no máximo GROK_ESPERA_MS
+            // depois dos outros; se chegar mais tarde, os achados dele entram no painel quando chegarem
+            const grokP = rc.grok && !grokSemChave ? rodarMotor(r, 'grok').then(async () => { if (r.grokTarde) { await revJevJuiz(r); if (revAtual === r) renderRevisao(); } }) : null;
             if (rc.gemini) onda.push(rodarMotor(r, 'gemini')); // v1.28.1: ligado por padrão (API paga)
             if (rc.opusAuto && r.revisor !== 'opus' && c.texto.length > REV_EXTENSO) { r.motivoOpus = `laudo extenso (${c.texto.length} caracteres)`; onda.push(rodarMotor(r, 'opus')); }
             await Promise.all(onda);
+            if (grokP) { let ok = false; await Promise.race([grokP.then(() => { ok = true; }), new Promise(res => setTimeout(res, GROK_ESPERA_MS))]); if (!ok) r.grokTarde = true; }
             await revJevJuiz(r); // v1.23: Jev confere cada achado das IAs (< 1 s)
             // discordância: item grave apontado por UMA só IA quando havia duas ou mais rodando
             const ias = r.ativos.filter(m => ['opus', 'sonnet', 'gemini', 'grok'].includes(m) && r.res[m]); // discordância só entre LLMs (Jev é checklist)
