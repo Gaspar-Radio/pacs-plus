@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.45.0
+// @version      1.46.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -40,6 +40,7 @@
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
         ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
+        ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -1025,7 +1026,43 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         comp.$set(ex, 'sla_count_prazo', ex.__ppCountOriginal || 0);
     }
     // o cronômetro nativo só existe se a lista tiver SLA do PACS: atualiza aqui também
-    function tickSlaProprio(ex) { ex.sla.slaTempoRestante = Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000); }
+    // v1.46.0 — LISTA LEVE (medido em 11/11/2026): cada gravação de slaTempoRestante faz o PACS redesenhar a tabela inteira
+    // (~2 ms por linha → 300 linhas travavam o Chrome). O PACS regrava a lista toda a cada 1 s e o Plus regravava o prazo
+    // próprio a cada 1 s e a cada redesenho (ciclo). A coluna Prazo só mostra dias/horas/minutos (formatarTempo) e muda de
+    // cor em 2 h e em 0 (slaColor): basta gravar quando o minuto exibido ou a cor mudam. Texto e cor ficam idênticos.
+    // O monitor de TC urgente NÃO usa este campo (calcula o vencimento por sla_prazo_final na própria consulta).
+    function slaFaixa(seg) {
+        if (seg == null) return 'x';
+        if (isNaN(seg)) return 'n';
+        return (seg < 0 ? '-' : seg === 0 ? '0' : seg < 7200 ? 'l' : 'a') + Math.floor(Math.abs(seg) / 60); // sinal (texto “-0d 0h 0m”), cor (0 e 2 h) e minuto
+    }
+    function slaGravar(sla, seg) { if (!on('listaLeve') || slaFaixa(seg) !== slaFaixa(sla.slaTempoRestante)) sla.slaTempoRestante = seg; }
+    function tickSlaProprio(ex) { slaGravar(ex.sla, Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000)); }
+    // Cronômetro leve: assume o lugar do cronômetro do PACS (GridExames.iniciarCronometros, que a cada 1 s recria a lista
+    // inteira). Mesma conta do PACS, gravando só quando muda o que aparece. Desligando o bloco, o do PACS volta.
+    let cronoMarca = 0;
+    function cronometroLeve() {
+        const comp = componenteLista();
+        if (!comp || typeof comp.iniciarCronometros !== 'function') return;
+        if (!on('listaLeve')) {
+            if (cronoMarca && comp.intervalCronometro === cronoMarca) { clearInterval(cronoMarca); cronoMarca = 0; comp.intervalCronometro = null; comp.iniciarCronometros(); }
+            return;
+        }
+        const id = comp.intervalCronometro;
+        if (id && id !== cronoMarca) { // o do PACS está ligado → troca pelo leve (o marcador só ocupa o lugar; o PACS não recria)
+            clearInterval(id); if (cronoMarca) clearInterval(cronoMarca);
+            cronoMarca = setInterval(() => { }, 3600000);
+            comp.intervalCronometro = cronoMarca;
+        }
+        if (!cronoMarca || comp.intervalCronometro !== cronoMarca) return; // o do PACS ainda não iniciou: nada a substituir
+        const agora = Date.now();
+        comp.exames.forEach(a => {
+            const s = a && a.sla; if (!s) return;
+            if (s.ultimoacao_tipo === 'CONFIRMADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - agora) / 1000));
+            else if (s.ultimoacao_tipo === 'PENDENCIADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - new Date(s.ultimoacao_created)) / 1000));
+            else if (s.slaTempoRestante != null) s.slaTempoRestante = null;
+        });
+    }
 
     // Prazo próprio do US (v1.7): US em REVISAR e NÃO urgente → 3 dias úteis a partir de exa_data.
     function aplicarSlaUSProprio() {
@@ -1124,6 +1161,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         try { aplicarPrazosTC(); } catch (e) { console.warn('[PACS Plus] prazo do TC falhou', e); }
         try { aplicarSlaUSProprio(); } catch (e) { console.warn('[PACS Plus] prazo próprio do US falhou', e); }
         try { aplicarSlaUteis(); } catch (e) { console.warn('[PACS Plus] prazo em dias úteis falhou', e); }
+        try { cronometroLeve(); } catch (e) { console.warn('[PACS Plus] cronômetro leve falhou', e); }
     }
     setInterval(aplicarPrazosLista, 1000);
 
@@ -3766,7 +3804,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 td.appendChild(b);
             }
             if (b.dataset.pac !== String(ex.pac_codigo) || b.dataset.exa !== String(ex.exa_codigo)) { b.dataset.pac = ex.pac_codigo; b.dataset.exa = ex.exa_codigo; b.dataset.dia = String(ex.exa_data || '').slice(0, 10); b.removeAttribute('data-hln'); }
-            hlContar(b);
+            if (!on('listaLeve') || linhas.length <= HL_MAX_LINHAS) hlContar(b);
+            else { const c = hlCache.get(b.dataset.pac); if (c && c.exs) hlBalao(b, c.exs); } // v1.46.0: lista grande → não baixa a ficha de cada paciente
             // v1.36.1: fica ANTES dos botões de outros scripts (RadiAnt / Horos), que continuam por último
             const ext = td.querySelector('[data-ladi-radiant-button="true"], [data-ladi-horos-button="true"]');
             if (ext && ext.parentNode && (ext.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) ext.parentNode.insertBefore(b, ext);
@@ -3777,7 +3816,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     }
     // v1.40.0 — contador no 🕘: nº de exames do paciente em OUTROS dias (os do mesmo dia são o atendimento atual).
     // Sem balão = sem exame em outro dia. 1 consulta por paciente (GET paciente/{pac}), 2 por vez, guardada 10 min.
-    const hlCache = new Map(); let hlFila = [], hlAtivos = 0;
+    const hlCache = new Map(); let hlFila = [], hlAtivos = 0; const HL_MAX_LINHAS = 100;
     function hlContar(b) {
         const pac = b.dataset.pac, c = hlCache.get(pac);
         if (c && Date.now() - c.t < 10 * 60000) { hlBalao(b, c.exs); return; }
@@ -4921,6 +4960,21 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     // barra (lembra em cada computador). Se você mudar o filtro à mão (busca por nome, 📝 Filtrar…), o Plantão pausa sozinho.
     const PL_CHAVES = ['data_codigo', 'data_inicial', 'data_final', 'mod_codigo', 'exa_situacao', 'exa_idnurgente', 'pac_nome', 'pac_pacs_codigo'];
     let plAntes = null, plSig = '', plPausa = false, plAplicado = false, plIppAntes = null;
+    // v1.46.0 — filtro mudado à mão (ex.: Limpar Filtros) → o Plantão pausa E a página volta ao tamanho do PACS (50).
+    // Antes ficavam 300 linhas na lista sem filtro (92 mil exames), que travavam o Chrome. O vigia reage NA HORA
+    // (sync), antes de o PACS buscar a lista; o plantaoTick continua como reserva.
+    let plVigia = null, plMexendo = false, plRecarga = 0;
+    function plantaoPausar(comp) {
+        plPausa = true;
+        if (on('listaLeve') && plIppAntes != null && 'itemsPerPage' in comp && comp.itemsPerPage > plIppAntes) comp.itemsPerPage = plIppAntes;
+    }
+    function plantaoVigiar(comp) {
+        if (!comp || plVigia === comp || typeof comp.$watch !== 'function') return;
+        plVigia = comp;
+        comp.$watch('filtro', () => {
+            try { if (!plMexendo && cfg.master && cfg.plantao.on && plAplicado && !plPausa && comp.filtro && plAssin(comp.filtro) !== plSig) plantaoPausar(comp); } catch (e) { /* o plantaoTick cobre */ }
+        }, { deep: true, sync: true });
+    }
     const PL_POR_PAG = 300;
     const plAssin = f => JSON.stringify(PL_CHAVES.map(k => f && f[k]));
     const plantaoAtivo = () => !!(cfg.plantao && cfg.plantao.on) && !plPausa;
@@ -4929,8 +4983,11 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!plAntes) plAntes = JSON.parse(JSON.stringify(comp.filtro));
         const f = comp.filtro, set = (k, v) => (comp.$set ? comp.$set(f, k, v) : (f[k] = v));
         const hoje = chaveDia(new Date()), d = new Date(); d.setDate(d.getDate() - 1); const ontem = chaveDia(d);
-        if (cfg.plantao.ontem) { set('data_codigo', 1); set('data_inicial', ontem); set('data_final', hoje); } else { set('data_codigo', 2); set('data_inicial', ''); set('data_final', ''); }
-        set('mod_codigo', [LP_MOD.US, LP_MOD.CT]); set('exa_situacao', []); set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
+        plantaoVigiar(comp); plMexendo = true;
+        try {
+            if (cfg.plantao.ontem) { set('data_codigo', 1); set('data_inicial', ontem); set('data_final', hoje); } else { set('data_codigo', 2); set('data_inicial', ''); set('data_final', ''); }
+            set('mod_codigo', [LP_MOD.US, LP_MOD.CT]); set('exa_situacao', []); set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
+        } finally { plMexendo = false; }
         if ('page' in comp) comp.page = 1;
         // v1.39.6 — página única de até 300 (o PACS pagina de 50: com +ontem, liberados ocultos ocupavam a página 1
         // e parte dos pendentes de ontem ficava na página 2)
@@ -4957,7 +5014,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const comp = componenteLista();
         if (cfg.plantao.on && comp && comp.filtro) {
             if (!plAplicado) plantaoFiltro(comp); // página recarregada com o Plantão ligado
-            else if (!plPausa && plAssin(comp.filtro) !== plSig) { plPausa = true; ocultarLinhasLista(); } // filtro mudou à mão → pausa
+            else if (!plPausa && plAssin(comp.filtro) !== plSig) { plantaoPausar(comp); ocultarLinhasLista(); } // filtro mudou à mão → pausa
+            // reserva: pausado, página já pequena, mas a lista na tela ainda é um pedaço grande (>100) de um resultado maior → recarrega
+            if (plPausa && on('listaLeve') && Array.isArray(comp.exames) && comp.exames.length > 100 && comp.itemsPerPage <= 100
+                && Number(comp.countTotalItems) > comp.exames.length && Date.now() - plRecarga > 8000) { plRecarga = Date.now(); if ('page' in comp) comp.page = 1; comp.getExames(); }
         }
         plantaoDock();
         plantaoExtras(comp);
