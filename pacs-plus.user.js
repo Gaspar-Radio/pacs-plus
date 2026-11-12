@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.46.0
+// @version      1.47.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -344,7 +344,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-motivo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; padding: 5px 8px; border: 1px dashed #475569; border-radius: 7px; font-size: 11.5px; color: #cbd5e1; }
 #pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; }
 #pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; }
+#pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; } #pp-rev .pr-mini.ok { border-left-color: #10b981; color: #86efac; }
 #pp-rev .pr-resp { display: flex; gap: 6px; align-items: flex-end; margin-top: 6px; }
 #pp-rev .pr-resp textarea { flex: 1; min-height: 38px; resize: vertical; background: #0f172a; color: #e5e7eb; border: 1px solid #6d28d9; border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
 #pp-rev .pr-voce { font-size: 11.5px; color: #93c5fd; margin-top: 3px; white-space: pre-wrap; }
@@ -3280,7 +3280,10 @@ ${c.texto}`;
     const revHaiku = c => revClaude(c, 'claude-haiku-5-5', 'medium', 'haiku');
     const revOpus = c => revClaude(c, 'claude-opus-5-5', 'medium', 'opus');
     const revSonnet = c => revClaude(c, 'claude-sonnet-5-5', 'medium', 'sonnet');
-    const revFable = c => revClaude(c, 'claude-fable-5-2', 'high', 'fable'); // v1.45: revisor MASTER (só sob pedido)
+    const revFable = c => revClaude(c, 'claude-fable-5-2', 'medium', 'fable'); // v1.45: revisor MASTER (só sob pedido) · v1.47: esforço médio (antes high)
+    // v1.47 — Fable 5.2 também corrige e atende pedidos; mesma trava do revisor: o servidor não pode trocar o modelo calado
+    const CLAUDE_ID = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', fable: 'claude-fable-5-2' };
+    const claudeTrocado = (d, modelo) => !!(d && d.modelo && !String(d.modelo).startsWith(modelo.replace(/-\d+(-\d+)?$/, '')));
     const GEMINI_REVISOR = 'gemini-3.8-flash'; // v1.24: custo × benefício (Argon = papel do Opus, 2–5× o preço); o servidor cai para 3.6 Flash se falhar
     const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     async function revGemini(c) {
@@ -3386,7 +3389,7 @@ ${c.texto}`;
     // ---------- ✍ Corrigir: cálculo (Plus) · frase/lado (Sonnet) · diagnóstico/global (Opus) ----------
     // v1.25: quem corrige é o MESMO Claude que revisa (Opus por padrão) — antes parte das correções ia ao Sonnet
     const nivelCorrecao = a => a.fix ? 'calc' : revisorDe(revCfg());
-    const NIVEL_NOME = { calc: 'cálculo do Plus', sonnet: 'Sonnet', opus: 'Opus' };
+    const NIVEL_NOME = { calc: 'cálculo do Plus', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
     const chaveTxt = x => String(x).normalize('NFC').toLowerCase().split('').map(ch => ch.normalize('NFD').replace(/[̀-ͯ]/g, '') || ch).join('');
     function blocosLaudo(ed) {
         const blocos = [];
@@ -3458,10 +3461,11 @@ ${completa ? '• Revisão COMPLETA: corrija também qualquer outro erro de inco
 Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
         let d;
         try {
-            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: /opus/.test(modelo) ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
+            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: /opus|fable/.test(modelo) ? 12000 : 6000, thinking: { type: 'adaptive' }, output_config: { effort: 'medium' },
                 system: sys, tools: [CORR_TOOL], tool_choice: { type: 'auto' },
                 messages: [{ role: 'user', content: revMensagem(c) + (lista ? '\n\nERROS APONTADOS A CORRIGIR:\n' + lista : '') }] });
         } catch (e) { if (tentativa < 2) return corrigirIA(c, modelo, achados, completa, tentativa + 1); throw e; }
+        if (claudeTrocado(d, modelo)) throw new Error(`o servidor ainda não tem o ${modelo} (atualizar o ia-proxy)`);
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'correcao');
         let inp = blk && blk.input;
         if (!inp) { const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n'); const m = txt.match(/\{[\s\S]*\}/); if (m) { try { inp = JSON.parse(m[0]); } catch (e) { /* segue */ } } }
@@ -3470,9 +3474,9 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
         return { trocas, obs: String(inp.observacao || '').slice(0, 400), ms: performance.now() - t0, modelo: d.modelo || modelo };
     }
     const chaveAchado = a => norm(a.categoria + a.trecho + a.explicacao);
-    async function pedirCorrecao(r, a, completa) {
+    async function pedirCorrecao(r, a, completa, nivelPedido) {
         const k = completa ? '__opus__' : chaveAchado(a);
-        const nivel = completa ? 'opus' : nivelCorrecao(a);
+        const nivel = completa ? (nivelPedido === 'fable' ? 'fable' : 'opus') : nivelCorrecao(a);
         r.corr = r.corr || {};
         if (nivel === 'calc') {
             r.corr[k] = { nivel, trocas: [{ original: a.fix.busca, novo: a.fix.troca, dica: a.trecho }], obs: '' };
@@ -3485,8 +3489,9 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
             const c = contextoLaudo() || r.ctx;
             if (r.ctx && r.ctx.ctxAtend && !c.ctxAtend && c.exa === r.ctx.exa) c.ctxAtend = r.ctx.ctxAtend;
             const lista = completa ? achadosAtuais(r).filter(x => !r.ignorados.has(chaveAchado(x))) : [a];
-            const x = await corrigirIA(c, nivel === 'opus' ? 'claude-opus-5-5' : 'claude-sonnet-5-5', lista, completa);
+            const x = await corrigirIA(c, CLAUDE_ID[nivel] || CLAUDE_ID.sonnet, lista, completa);
             r.corr[k] = { nivel, item, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nenhuma troca proposta.'), ms: x.ms };
+            if (completa) r.corr[k].chaves = lista.map(chaveAchado); // v1.47: achados que esta revisão completa cobriu
         } catch (e) { r.corr[k] = { nivel, item, erro: String(e.message || e).slice(0, 200) }; }
         if (revAtual === r) renderRevisao();
     }
@@ -3500,40 +3505,43 @@ Regras:
 • Mantenha o estilo, a terminologia e a formatação do laudo (caixa alta onde já houver).
 • Se o pedido for uma PERGUNTA ou revisão sem mudança necessária, devolva trocas vazias e responda em "observacao" (curta, objetiva).
 Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
-    async function pedidoOpus(c, pedido, tentativa = 1, esforco = 'medium') {
+    async function pedidoOpus(c, pedido, tentativa = 1, esforco = 'medium', nivel = 'opus') {
+        const modelo = CLAUDE_ID[nivel] || CLAUDE_ID.opus;
         const t0 = performance.now();
         const rf = refsDoExame(c);
         const sys = PEDIDO_SIS + '\n' + REV_ESP[c.tipo] + (c.tipo !== 'TC' && ehUro(c) ? '\n' + REV_PATCH_URO : '') + (rf ? '\nREFERÊNCIAS DO SERVIÇO:\n' + rf : '');
         let d;
         try {
-            d = await iaProxy({ acao: 'claude_mensagem', modelo: 'claude-opus-5-5', max_tokens: 14000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
+            d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: 14000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
                 system: sys, tools: [CORR_TOOL], tool_choice: { type: 'auto' },
                 messages: [{ role: 'user', content: revMensagem(c) + '\n\nPEDIDO DO MÉDICO:\n' + pedido }] });
-        } catch (e) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco); throw e; }
+        } catch (e) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco, nivel); throw e; }
+        if (claudeTrocado(d, modelo)) throw new Error(`o servidor ainda não tem o ${modelo} (atualizar o ia-proxy)`);
         const blk = (d.content || []).find(b => b.type === 'tool_use' && b.name === 'correcao');
         let inp = blk && blk.input;
         const txt = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
         if (!inp) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { inp = JSON.parse(m[0]); } catch (e) { /* segue */ } } }
         if (!inp && txt) inp = { trocas: [], observacao: txt };
-        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco); throw new Error('resposta sem as edições'); }
+        if (!inp || !Array.isArray(inp.trocas)) { if (tentativa < 2) return pedidoOpus(c, pedido, tentativa + 1, esforco, nivel); throw new Error('resposta sem as edições'); }
         const trocas = inp.trocas.filter(x => x && x.original && typeof x.novo === 'string' && x.original !== x.novo).slice(0, 20).map(x => ({ original: String(x.original), novo: String(x.novo) }));
         return { trocas, obs: String(inp.observacao || '').slice(0, 1500), ms: performance.now() - t0 };
     }
-    async function enviarPedido(r, texto) {
+    async function enviarPedido(r, texto, nivel) {
+        nivel = nivel === 'fable' ? 'fable' : 'opus';
         texto = String(texto || '').trim();
         if (!texto) return;
         r.pedidos = r.pedidos || [];
         const k = '__ped' + Date.now();
         r.corr = r.corr || {};
-        r.corr[k] = { nivel: 'opus', carregando: true, pedido: texto };
+        r.corr[k] = { nivel, carregando: true, pedido: texto };
         r.pedidos.push(k); r.rascunho = '';
         renderRevisao();
         try {
             const c = contextoLaudo() || r.ctx;
-            const x = await pedidoOpus(c, texto);
-            r.corr[k] = { nivel: 'opus', pedido: texto, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nada a alterar.'), ms: x.ms };
+            const x = await pedidoOpus(c, texto, 1, 'medium', nivel);
+            r.corr[k] = { nivel, pedido: texto, trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nada a alterar.'), ms: x.ms };
             if (revCfg().pedidoDireto && x.trocas.length) aplicarTrocas(r.corr[k]);
-        } catch (e) { r.corr[k] = { nivel: 'opus', pedido: texto, erro: String(e.message || e).slice(0, 200) }; }
+        } catch (e) { r.corr[k] = { nivel, pedido: texto, erro: String(e.message || e).slice(0, 200) }; }
         if (revAtual === r) renderRevisao();
     }
     function aplicarTrocas(cr) {
@@ -3543,7 +3551,7 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
         if (!cr) return '';
         // v1.31: conversa do item (observação da IA ↔ resposta do médico)
         const hist = (cr.hist || []).map(h => `${h.obs ? `<div class="pr-obs">IA: ${esc(h.obs)}</div>` : ''}<div class="pr-voce">Você: ${esc(h.resp)}</div>`).join('');
-        if (cr.carregando) return `<div class="pr-co">${hist}⏳ ${cr.hist ? 'Opus corrigindo com a sua resposta…' : cr.pedido ? 'Opus trabalhando no pedido…' : NIVEL_NOME[cr.nivel] + ' preparando a correção…'}</div>`;
+        if (cr.carregando) return `<div class="pr-co">${hist}⏳ ${cr.hist ? (NIVEL_NOME[cr.nivel] || 'Opus') + ' corrigindo com a sua resposta…' : cr.pedido ? (NIVEL_NOME[cr.nivel] || 'Opus') + ' trabalhando no pedido…' : NIVEL_NOME[cr.nivel] + ' preparando a correção…'}</div>`;
         if (cr.erro) return `<div class="pr-co err">${hist}⚠ ${esc(cr.erro)}<div class="pr-ac"><button class="pr-b sec" data-desc>Descartar</button></div></div>`;
         const todasFeitas = (cr.trocas || []).length && (cr.trocas || []).every(t => t.feito);
         const resp = k && (cr.obs || !(cr.trocas || []).length) ? `<div class="pr-resp"><textarea class="pr-rt" data-k="${esc(k)}" rows="2" placeholder="Responder / complementar só este item (digite ou dite) — Ctrl+Enter envia"></textarea><button class="pr-b" data-resp>Responder</button></div>` : '';
@@ -3573,13 +3581,13 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const cr = r.corr && r.corr[k]; resp = String(resp || '').trim();
         if (!cr || !resp || cr.carregando) return;
         const hist = (cr.hist || []).concat([{ obs: cr.obs || '', resp }]);
-        const base = { nivel: 'opus', pedido: cr.pedido, item: cr.item, hist };
+        const base = { nivel: cr.nivel === 'fable' ? 'fable' : 'opus', pedido: cr.pedido, item: cr.item, hist }; // v1.47: quem começou o item continua nele
         r.corr[k] = Object.assign({ carregando: true }, base);
         renderRevisao();
         try {
             const c = contextoLaudo() || r.ctx;
             const conversa = hist.map(h => `Sua observação anterior: ${h.obs || '(nenhuma)'}\nResposta do médico: ${h.resp}`).join('\n');
-            const x = await pedidoOpus(c, `Continuação de UM item da revisão do laudo (corrija só este item).\nITEM: ${cr.item || cr.pedido || 'revisão do laudo'}\n${conversa}\nCom a resposta do médico, faça agora a correção no laudo (trocas). Se ainda faltar informação, pergunte de forma objetiva em "observacao".`);
+            const x = await pedidoOpus(c, `Continuação de UM item da revisão do laudo (corrija só este item).\nITEM: ${cr.item || cr.pedido || 'revisão do laudo'}\n${conversa}\nCom a resposta do médico, faça agora a correção no laudo (trocas). Se ainda faltar informação, pergunte de forma objetiva em "observacao".`, 1, 'medium', base.nivel);
             r.corr[k] = Object.assign(base, { trocas: x.trocas, obs: x.obs || (x.trocas.length ? '' : 'Nada a alterar.'), ms: x.ms });
             if (revCfg().pedidoDireto && x.trocas.length) aplicarTrocas(r.corr[k]);
         } catch (e) { r.corr[k] = Object.assign(base, { erro: String(e.message || e).slice(0, 200) }); }
@@ -4548,8 +4556,11 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const tb = document.querySelector('.v-dialog__content .document-editor__toolbar');
         p.style.top = Math.round(Math.max(48, Math.min(tb ? tb.getBoundingClientRect().bottom + 8 : 96, window.innerHeight - 320))) + 'px';
         arrAplicar(p);
+        conferirAplicadas(r);
         const todos = achadosAtuais(r).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
-        const graves = todos.filter(a => a.gravidade === 'grave').length;
+        const pend = todos.filter(a => !achadoResolvido(r, a)), nRes = todos.length - pend.length; // v1.47: corrigido no laudo não é pendência
+        const graves = pend.filter(a => a.gravidade === 'grave').length;
+        const abertos = r.abertos = r.abertos || new Set();
         // v1.20: preserva o que está sendo digitado no pedido (o painel é redesenhado quando cada IA responde)
         const ta0 = p.querySelector('#pr-ped'), foco = ta0 && document.activeElement === ta0 ? [ta0.selectionStart, ta0.selectionEnd] : null;
         const rt0 = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('pr-rt') ? document.activeElement : null;
@@ -4560,7 +4571,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         // v1.20: minimizado = só uma barrinha; clique expande
         p.classList.toggle('min', !!r.min);
         if (r.min) {
-            p.innerHTML = `<div class="pr-mini" title="Expandir a revisão">🛡 Revisão · ${r.carregando || pedCarregando ? '⏳' : todos.length ? `${todos.length} achado(s)${graves ? ` · <span class="pr-g">${graves} grave(s)</span>` : ''}` : '✓ sem achados'} <span class="pr-exp">▲</span></div>`;
+            p.innerHTML = `<div class="pr-mini" title="Expandir a revisão">🛡 Revisão · ${r.carregando || pedCarregando ? '⏳' : pend.length ? `${pend.length} achado(s)${graves ? ` · <span class="pr-g">${graves} grave(s)</span>` : ''}` : nRes ? `✓ ${nRes} corrigido(s)` : '✓ sem achados'} <span class="pr-exp">▲</span></div>`;
             p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
             return;
         }
@@ -4574,23 +4585,23 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 <button class="pr-x pr-min" title="Minimizar">▁</button><button class="pr-x" title="Fechar (Esc) — o resultado fica guardado; 🛡 reabre sem revisar de novo">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
 ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}
-<div class="pr-ped"><textarea id="pr-ped" rows="3" placeholder="💬 Pedido ao Opus — digite ou cole o ditado. Ex.: “revise a impressão”, “insira que a vesícula não foi visualizada por jejum inadequado”, “deixe a conclusão em tópicos”."></textarea>
-<div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button></div>
+<div class="pr-ped"><textarea id="pr-ped" rows="3" placeholder="💬 Pedido ao Opus ou ao Fable — digite ou cole o ditado. Ex.: “revise a impressão”, “insira que a vesícula não foi visualizada por jejum inadequado”, “deixe a conclusão em tópicos”."></textarea>
+<div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button><button class="pr-b cor" id="pr-ped-fab" title="Claude Fable 5.2 (esforço médio), acima do Opus — mais lento e ≈ 2× o custo">👑 Enviar ao Fable</button></div>
 ${(r.pedidos || []).slice().reverse().map(k => !r.corr[k] ? '' : mini.has(k) ? `<div class="pr-mini" data-maxi="${k}">▸ 💬 “${esc(String(r.corr[k].pedido).slice(0, 70))}” — ${estadoCorr(r.corr[k])}</div>` : `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k], k)}</div>`).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
-${r.depois ? `<div class="pr-lib ${todos.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : todos.length ? `⚠ ${todos.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : '✓ Sem pendências.'}
-<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : todos.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
-${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ 🎓 Revisão completa com correção (Opus) — ${estadoCorr(r.corr.__opus__)}</div>` : '<b>🎓 Revisão completa com correção (Opus)</b>' + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button>'}</div>` : ''}
+${r.depois ? `<div class="pr-lib ${pend.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : pend.length ? `⚠ ${pend.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo.` : '✓ Sem pendências.'}
+<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : pend.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
+${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ ${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'}) — ${estadoCorr(r.corr.__opus__)}</div>` : `<b>${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'})</b>` + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button> <button class="pr-b cor" id="pr-full-fab" title="Claude Fable 5.2 (esforço médio) revisa o laudo inteiro e propõe as correções — acima do Opus, mais lento e ≈ 2× o custo">👑 Fable</button>'}</div>` : ''}
 ${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button></div>` : ''}
-<div class="pr-lista">${todos.length ? todos.map((a, i) => mini.has(chaveAchado(a)) ? `<div class="pr-mini ${a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
+<div class="pr-lista">${todos.length ? todos.map((a, i) => { const res = achadoResolvido(r, a); return mini.has(chaveAchado(a)) || (res && !abertos.has(chaveAchado(a))) ? `<div class="pr-mini ${res ? 'ok' : a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${res ? '✓' : a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${res ? 'corrigido no laudo' : r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
 <div class="pr-ex">${esc(a.explicacao)}</div>${(a.outras || []).map(o => `<div class="pr-outra"><b>${esc(o.fonte.split('+').map(f => f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f).join(' + '))}:</b> ${esc(o.explicacao)}</div>`).join('')}${a.fraco ? `<div class="pr-fraco">provável falso alarme — ${[a.juiz != null ? 'Jev ' + fmt(a.juiz, 2) : '', a.juizL != null ? 'Luna ' + fmt(a.juizL, 2) : ''].filter(Boolean).join(' · ')}</div>` : (a.juiz != null || a.juizL != null) && a.fontes.some(f => REV_LLMS.includes(f)) ? `<div class="pr-fraco">juízes: ${[a.juiz != null ? 'Jev ' + fmt(a.juiz, 2) : '', a.juizL != null ? 'Luna ' + fmt(a.juizL, 2) : ''].filter(Boolean).join(' · ')}</div>` : ''}
 ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
-<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`).join('')
+<div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`; }).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
@@ -4608,6 +4619,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         ta.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); enviarPedido(r, ta.value); } };
         if (foco) { ta.focus(); try { ta.setSelectionRange(foco[0], foco[1]); } catch (e) { /* ok */ } }
         p.querySelector('#pr-ped-env').onclick = () => enviarPedido(r, ta.value);
+        p.querySelector('#pr-ped-fab').onclick = () => enviarPedido(r, ta.value, 'fable');
         p.querySelector('#pr-ped-dir').onchange = e => { cfg.rev = Object.assign(revCfg(), { pedidoDireto: e.target.checked }); saveCfg(); };
         p.querySelectorAll('.pr-pd').forEach(el => ligarCorrecao(el, r, el.dataset.k));
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
@@ -4623,10 +4635,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarFable(r);
         p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => { if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', b.dataset.mot)]); r.ultIgn = null; renderRevisao(); }; });
         const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; renderRevisao(); };
-        p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); renderRevisao(); }; });
+        p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); abertos.add(el.dataset.maxi); renderRevisao(); }; });
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
-            const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); renderRevisao(); };
+            const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); abertos.delete(chaveAchado(a)); renderRevisao(); };
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
             el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); r.ultIgn = a; renderRevisao(); };
             const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); revNuvemReg([linhaAchado(r, a, 'corrigido')]); pedirCorrecao(r, a, false); };
@@ -4634,6 +4646,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             ligarCorrecao(el, r, chaveAchado(a));
         });
         const pf = p.querySelector('#pr-full'); if (pf) pf.onclick = () => pedirCorrecao(r, null, true);
+        const pff = p.querySelector('#pr-full-fab'); if (pff) pff.onclick = () => pedirCorrecao(r, null, true, 'fable');
         const fu = p.querySelector('.pr-full'); if (fu) ligarCorrecao(fu, r, '__opus__');
         const bl = p.querySelector('#pr-lib'); if (bl) bl.onclick = () => { const f = r.depois; r.depois = null; fecharRevisao(); if (f) f(); };
         const bc = p.querySelector('#pr-canc'); if (bc) bc.onclick = () => { r.depois = null; renderRevisao(); };
@@ -4672,7 +4685,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'sonnet', 'gemini', 'opus', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); });
+        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
         const base = juntarAchados(listas);
         // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
         ['jev', 'luna'].forEach(eng => { const pk = CK[eng].pk; if (r.res[eng]) r.res[eng].achados.slice().sort((x, y) => y[pk] - x[pk]).forEach(j => {
@@ -4717,7 +4730,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
         // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
-        const lim = m === 'opus' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
+        const lim = m === 'opus' || m === 'fable' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
         const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
         return corrida.then(x => { r.res[m] = x; }).catch(e => {
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
@@ -4779,7 +4792,24 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const temGrave = r => achadosAtuais(r).some(a => a.gravidade === 'grave');
     // v1.26.1 (usuário): "Liberar c/ IA" só libera sozinho se NÃO houver nenhuma pendência (grave ou atenção);
     // com qualquer achado, para e espera o clique em "Liberar mesmo assim".
-    const pendencias = r => achadosAtuais(r).filter(a => !r.ignorados.has(chaveAchado(a))).length;
+    // v1.47 — correção APLICADA no laudo resolve a pendência na hora (sem revisar de novo). Vale a correção do próprio item
+    // ou a revisão completa aplicada por inteiro e sem ressalva. Ctrl+Z no editor (texto original de volta) reabre a pendência.
+    const corrFeita = cr => { const t = (cr && cr.trocas) || []; return t.length > 0 && t.every(x => x.feito); };
+    function achadoResolvido(r, a) {
+        const k = chaveAchado(a), c = r.corr || {}, f = c.__opus__;
+        return corrFeita(c[k]) || !!(corrFeita(f) && !f.obs && Array.isArray(f.chaves) && f.chaves.includes(k));
+    }
+    function conferirAplicadas(r) {
+        let c = null; try { c = contextoLaudo(); } catch (e) { c = null; }
+        if (!c || (r.exa != null && c.exa !== r.exa)) return;
+        const txt = norm(c.texto);
+        Object.values(r.corr || {}).forEach(cr => ((cr && cr.trocas) || []).forEach(t => {
+            if (!t.feito) return;
+            const n = norm(t.novo).slice(0, 80), o = norm(t.original).slice(0, 80);
+            if (n && o && !txt.includes(n) && txt.includes(o)) t.feito = false; // só quando o texto antigo voltou (conservador)
+        }));
+    }
+    const pendencias = r => { conferirAplicadas(r); return achadosAtuais(r).filter(a => !r.ignorados.has(chaveAchado(a)) && !achadoResolvido(r, a)).length; };
     // erro que impede liberar sozinho: só do Claude principal (Gemini/Grok lentos ou fora não seguram o Liberar)
     const erroPrincipal = r => !!(r.err[r.revisor] || r.err.jev && !REV_LLMS.some(m => r.res[m]));
     // ---------- v1.33: contexto do atendimento (montado na hora; nada é gravado no PACS) ----------
@@ -5941,5 +5971,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg() };
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+        renderRevisao, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
