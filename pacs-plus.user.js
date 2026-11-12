@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.51.0
+// @version      1.52.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -346,6 +346,10 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-motivo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; padding: 5px 8px; border: 1px dashed #475569; border-radius: 7px; font-size: 11.5px; color: #cbd5e1; }
 #pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; } #pp-rev .pr-mot-l { flex-basis: 100%; display: flex; gap: 4px; margin-top: 3px; } #pp-rev .pr-mot-l input { flex: 1; min-width: 0; background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 5px; padding: 3px 6px; font: inherit; }
 #pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#pp-rev .pr-ig { margin-top: 5px; padding: 4px 9px 5px; border: 1px solid #334155; border-left: 4px solid #475569; border-radius: 7px; background: #131c2e; font-size: 11.5px; color: #cbd5e1; }
+#pp-rev .pr-ig-t { color: #64748b; text-decoration: line-through; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } #pp-rev .pr-ig-ok { color: #86efac; }
+#pp-rev .pr-ig-m { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 3px; } #pp-rev .pr-ig-m .pr-b { padding: 1px 7px; font-size: 11px; } #pp-rev .pr-ig-m .pr-x { margin-left: auto; }
+#pp-rev .pr-ig-m input { flex: 1 1 100%; min-width: 0; background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 5px; padding: 3px 6px; font: inherit; }
 #pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; } #pp-rev .pr-mini.ok { border-left-color: #10b981; color: #86efac; }
 #pp-rev .pr-resp { display: flex; gap: 6px; align-items: flex-end; margin-top: 6px; }
 #pp-rev .pr-resp textarea { flex: 1; min-height: 38px; resize: vertical; background: #0f172a; color: #e5e7eb; border: 1px solid #6d28d9; border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
@@ -2900,6 +2904,9 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                 if (!mm) continue;
                 const antes = resto.slice(0, mm.idx);
                 if ((r.bloq || BLOQ_REF).test(antes)) continue;
+                // v1.52: "Microcálculo calicinal no terço inferior do rim esquerdo, medindo 0,2 cm" — a medida é do achado, o órgão só localiza
+                const pre = t.slice(Math.max(0, t.lastIndexOf('\n', m.index) + 1, t.lastIndexOf('. ', m.index) + 2), m.index);
+                if (!r.bloq && /\b(?:d[oe]|n[oa]|em|ao|pelo)\s+$/i.test(pre) && BLOQ_REF.test(pre)) continue;
                 const nums = mm.m[1].split(/\s*[x×]\s*/).map(numBR).filter(Number.isFinite);
                 if (!nums.length) continue;
                 let v = r.pega === 'max' ? Math.max(...nums) : nums[0];
@@ -3096,7 +3103,7 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
         { ex: /mama|mamar/, txt: `BI-RADS 5ª ed.: 0 incompleto · 1 negativo · 2 benigno · 3 provavelmente benigno (≤ 2%, seguimento curto) · 4A/4B/4C suspeito (biópsia) · 5 altamente sugestivo (≥ 95%) · 6 malignidade comprovada. Descritores de suspeição (forma irregular, orientação não paralela, margem não circunscrita: indistinta, angulada, microlobulada, espiculada) com categoria 2/3 = incoerente.` },
         { ex: /pelv|transvag|endovag|anex|ovari|ginec|utero/, txt: `O-RADS US v2022: 1 normal (folículo ≤ 3 cm, corpo lúteo) · 2 quase certamente benigno (cisto simples/unilocular liso < 10 cm; hemorrágico, dermoide, endometrioma típicos < 10 cm) · 3 baixo risco (unilocular/bilocular liso ≥ 10 cm; multilocular liso < 10 cm sem fluxo/fluxo leve; sólido liso) · 4 intermediário (multilocular irregular ou fluxo moderado; unilocular com componente sólido/1–3 papilas) · 5 alto risco (≥ 4 papilas; sólido irregular; ascite/nódulos peritoneais). Volume ovariano menacme 3–10 cm³, menopausa 1–5; endométrio menopausa < 4 mm.` },
         { ex: /rim|rins|renal|urotom|abdom|urinar/, tipo: 'TC', txt: `Bosniak 2019 (TC/RM): I parede fina lisa sem septo/calcificação/realce, −9 a 20 UH · II até 3 septos finos, calcificação, hiperatenuante ≥ 70 UH sem contraste · IIF parede/septo minimamente espessado (3 mm) liso com realce ou ≥ 4 septos finos · III parede/septo ≥ 4 mm ou irregular com realce · IV nódulo com realce. Aponte categoria incoerente com a descrição.` },
-        { ex: /torax|pulm|tórax/, tipo: 'TC', txt: `Fleischner 2017 (nódulo incidental, ≥ 35 anos): sólido único < 6 mm nada (alto risco: TC 12 m opcional); 6–8 mm TC 6–12 m; > 8 mm TC 3 m, PET-CT ou biópsia. Múltiplos ≥ 6 mm TC 3–6 m. Vidro fosco ≥ 6 mm TC 6–12 m e depois a cada 2 anos até 5 anos; parte sólida ≥ 6 mm TC 3–6 m. Aponte conduta incoerente com tamanho/tipo.` },
+        { ex: /torax|pulm|tórax/, tipo: 'TC', txt: `Fleischner 2017 (nódulo incidental, ≥ 35 anos): sólido único < 6 mm nada (alto risco: TC 12 m opcional); 6–8 mm TC 6–12 m; > 8 mm TC 3 m, PET-CT ou biópsia. Múltiplos ≥ 6 mm TC 3–6 m. Vidro fosco ≥ 6 mm TC 6–12 m e depois a cada 2 anos até 5 anos; parte sólida ≥ 6 mm TC 3–6 m. Aponte conduta incoerente com tamanho/tipo. NÃO se aplica (não aponte falta de seguimento nem conduta): nódulo calcificado, granuloma, nódulo descrito como residual, sequelar ou cicatricial, estável há ≥ 2 anos, perifissural / linfonodo intrapulmonar típico; paciente < 35 anos, com neoplasia conhecida ou imunossuprimido.` },
         { ex: /carot|vertebr|cervical.*doppler|doppler.*cervical/, txt: `Carótidas (DIC 2015/SRU): ACI < 50%: VPS < 140, VDF < 40, ACI/ACC < 2,0 · 50–69%: VPS 140–230, VDF 40–100, razão 2,0–4,0 · ≥ 70%: VPS > 230, VDF > 100, razão > 4,0. Placa: EMI > 1,5 mm ou protrusão > 0,5 mm. Vertebral: < 50% VPS ≥ 85; 50–69% ≥ 140; > 70% ≥ 210 cm/s. Aponte grau de estenose incoerente com as velocidades.` },
         { ex: /abdom|rins|renal|figado|hepat|vias urin|prostat|pelv|aort|retroperit/, tipo: 'US', txt: `Referências do serviço (só confira medidas INFORMADAS): rim 9–13 cm; baço até 12 cm; lobo hepático D ≤ 15 cm, E ≤ 10 cm; hepatocolédoco ≤ 6 mm (+1 mm/década após 60, máx. 10); v. porta ≤ 12 mm; parede da vesícula ≤ 3 mm; Wirsung ≤ 2 mm; aorta ≤ 24 mm (ectasia 24–30, aneurisma > 30); a. ilíaca ≤ 12 mm (ectasia 12–15, aneurisma > 15); próstata < 30 cm³ até 49 anos e < 40 cm³ a partir de 50 anos (volume entre 30 e 40 cm³ com 50 anos ou mais NÃO é alteração e não precisa ir para a impressão); apêndice ≤ 6 mm; hidronefrose Grignon I < 10 mm · II 10–15 · III > 15 ou pequena dilatação calicinal · IV moderada (córtex > 2 mm) · V grande (córtex < 2 mm).` },
         { ex: /escrot|testic|bolsa/, txt: `Testículo: volume pelo elipsoide 0,52 (ESUR-SPIWG 2024); hipotrofia no adulto: direito < 12 mL, esquerdo < 11 mL. Varicocele: veias > 2 mm com refluxo > 1 s à Valsalva.` },
@@ -3211,7 +3218,7 @@ ${c.texto}`;
             ig_biometria: ['medidas', 'grave', 'A idade gestacional da conclusão não é coerente com a biometria descrita ou com a idade gestacional de referência citada (DUM ou primeiro ultrassom).'],
             peso_percentil: ['classificacao', 'grave', 'A classificação do peso fetal (adequado, pequeno ou grande para a idade gestacional) é incoerente com o percentil informado (PIG < p10, GIG > p90).'] } },
         { re: /torax|pulm/, so: 'TC', q: {
-            fleischner_conduta: ['classificacao', 'grave', 'A recomendação de seguimento de nódulo pulmonar não segue Fleischner 2017 para o tamanho, número e tipo (sólido, subsólido) descritos, ou falta recomendação quando a diretriz indica seguimento.'] } }
+            fleischner_conduta: ['classificacao', 'grave', 'A recomendação de seguimento de nódulo pulmonar não segue Fleischner 2017 para o tamanho, número e tipo (sólido, subsólido) descritos, ou falta recomendação quando a diretriz indica seguimento. (Nódulo calcificado, granuloma, residual, sequelar, cicatricial, estável há 2 anos ou mais ou perifissural típico não pede seguimento: isso é coerente, não é erro.)'] } }
     ];
     // v1.23 — lateralidade por ESCOLHA (o Jev diz o lado no corpo e na conclusão; o Plus compara de forma exata)
     const JEV_LADO = { direito: 'lado direito', esquerdo: 'lado esquerdo', bilateral: 'ambos os lados', nenhum: 'sem achado anormal lateralizado, ou exame sem lado' };
@@ -3507,6 +3514,28 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`);
         return { trocas, obs: String(inp.observacao || '').slice(0, 400), ms: performance.now() - t0, modelo: d.modelo || modelo };
     }
     const chaveAchado = a => norm(a.categoria + a.trecho + a.explicacao);
+    // v1.52 — motivos rápidos do Ignorar por categoria do achado (os mais prováveis para aquele tipo de alarme) + 2 gerais.
+    const MOT_CAT = {
+        medidas: ['medida é de outra estrutura', 'referência não se aplica', 'já está descrito'],
+        classificacao: ['achado benigno / sequelar', 'conduta não se aplica', 'classificação está correta'],
+        lateralidade: ['lado está correto', 'são estruturas diferentes', 'laudo conjunto'],
+        corpo_conclusao: ['já está na conclusão', 'não precisa ir à conclusão', 'laudo conjunto'],
+        exame_texto: ['laudo conjunto', 'nome genérico', 'técnica está correta'],
+        sexo_anatomia: ['nome genérico', 'cadastro errado'],
+        redacao_sentido: ['é meu estilo', 'texto está correto'],
+        padrao: ['é meu estilo', 'não se aplica a este exame'],
+        critico: ['não é crítico', 'já comunicado'],
+        campo_vazio: ['não se aplica a este exame'],
+        outro: ['laudo conjunto', 'nome genérico']
+    };
+    const MOT_GERAL = ['IA errou', 'irrelevante'];
+    function htmlIgnorado(r, a) {
+        const k = chaveAchado(a), st = r.ignMot && r.ignMot[k], ed = r.ignEdit === k;
+        const tit = `${CAT_NOME[a.categoria] || a.categoria} — ${a.explicacao}`;
+        return `<div class="pr-ig" data-ig="${esc(k)}"><div class="pr-ig-t" title="${esc(tit)}">${esc(tit.slice(0, 110))}</div>` +
+            (!st || st.pulado ? '' : st.mot ? `<div class="pr-ig-ok">✓ ${esc(st.mot)}</div>` :
+                `<div class="pr-ig-m">${(MOT_CAT[a.categoria] || MOT_CAT.outro).concat(MOT_GERAL).map(m => `<button class="pr-b sec" data-mot="${esc(m)}">${esc(m)}</button>`).join('')}<button class="pr-b sec" data-ig-ed title="Escrever com as suas palavras o que saiu errado">✎ escrever</button><button class="pr-x" data-ig-x title="Pular (fica sem motivo)">✕</button>${ed ? `<input class="pr-ig-txt" type="text" maxlength="300" placeholder="o que saiu errado? Enter grava · um clique num motivo grava os dois (sem nome de paciente)" value="${esc(r.motTxt || '')}">` : ''}</div>`) + '</div>';
+    }
     async function pedirCorrecao(r, a, completa, nivelPedido) {
         const k = completa ? '__opus__' : chaveAchado(a);
         const nivel = completa ? (nivelPedido === 'fable' ? 'fable' : 'opus') : nivelCorrecao(a);
@@ -4694,7 +4723,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         p.style.top = Math.round(Math.max(48, Math.min(tb ? tb.getBoundingClientRect().bottom + 8 : 96, window.innerHeight - 320))) + 'px';
         arrAplicar(p);
         conferirAplicadas(r);
-        const todos = achadosAtuais(r).filter(a => !r.ignorados.has(norm(a.categoria + a.trecho + a.explicacao)));
+        const lista = achadosAtuais(r), todos = lista.filter(a => !r.ignorados.has(chaveAchado(a)));
         const pend = todos.filter(a => !achadoResolvido(r, a)), nRes = todos.length - pend.length; // v1.47: corrigido no laudo não é pendência
         const graves = pend.filter(a => a.gravidade === 'grave').length;
         const abertos = r.abertos = r.abertos || new Set();
@@ -4732,8 +4761,7 @@ ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas
 ${r.depois ? `<div class="pr-lib ${pendTot ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : confRod ? '⏳ Conferindo o texto corrigido (Jev + Luna)…' : pendTot ? `⚠ ${pendTot} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nConf ? ` — ${nConf} da conferência rápida` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo${r.conf && r.conf.estado === 'ok' ? ', conferidas' : ''}.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando || confRod ? 'Liberar sem esperar' : pendTot ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ ${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'}) — ${estadoCorr(r.corr.__opus__)}</div>` : `<b>${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'})</b>` + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button> <button class="pr-b cor" id="pr-full-fab" title="Claude Fable 5.2 (esforço médio) revisa o laudo inteiro e propõe as correções — acima do Opus, mais lento e ≈ 2× o custo">👑 Fable</button>'}</div>` : ''}
-${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button><span class="pr-mot-l"><input id="pr-mot-txt" type="text" maxlength="300" placeholder="ou escreva o que saiu errado (sem nome de paciente)" value="${esc(r.motTxt || '')}"><button class="pr-b cor" id="pr-mot-ok" title="Grava o que você escreveu como motivo (Enter). Clicar num dos motivos acima grava o motivo + o texto.">Salvar</button></span></div>` : ''}
-<div class="pr-lista">${todos.length ? todos.map((a, i) => { const res = achadoResolvido(r, a); return mini.has(chaveAchado(a)) || (res && !abertos.has(chaveAchado(a))) ? `<div class="pr-mini ${res ? 'ok' : a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${res ? '✓' : a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${res ? 'corrigido no laudo' : r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
+<div class="pr-lista">${lista.length ? lista.map(a => { if (r.ignorados.has(chaveAchado(a))) return htmlIgnorado(r, a); const i = todos.indexOf(a), res = achadoResolvido(r, a); return mini.has(chaveAchado(a)) || (res && !abertos.has(chaveAchado(a))) ? `<div class="pr-mini ${res ? 'ok' : a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${res ? '✓' : a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${res ? 'corrigido no laudo' : r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
 <div class="pr-ex">${esc(a.explicacao)}</div>${(a.outras || []).map(o => `<div class="pr-outra"><b>${esc(o.fonte.split('+').map(f => f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f).join(' + '))}:</b> ${esc(o.explicacao)}</div>`).join('')}${a.fraco ? `<div class="pr-fraco">provável falso alarme — ${[a.juiz != null ? 'Jev ' + fmt(a.juiz, 2) : '', a.juizL != null ? 'Luna ' + fmt(a.juizL, 2) : ''].filter(Boolean).join(' · ')}</div>` : (a.juiz != null || a.juizL != null) && a.fontes.some(f => REV_LLMS.includes(f)) ? `<div class="pr-fraco">juízes: ${[a.juiz != null ? 'Jev ' + fmt(a.juiz, 2) : '', a.juizL != null ? 'Luna ' + fmt(a.juizL, 2) : ''].filter(Boolean).join(' · ')}</div>` : ''}
@@ -4775,31 +4803,37 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarMaster(r, 'fable');
         const pag = p.querySelector('#pr-argon'); if (pag) pag.onclick = () => rodarMaster(r, 'argon');
         const pcb = p.querySelector('#pr-carbon'); if (pcb) pcb.onclick = () => rodarMaster(r, 'carbon');
-        // v1.51 — motivo por escrito: fica na coluna "motivo" do registro (rev_achados), sozinho ou junto do motivo clicado.
-        // Mesma limpeza da explicação (sequência de 3+ palavras em maiúsculas vira «…»), para não gravar nome de paciente.
+        // v1.52 — motivo dentro do próprio item ignorado (antes: uma barra só, no topo, que valia para o último ignorado e
+        // se perdia ao ignorar o seguinte). Os motivos rápidos mudam conforme a categoria do achado (MOT_CAT). Tudo opcional:
+        // liberar nunca espera motivo. Texto livre: mesma limpeza da v1.51 (3+ palavras em maiúsculas viram «…», 300 caracteres).
         const motLimpo = t => String(t || '').replace(/\s+/g, ' ').trim().replace(/\b[A-ZÀ-Ü]{3,}(?:\s+[A-ZÀ-Ü]{2,}){2,}\b/g, '«…»').slice(0, 300);
-        const motGravar = base => {
-            const txt = motLimpo(r.motTxt), mot = [base, txt].filter(Boolean).join(' — ');
+        const motGravar = (k, base) => {
+            const st = r.ignMot && r.ignMot[k]; if (!st) return;
+            const txt = r.ignEdit === k ? motLimpo(r.motTxt) : '', mot = [base, txt].filter(Boolean).join(' — ');
             if (!mot) return;
-            if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', mot)]);
-            r.ultIgn = null; r.motTxt = ''; r.motFoco = false; renderRevisao();
+            revNuvemReg([linhaAchado(r, st.a, 'motivo', mot)]);
+            st.mot = mot; if (r.ignEdit === k) { r.ignEdit = null; r.motTxt = ''; r.motFoco = false; }
+            renderRevisao();
         };
-        p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => motGravar(b.dataset.mot); });
-        const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; r.motTxt = ''; r.motFoco = false; renderRevisao(); };
-        const mt = p.querySelector('#pr-mot-txt');
-        if (mt) {
-            mt.oninput = () => { r.motTxt = mt.value; };
-            mt.onfocus = () => { r.motFoco = true; }; mt.onblur = () => { if (document.getElementById('pp-rev') && mt.isConnected) r.motFoco = false; };
-            mt.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); r.motTxt = mt.value; motGravar(''); } };
-            if (r.motFoco) { mt.focus(); try { mt.setSelectionRange(mt.value.length, mt.value.length); } catch (e) { /* ok */ } }
-            p.querySelector('#pr-mot-ok').onclick = () => { r.motTxt = mt.value; motGravar(''); };
-        }
+        p.querySelectorAll('.pr-ig').forEach(el => {
+            const k = el.dataset.ig;
+            el.querySelectorAll('[data-mot]').forEach(b => { b.onclick = () => motGravar(k, b.dataset.mot); });
+            const ed = el.querySelector('[data-ig-ed]'); if (ed) ed.onclick = () => { r.ignEdit = r.ignEdit === k ? null : k; r.motTxt = ''; r.motFoco = r.ignEdit === k; renderRevisao(); };
+            const px = el.querySelector('[data-ig-x]'); if (px) px.onclick = () => { r.ignMot[k].pulado = true; if (r.ignEdit === k) { r.ignEdit = null; r.motTxt = ''; r.motFoco = false; } renderRevisao(); };
+            const mt = el.querySelector('.pr-ig-txt');
+            if (mt) {
+                mt.oninput = () => { r.motTxt = mt.value; };
+                mt.onfocus = () => { r.motFoco = true; }; mt.onblur = () => { if (document.getElementById('pp-rev') && mt.isConnected) r.motFoco = false; };
+                mt.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); r.motTxt = mt.value; motGravar(k, ''); } else if (e.key === 'Escape') { r.ignEdit = null; r.motTxt = ''; r.motFoco = false; renderRevisao(); } };
+                if (r.motFoco) { mt.focus(); try { mt.setSelectionRange(mt.value.length, mt.value.length); } catch (e) { /* ok */ } }
+            }
+        });
         p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); abertos.add(el.dataset.maxi); renderRevisao(); }; });
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
             const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); abertos.delete(chaveAchado(a)); renderRevisao(); };
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
-            el.querySelector('[data-ign]').onclick = () => { r.motTxt = ''; r.motFoco = false; r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); r.ultIgn = a; renderRevisao(); };
+            el.querySelector('[data-ign]').onclick = () => { (r.ignMot = r.ignMot || {})[chaveAchado(a)] = { a, mot: null, pulado: false }; r.ignorados.add(chaveAchado(a)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); renderRevisao(); };
             const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); revNuvemReg([linhaAchado(r, a, 'corrigido')]); pedirCorrecao(r, a, false); };
             const cm = el.querySelector('[data-com]'); if (cm) cm.onclick = () => abrirComunicacao(null, 'laudo');
             ligarCorrecao(el, r, chaveAchado(a));
@@ -6132,6 +6166,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
