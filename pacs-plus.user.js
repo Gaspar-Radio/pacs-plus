@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.47.0
+// @version      1.48.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -333,6 +333,8 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev.min { width: auto; overflow: visible; border-color: #f59e0b; }
 #pp-rev .pr-mini { padding: 6px 12px; cursor: pointer; font-weight: 700; white-space: nowrap; }
 #pp-rev .pr-mini .pr-g { color: #f87171; } #pp-rev .pr-mini .pr-exp { color: #94a3b8; margin-left: 6px; }
+#pp-rev .pr-conf { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: #172033; border: 1px solid #334155; color: #cbd5e1; } #pp-rev .pr-conf.ok { background: #052e2b; border-color: #10b981; color: #a7f3d0; } #pp-rev .pr-conf.g { background: #422006; border-color: #f59e0b; color: #fde68a; } #pp-rev .pr-conf.err { color: #fca5a5; } #pp-rev .pr-confp { margin-top: 3px; font-weight: 400; } #pp-rev .pr-confp small { color: #94a3b8; }
+#pp-rev .pr-cfgbox { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 8px; border: 1px dashed #334155; border-radius: 6px; }
 #pp-rev .pr-alt { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: #422006; border: 1px solid #b45309; color: #fde68a; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
 #pp-rev .pr-ped { padding: 8px 10px 2px; }
 #pp-rev .pr-ped textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 54px; background: #1e293b; color: #f1f5f9; border: 1px solid #475569; border-radius: 6px; padding: 6px 8px; font: inherit; }
@@ -3545,8 +3547,73 @@ Responda SEMPRE chamando a ferramenta "correcao" uma única vez.`;
         if (revAtual === r) renderRevisao();
     }
     function aplicarTrocas(cr) {
-        (cr.trocas || []).forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; } });
+        let n = 0;
+        (cr.trocas || []).forEach(t => { if (t.feito) return; const f = substituirNoLaudo(t.original, t.novo, t.dica); if (f) t.falha = f; else { t.feito = true; t.falha = ''; n++; } });
+        if (n && revAtual) agendarConferencia(revAtual); // v1.48: confere o texto novo com Jev + Luna
     }
+    // v1.48 — CONFERÊNCIA RÁPIDA: depois de uma correção aplicada pelo painel, só os checklists (Jev + Luna, ~1–3 s, baratos)
+    // releem o laudo JÁ CORRIGIDO. Mostra apenas o que é novo: categoria que não está pendente nem foi ignorada.
+    // Não substitui a revisão completa (botão 🔄); texto mexido de novo descarta o resultado.
+    let confTimer = 0;
+    const CONF_LIM_MS = 20000;
+    function agendarConferencia(r) {
+        clearTimeout(confTimer);
+        r.conf = { estado: 'espera' };
+        confTimer = setTimeout(() => { conferenciaRapida(r).catch(() => { /* aparece no painel */ }); }, 900);
+    }
+    async function conferenciaRapida(r) {
+        let c = null; try { c = contextoLaudo(); } catch (e) { c = null; }
+        const engs = ['jev', 'luna'].filter(e => (r.ativos || []).includes(e) && !(e === 'luna' && lunaSemChave));
+        if (!c || c.exa !== r.exa || c.texto.length < 30 || !engs.length) { r.conf = null; if (revAtual === r) renderRevisao(); return; }
+        if (r.ctx && r.ctx.ctxAtend && !c.ctxAtend) c.ctxAtend = r.ctx.ctxAtend;
+        const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico), t0 = performance.now();
+        const conf = r.conf = { estado: 'rodando', hash };
+        if (revAtual === r) renderRevisao();
+        const res = await Promise.all(engs.map(e => Promise.race([revJev(c, e), new Promise((_, rej) => setTimeout(() => rej(new Error('demorou mais de ' + CONF_LIM_MS / 1000 + ' s')), CONF_LIM_MS))])
+            .then(x => ({ e, x })).catch(err => ({ e, err: String(err && err.message || err).slice(0, 120) }))));
+        if (revAtual !== r || r.conf !== conf) return; // laudo mexido de novo ou outra conferência no lugar
+        const ok = res.filter(x => x.x);
+        if (!ok.length) { r.conf = { estado: 'erro', hash, erro: res.map(x => CK[x.e].nome + ': ' + x.err).join(' · ') }; renderRevisao(); return; }
+        const todos = achadosAtuais(r), fora = new Set();
+        todos.forEach(a => { if (r.ignorados.has(chaveAchado(a)) || !achadoResolvido(r, a)) fora.add(a.categoria); }); // já pendente ou ignorada: não repete
+        const porCat = new Map();
+        ok.forEach(({ e, x }) => (x.achados || []).forEach(j => {
+            const pr = j[CK[e].pk];
+            if ((pr != null && pr < JEV_LIM.sozinho) || fora.has(j.categoria)) return;
+            const o = porCat.get(j.categoria) || { categoria: j.categoria, explicacao: String(j.explicacao || '').replace(/\s*\((Jev|Luna) [\d.,]+\)\s*$/, ''), quem: [] };
+            o.quem.push(CK[e].nome + (pr != null ? ' ' + fmt(pr, 2) : ''));
+            porCat.set(j.categoria, o);
+        }));
+        r.conf = { estado: 'ok', hash, pontos: [...porCat.values()], quem: ok.map(x => CK[x.e].nome).join(' + '), ms: performance.now() - t0 };
+        renderRevisao();
+    }
+    const confPontos = r => (r.conf && r.conf.estado === 'ok' ? r.conf.pontos.length : 0);
+    const confRodando = r => !!(r.conf && (r.conf.estado === 'espera' || r.conf.estado === 'rodando'));
+    function htmlConferencia(r) {
+        const f = r.conf; if (!f) return '';
+        if (f.estado === 'espera' || f.estado === 'rodando') return '<div class="pr-conf">⏳ Conferência rápida do texto corrigido (Jev + Luna)…</div>';
+        if (f.estado === 'erro') return `<div class="pr-conf err">Conferência rápida não rodou (${esc(f.erro)}). Use 🔄 Revisar novamente se quiser confirmar.</div>`;
+        if (!f.pontos.length) return `<div class="pr-conf ok">✓ Conferência rápida (${esc(f.quem)}, ${fmt(f.ms / 1000, 1)} s): nada novo no texto corrigido.</div>`;
+        return `<div class="pr-conf g">⚠ Conferência rápida (${esc(f.quem)}): ${f.pontos.length} ponto(s) novo(s) no texto corrigido${f.pontos.map(x => `<div class="pr-confp">• <b>${esc(CAT_NOME[x.categoria] || x.categoria)}</b> — ${esc(x.explicacao)} <small>(${esc(x.quem.join(' · '))})</small></div>`).join('')}</div>`;
+    }
+    // v1.48 — o aviso "O laudo mudou" passa a valer AO VIVO (antes só ao reabrir o painel): a cada 1,5 s, com o texto parado
+    // por um ciclo, atualiza o texto de referência, as regras e o aviso. Voltou ao texto revisado → o aviso some.
+    function revVigiar() {
+        const r = revAtual, p = document.getElementById('pp-rev');
+        if (!r || !p || r.carregando) return;
+        let c = null; try { c = contextoLaudo(); } catch (e) { c = null; }
+        if (!c || c.exa !== r.exa) return;
+        const hash = hashTxt(c.texto + '|' + c.exame + '|' + c.critico);
+        if (hash === r.hash) { r.hashVisto = hash; return; }
+        if (r.hashVisto !== hash) { r.hashVisto = hash; return; } // ainda digitando: espera o texto parar
+        if (r.ctx && r.ctx.ctxAtend && !c.ctxAtend) c.ctxAtend = r.ctx.ctxAtend;
+        r.ctx = c; r.regras = regrasLaudo(c); r.hash = hash; r.alterado = hash !== r.hashRevisado;
+        if (r.conf && r.conf.hash && r.conf.hash !== hash) r.conf = null; // conferência era de outro texto
+        const rolagem = p.scrollTop;
+        renderRevisao();
+        const p2 = document.getElementById('pp-rev'); if (p2) p2.scrollTop = rolagem;
+    }
+    setInterval(() => { try { if (cfg.master && on('revisaoIA')) revVigiar(); } catch (e) { /* segue */ } }, 1500);
     function htmlCorrecao(cr, k) {
         if (!cr) return '';
         // v1.31: conversa do item (observação da IA ↔ resposta do médico)
@@ -3595,6 +3662,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     }
 
     // ---------- tela ----------
+    let revOpcoesAbertas = false; // v1.48: ⚙ do rodapé do revisor (vale até recarregar a página)
     let revAtual = null; // { hash, ctx, regras, haiku, gemini, erroH, erroG, carregando, ignorados:Set, depois:fn }
     const hashTxt = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return String(h); };
     function revPainel() {
@@ -3610,7 +3678,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         if (!c) return;
         if (revAtual && revAtual.exa === c.exa) {
             revAtual.min = false;
-            revAtual.alterado = hashTxt(c.texto + '|' + c.exame + '|' + c.critico) !== revAtual.hash;
+            revAtual.alterado = hashTxt(c.texto + '|' + c.exame + '|' + c.critico) !== (revAtual.hashRevisado || revAtual.hash);
             renderRevisao(); return;
         }
         revisar(false);
@@ -4561,6 +4629,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const pend = todos.filter(a => !achadoResolvido(r, a)), nRes = todos.length - pend.length; // v1.47: corrigido no laudo não é pendência
         const graves = pend.filter(a => a.gravidade === 'grave').length;
         const abertos = r.abertos = r.abertos || new Set();
+        const nConf = confPontos(r), confRod = confRodando(r), pendTot = pend.length + nConf; // v1.48: pontos da conferência rápida contam no aviso de liberar
         // v1.20: preserva o que está sendo digitado no pedido (o painel é redesenhado quando cada IA responde)
         const ta0 = p.querySelector('#pr-ped'), foco = ta0 && document.activeElement === ta0 ? [ta0.selectionStart, ta0.selectionEnd] : null;
         const rt0 = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('pr-rt') ? document.activeElement : null;
@@ -4584,15 +4653,15 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 <select id="pr-revisor" title="Qual Claude revisa">${Object.entries(REVISORES).map(([k, v]) => `<option value="${k}" ${revisorDe(rc) === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
 <button class="pr-x pr-min" title="Minimizar">▁</button><button class="pr-x" title="Fechar (Esc) — o resultado fica guardado; 🛡 reabre sem revisar de novo">✕</button></div>
 <div class="pr-sts"><span class="pr-st ok">Regras ✓ ${r.regras.length}</span>${r.ativos.map(st).join('')}</div>
-${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}
+${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde esta revisão. <button class="pr-b sec" id="pr-alt-rev">🔄 Revisar novamente</button></div>` : ''}${r.carregando ? '' : htmlConferencia(r)}
 <div class="pr-ped"><textarea id="pr-ped" rows="3" placeholder="💬 Pedido ao Opus ou ao Fable — digite ou cole o ditado. Ex.: “revise a impressão”, “insira que a vesícula não foi visualizada por jejum inadequado”, “deixe a conclusão em tópicos”."></textarea>
 <div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button><button class="pr-b cor" id="pr-ped-fab" title="Claude Fable 5.2 (esforço médio), acima do Opus — mais lento e ≈ 2× o custo">👑 Enviar ao Fable</button></div>
 ${(r.pedidos || []).slice().reverse().map(k => !r.corr[k] ? '' : mini.has(k) ? `<div class="pr-mini" data-maxi="${k}">▸ 💬 “${esc(String(r.corr[k].pedido).slice(0, 70))}” — ${estadoCorr(r.corr[k])}</div>` : `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k], k)}</div>`).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
 ${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
-${r.depois ? `<div class="pr-lib ${pend.length ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : pend.length ? `⚠ ${pend.length} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo.` : '✓ Sem pendências.'}
-<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando ? 'Liberar sem esperar' : pend.length ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
+${r.depois ? `<div class="pr-lib ${pendTot ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : confRod ? '⏳ Conferindo o texto corrigido (Jev + Luna)…' : pendTot ? `⚠ ${pendTot} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nConf ? ` — ${nConf} da conferência rápida` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo${r.conf && r.conf.estado === 'ok' ? ', conferidas' : ''}.` : '✓ Sem pendências.'}
+<div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando || confRod ? 'Liberar sem esperar' : pendTot ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ ${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'}) — ${estadoCorr(r.corr.__opus__)}</div>` : `<b>${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'})</b>` + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button> <button class="pr-b cor" id="pr-full-fab" title="Claude Fable 5.2 (esforço médio) revisa o laudo inteiro e propõe as correções — acima do Opus, mais lento e ≈ 2× o custo">👑 Fable</button>'}</div>` : ''}
 ${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button></div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => { const res = achadoResolvido(r, a); return mini.has(chaveAchado(a)) || (res && !abertos.has(chaveAchado(a))) ? `<div class="pr-mini ${res ? 'ok' : a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${res ? '✓' : a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${res ? 'corrigido no laudo' : r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
@@ -4604,9 +4673,10 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`; }).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
-<label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
+<button class="pr-b sec" id="pr-cfg" title="Opções pouco usadas: revisar ao colar, + Gemini, + Grok">⚙ Opções${[rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).length ? ' <small>· ' + [rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).join(', ') + '</small>' : ''} ${revOpcoesAbertas ? '▴' : '▾'}</button>
+${revOpcoesAbertas ? `<div class="pr-cfgbox"><label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
 <label title="Gemini 3.8 Flash como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
-<label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label>
+<label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label></div>` : ''}
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
 <span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-fable" ${r.ativos.includes('fable') ? 'disabled' : ''} title="Revisor MASTER — Claude Fable 5.2, acima do Opus. Use em laudo complexo ou quando quiser a palavra final (≈ 2× o custo do Opus, ~10–30 s)">👑 Master (Fable)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
@@ -4625,10 +4695,11 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-modo').onchange = e => { cfg.rev = Object.assign(revCfg(), { modo: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
-        p.querySelector('#pr-gemini').onchange = e => { cfg.rev = Object.assign(revCfg(), { gemini: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('gemini')) rodarMotor(r, 'gemini'); };
-        p.querySelector('#pr-colar').onchange = e => { cfg.rev = Object.assign(revCfg(), { aoColar: e.target.checked }); saveCfg(); };
+        p.querySelector('#pr-cfg').onclick = () => { revOpcoesAbertas = !revOpcoesAbertas; renderRevisao(); }; // v1.48: opções pouco usadas ficam recolhidas
+        const og = p.querySelector('#pr-gemini'); if (og) og.onchange = e => { cfg.rev = Object.assign(revCfg(), { gemini: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('gemini')) rodarMotor(r, 'gemini'); renderRevisao(); };
+        const oc = p.querySelector('#pr-colar'); if (oc) oc.onchange = e => { cfg.rev = Object.assign(revCfg(), { aoColar: e.target.checked }); saveCfg(); renderRevisao(); };
         const tf = p.querySelector('#pr-tri-full'); if (tf) tf.onclick = () => revisar(true, r.depois);
-        p.querySelector('#pr-grok').onchange = e => { cfg.rev = Object.assign(revCfg(), { grok: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('grok')) { grokSemChave = false; rodarMotor(r, 'grok'); } };
+        const ok = p.querySelector('#pr-grok'); if (ok) ok.onchange = e => { cfg.rev = Object.assign(revCfg(), { grok: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('grok')) { grokSemChave = false; rodarMotor(r, 'grok'); } renderRevisao(); };
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
@@ -5972,5 +6043,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
     if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
-        renderRevisao, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
+        renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
