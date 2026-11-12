@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.50.0
+// @version      1.50.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3999,6 +3999,13 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         try { const v = JSON.parse(sessionStorage.getItem('ppser_' + k) || 'null'); if (v && v.st === 'ok') { serMem.set(k, v); return v; } } catch (e) { /* sem cache */ }
         return null;
     }
+    // v1.50.1 — a contagem guardada passa a ter VALIDADE. Antes valia enquanto a aba estivesse aberta: se o mouse passasse
+    // na linha quando só o scout tinha chegado ao PACS, o "1" ficava para sempre mesmo depois de o volume chegar (caso de
+    // 12/11/2026). Contagem baixa (≤ 3 imagens = estudo provavelmente ainda chegando) vale 1 min; as demais, 10 min.
+    // Vencida, é consultada de novo na próxima passada do mouse; enquanto consulta, o número antigo continua na tela.
+    const SER_VAL_POUCO = 60000, SER_VAL_NORMAL = 600000;
+    const serVelho = v => !!v && v.st === 'ok' && (!v.t || Date.now() - v.t > (v.img <= 3 ? SER_VAL_POUCO : SER_VAL_NORMAL));
+    const serVis = ex => { const v = serLer(ex); return v && v.st === 'carregando' && v.ant ? v.ant : v; }; // o que mostrar
     // chave do visualizador guardada SÓ na memória da página (nunca em storage); reaproveitada entre exames do mesmo AET
     // para gerar o mínimo de pedidos de URL do visualizador (cada pedido fica no log do exame como acesso às imagens)
     const serChaves = new Map();
@@ -4051,6 +4058,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         while (serAtivos < 2 && serFila.length) {
             const ex = serFila.shift(), k = serChave(ex); serAtivos++;
             serBuscar(ex).then(v => {
+                v.t = Date.now();
                 serMem.set(k, v);
                 try { sessionStorage.setItem('ppser_' + k, JSON.stringify(v)); } catch (e) { /* cheio */ }
             }).catch(e => { serMem.set(k, { st: 'erro', msg: String(e.message || e), t: Date.now() }); })
@@ -4068,8 +4076,9 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         let algum = false;
         ix.forEach(j => {
             const ex = serComp.exames[j], k = ex && serChave(ex);
-            if (!ex || serLer(ex)) return;
-            serMem.set(k, { st: 'carregando' }); serFila.push(ex); algum = true;
+            const v0 = ex && serLer(ex);
+            if (!ex || (v0 && !serVelho(v0))) return; // já contado e dentro da validade (ou contando)
+            serMem.set(k, { st: 'carregando', ant: v0 || null }); serFila.push(ex); algum = true;
         });
         if (algum) { serProximo(serIconesLista); serIconesLista(); }
     }
@@ -4105,13 +4114,13 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             let bd = olho && olho.querySelector(':scope > .pp-ser');
             const ex = comp.exames[i];
             if (!olho || !alvo.has(i)) { if (bd) bd.remove(); return; }
-            let v = serLer(ex);
+            let v = serVis(ex);
             if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
             if (!v) { if (bd) bd.remove(); return; } // ainda não pedido: sem selo
             if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; olho.style.position = 'relative'; olho.style.overflow = 'visible'; olho.appendChild(bd); }
             let txt = '…', cls = 'pp-ser', tit = 'Contando as séries deste exame…';
             if (v.st === 'ok') {
-                const vals = alvo.get(i).map(j => serLer(comp.exames[j])).filter(w => w && w.st === 'ok');
+                const vals = alvo.get(i).map(j => serVis(comp.exames[j])).filter(w => w && w.st === 'ok');
                 const maior = Math.max(...vals.map(w => w.img));
                 const scout = v.img <= 2;
                 txt = String(v.ser);
@@ -6101,5 +6110,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
     if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
-        comBotoesLaudo, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
+        comBotoesLaudo, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
