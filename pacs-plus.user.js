@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.50.1
+// @version      1.51.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -344,7 +344,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-pd { margin-top: 6px; }
 #pp-rev .pr-outra { margin-top: 3px; font-size: 12px; color: #94a3b8; border-left: 2px solid #475569; padding-left: 6px; }
 #pp-rev .pr-motivo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; padding: 5px 8px; border: 1px dashed #475569; border-radius: 7px; font-size: 11.5px; color: #cbd5e1; }
-#pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; }
+#pp-rev .pr-motivo .pr-b { padding: 2px 7px; font-size: 11px; } #pp-rev .pr-motivo .pr-x { margin-left: auto; } #pp-rev .pr-mot-l { flex-basis: 100%; display: flex; gap: 4px; margin-top: 3px; } #pp-rev .pr-mot-l input { flex: 1; min-width: 0; background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 5px; padding: 3px 6px; font: inherit; }
 #pp-rev .pr-mini { margin-top: 5px; padding: 5px 9px; border: 1px solid #334155; border-left: 4px solid #64748b; border-radius: 7px; background: #172033; color: #cbd5e1; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #pp-rev .pr-mini:hover { background: #1e293b; } #pp-rev .pr-mini.grave { border-left-color: #ef4444; } #pp-rev .pr-mini.atencao { border-left-color: #f59e0b; } #pp-rev .pr-mini.ok { border-left-color: #10b981; color: #86efac; }
 #pp-rev .pr-resp { display: flex; gap: 6px; align-items: flex-end; margin-top: 6px; }
@@ -387,7 +387,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.argon { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.argon { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.carbon { background: #3730a3; color: #e0e7ff; } #pp-rev .pr-mst { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 7px; border: 1px solid #a16207; border-radius: 7px; color: #fde68a; font-size: 12px; font-weight: 700; } #pp-rev .pr-mst .pr-b { padding: 3px 7px; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -3296,9 +3296,10 @@ ${c.texto}`;
     // O servidor (ia-proxy) só conhece o Hydrogen a partir da v17 dele: enquanto não for atualizado, ele devolveria o 3.6 Flash
     // calado → o Plus percebe (modelo devolvido ≠ pedido e sem lista de falhas) e volta a pedir o 3.8 Flash até recarregar a página.
     const REV_MASTER_TXT = '\nVocê é o REVISOR MASTER (última instância, acima do sênior): leia o laudo inteiro, confira cada número, classificação e conduta, e aponte SÓ o que é erro de verdade — falso alarme custa tempo do médico.';
-    const GEMINI_REVISOR = 'gemini-4-hydrogen', GEMINI_ANTERIOR = 'gemini-3.8-flash', GEMINI_MASTER = 'gemini-4-argon';
+    const GEMINI_REVISOR = 'gemini-4-hydrogen', GEMINI_ANTERIOR = 'gemini-3.8-flash';
+    const GEMINI_MASTERS = { argon: 'gemini-4-argon', carbon: 'gemini-4-carbon' }; // v1.51: Carbon entra em teste ao lado do Argon
     let geminiSrvAntigo = false;
-    const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
+    const geminiNome = m => /carbon/.test(m || '') ? 'Gemini 4 Carbon' : /argon/.test(m || '') ? 'Gemini 4 Argon' : /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     const geminiChamar = (c, modelo, nivel, extra) => iaProxy({ acao: 'gemini', modelo, system: revSistema(c, extra || ''), parts: [{ text: revMensagem(c) }],
         generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0, thinkingConfig: { thinkingLevel: nivel } } }); // v1.32.1: revisor comum em low (padrão medium = lento)
     function geminiResultado(d, fonte, t0) {
@@ -3316,14 +3317,17 @@ ${c.texto}`;
         }
         return geminiResultado(d, 'gemini', t0);
     }
-    // Revisor MASTER do Google: Argon em raciocínio médio (padrão do modelo), só sob pedido. Se o Google não entregar o Argon
-    // (o servidor cairia para o Flash), é erro visível — nunca um Flash passando por Master.
-    async function revArgon(c) {
-        const t0 = performance.now();
-        const d = await geminiChamar(c, GEMINI_MASTER, 'medium', REV_MASTER_TXT);
-        if (!/argon/.test(d.modelo || '')) throw new Error('o Google não respondeu com o Argon (veio ' + geminiNome(d.modelo) + ')' + (Array.isArray(d.falhas) && d.falhas.length ? ': ' + d.falhas.join(' | ').slice(0, 160) : ''));
-        return geminiResultado(d, 'argon', t0);
+    // Revisores MASTER do Google (só sob pedido), raciocínio médio: Argon e, em teste desde a v1.51, Carbon (mesmo preço por
+    // token; gasta ~2,5× os tokens de saída). Se o Google não entregar o modelo pedido (o servidor cairia para outro), é erro
+    // visível — nunca outro modelo passando por Master.
+    async function revGeminiMaster(c, fonte) {
+        const t0 = performance.now(), modelo = GEMINI_MASTERS[fonte];
+        const d = await geminiChamar(c, modelo, 'medium', REV_MASTER_TXT);
+        if (d.modelo !== modelo) throw new Error('o Google não respondeu com o ' + MOTORES[fonte].nome + ' (veio ' + geminiNome(d.modelo) + ')' + (Array.isArray(d.falhas) && d.falhas.length ? ': ' + d.falhas.join(' | ').slice(0, 160) : ''));
+        return geminiResultado(d, fonte, t0);
     }
+    const revArgon = c => revGeminiMaster(c, 'argon');
+    const revCarbon = c => revGeminiMaster(c, 'carbon');
     // v1.22.1 — Grok (xAI, grok-4.7): revisor independente opcional (☑ + Grok no painel). Mesmo prompt; resposta em JSON.
     async function revGrok(c) {
         const t0 = performance.now();
@@ -4709,7 +4713,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
             return;
         }
-        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon' || m === 'carbon') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
         const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : f === 'luna' && a.probL != null ? ' ' + fmt(a.probL, 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
@@ -4728,7 +4732,7 @@ ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas
 ${r.depois ? `<div class="pr-lib ${pendTot ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : confRod ? '⏳ Conferindo o texto corrigido (Jev + Luna)…' : pendTot ? `⚠ ${pendTot} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nConf ? ` — ${nConf} da conferência rápida` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo${r.conf && r.conf.estado === 'ok' ? ', conferidas' : ''}.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando || confRod ? 'Liberar sem esperar' : pendTot ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
 ${!r.carregando && r.ctx.texto.length >= 30 ? `<div class="pr-full" data-k="__opus__">${r.corr && r.corr.__opus__ ? (mini.has('__opus__') ? `<div class="pr-mini" data-maxi="__opus__">▸ ${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'}) — ${estadoCorr(r.corr.__opus__)}</div>` : `<b>${r.corr.__opus__.nivel === 'fable' ? '👑' : '🎓'} Revisão completa com correção (${NIVEL_NOME[r.corr.__opus__.nivel] || 'Opus'})</b>` + htmlCorrecao(r.corr.__opus__, '__opus__')) : '<button class="pr-b cor" id="pr-full" title="Opus revisa o laudo inteiro e propõe as correções (antes → depois)">🎓 Revisão completa com correção (Opus)</button> <button class="pr-b cor" id="pr-full-fab" title="Claude Fable 5.2 (esforço médio) revisa o laudo inteiro e propõe as correções — acima do Opus, mais lento e ≈ 2× o custo">👑 Fable</button>'}</div>` : ''}
-${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button></div>` : ''}
+${r.ultIgn ? `<div class="pr-motivo">Ignorado — por quê? <button class="pr-b sec" data-mot="nome genérico">nome genérico</button><button class="pr-b sec" data-mot="laudo conjunto">laudo conjunto</button><button class="pr-b sec" data-mot="IA errou">IA errou</button><button class="pr-b sec" data-mot="irrelevante">irrelevante</button><button class="pr-x pr-mot-x" title="Pular">✕</button><span class="pr-mot-l"><input id="pr-mot-txt" type="text" maxlength="300" placeholder="ou escreva o que saiu errado (sem nome de paciente)" value="${esc(r.motTxt || '')}"><button class="pr-b cor" id="pr-mot-ok" title="Grava o que você escreveu como motivo (Enter). Clicar num dos motivos acima grava o motivo + o texto.">Salvar</button></span></div>` : ''}
 <div class="pr-lista">${todos.length ? todos.map((a, i) => { const res = achadoResolvido(r, a); return mini.has(chaveAchado(a)) || (res && !abertos.has(chaveAchado(a))) ? `<div class="pr-mini ${res ? 'ok' : a.gravidade}" data-maxi="${esc(chaveAchado(a))}">▸ ${res ? '✓' : a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)} — ${res ? 'corrigido no laudo' : r.corr && r.corr[chaveAchado(a)] ? estadoCorr(r.corr[chaveAchado(a)]) : esc(String(a.explicacao).slice(0, 60)) + '…'}</div>` : `
 <div class="pr-it ${a.gravidade} ${a.fontes.length > 1 ? 'conc' : ''}" data-i="${i}">
 <div class="pr-h"><span class="pr-cat">${a.gravidade === 'grave' ? '●' : '○'} ${esc(CAT_NOME[a.categoria] || a.categoria)}</span>${a.fontes.map(f => fonteChip(f, a)).join('')}</div>
@@ -4743,7 +4747,7 @@ ${revOpcoesAbertas ? `<div class="pr-cfgbox"><label title="Revisa sozinho 3 s de
 <label title="Gemini 4 Hydrogen como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label></div>` : ''}
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
-<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-fable" ${r.ativos.includes('fable') ? 'disabled' : ''} title="Revisor MASTER — Claude Fable 5.2, acima do Opus. Use em laudo complexo ou quando quiser a palavra final (≈ 2× o custo do Opus, ~10–30 s)">👑 Master (Fable)</button><button class="pr-b sec" id="pr-argon" ${r.ativos.includes('argon') && (r.res.argon || !r.err.argon) ? 'disabled' : ''} title="Revisor MASTER do Google — Gemini 4 Argon (raciocínio médio). Segunda opinião de outra família de modelo; só roda quando você clica (~5–20 s)">👑 Master (Argon)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
+<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><span class="pr-mst" title="Revisor MASTER (última instância) — só roda quando você clica; os achados entram na lista com o selo do modelo">👑 Master:${[['fable', 'Fable', 'Claude Fable 5.2 (esforço médio), acima do Opus — ≈ 2× o custo do Opus, ~10–30 s'], ['argon', 'Argon', 'Gemini 4 Argon (raciocínio médio) — segunda opinião de outra família de modelo, ~5–20 s'], ['carbon', 'Carbon', 'Gemini 4 Carbon (raciocínio médio) — o mais forte do Google; em teste ao lado do Argon, ~5–20 s']].map(([m, n, t]) => `<button class="pr-b sec" id="pr-${m}" ${r.ativos.includes(m) && (r.res[m] || !r.err[m]) ? 'disabled' : ''} title="${t}">${n}</button>`).join('')}</span><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
         p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
@@ -4770,14 +4774,32 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
         const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarMaster(r, 'fable');
         const pag = p.querySelector('#pr-argon'); if (pag) pag.onclick = () => rodarMaster(r, 'argon');
-        p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => { if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', b.dataset.mot)]); r.ultIgn = null; renderRevisao(); }; });
-        const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; renderRevisao(); };
+        const pcb = p.querySelector('#pr-carbon'); if (pcb) pcb.onclick = () => rodarMaster(r, 'carbon');
+        // v1.51 — motivo por escrito: fica na coluna "motivo" do registro (rev_achados), sozinho ou junto do motivo clicado.
+        // Mesma limpeza da explicação (sequência de 3+ palavras em maiúsculas vira «…»), para não gravar nome de paciente.
+        const motLimpo = t => String(t || '').replace(/\s+/g, ' ').trim().replace(/\b[A-ZÀ-Ü]{3,}(?:\s+[A-ZÀ-Ü]{2,}){2,}\b/g, '«…»').slice(0, 300);
+        const motGravar = base => {
+            const txt = motLimpo(r.motTxt), mot = [base, txt].filter(Boolean).join(' — ');
+            if (!mot) return;
+            if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', mot)]);
+            r.ultIgn = null; r.motTxt = ''; r.motFoco = false; renderRevisao();
+        };
+        p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => motGravar(b.dataset.mot); });
+        const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; r.motTxt = ''; r.motFoco = false; renderRevisao(); };
+        const mt = p.querySelector('#pr-mot-txt');
+        if (mt) {
+            mt.oninput = () => { r.motTxt = mt.value; };
+            mt.onfocus = () => { r.motFoco = true; }; mt.onblur = () => { if (document.getElementById('pp-rev') && mt.isConnected) r.motFoco = false; };
+            mt.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); r.motTxt = mt.value; motGravar(''); } };
+            if (r.motFoco) { mt.focus(); try { mt.setSelectionRange(mt.value.length, mt.value.length); } catch (e) { /* ok */ } }
+            p.querySelector('#pr-mot-ok').onclick = () => { r.motTxt = mt.value; motGravar(''); };
+        }
         p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); abertos.add(el.dataset.maxi); renderRevisao(); }; });
         p.querySelectorAll('.pr-it').forEach(el => {
             const a = todos[+el.dataset.i];
             const mb = el.querySelector('[data-mini-it]'); if (mb) mb.onclick = () => { mini.add(chaveAchado(a)); abertos.delete(chaveAchado(a)); renderRevisao(); };
             const loc = el.querySelector('[data-loc]'); if (loc) loc.onclick = () => { if (!selecionarTrecho(a.trecho)) { loc.textContent = 'Não achei'; setTimeout(() => { loc.textContent = 'Localizar'; }, 1500); } };
-            el.querySelector('[data-ign]').onclick = () => { r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); r.ultIgn = a; renderRevisao(); };
+            el.querySelector('[data-ign]').onclick = () => { r.motTxt = ''; r.motFoco = false; r.ignorados.add(norm(a.categoria + a.trecho + a.explicacao)); r.nIgnorados = (r.nIgnorados || 0) + 1; revLog(marcaCalib(r, a, 'ignorado')); revNuvemReg([linhaAchado(r, a, 'ignorado')]); r.ultIgn = a; renderRevisao(); };
             const cb = el.querySelector('[data-cor]'); if (cb) cb.onclick = () => { revLog(marcaCalib(r, a, 'corrigido')); revNuvemReg([linhaAchado(r, a, 'corrigido')]); pedirCorrecao(r, a, false); };
             const cm = el.querySelector('[data-com]'); if (cm) cm.onclick = () => abrirComunicacao(null, 'laudo');
             ligarCorrecao(el, r, chaveAchado(a));
@@ -4806,6 +4828,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         opus: { nome: 'Opus', fn: c => revOpus(c) },
         fable: { nome: 'Fable', fn: c => revFable(c) },
         argon: { nome: 'Argon', fn: c => revArgon(c) },
+        carbon: { nome: 'Carbon', fn: c => revCarbon(c) },
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
     const REV_MODOS = { // v1.25: Gemini e Grok viraram caixinhas opcionais (+ Gemini / + Grok)
@@ -4816,14 +4839,14 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const motoresDo = modo => REV_MODOS[modo].motores.filter(m => m !== 'luna' || lunaLigada());
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
-    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon'];
+    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon', 'carbon'];
     // v1.23 — limiares do Jev num só lugar (calibrar com o registro de Ignorar/Corrigir): mostrar ≥ 0,5; sozinho ≥ 0,7; grave ≥ 0,85; juiz < 0,3 = provável falso alarme
     const JEV_LIM = Object.assign({ mostrar: 0.5, sozinho: 0.7, grave: 0.85, falso: 0.3 }, (cfg.rev && cfg.rev.jevLim) || {});
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
+        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'carbon', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
         const base = juntarAchados(listas);
         // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
         ['jev', 'luna'].forEach(eng => { const pk = CK[eng].pk; if (r.res[eng]) r.res[eng].achados.slice().sort((x, y) => y[pk] - x[pk]).forEach(j => {
@@ -4868,7 +4891,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
         // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
-        const lim = m === 'opus' || m === 'fable' || m === 'argon' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
+        const lim = m === 'opus' || m === 'fable' || m === 'argon' || m === 'carbon' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
         const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
         return corrida.then(x => { r.res[m] = x; }).catch(e => {
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
@@ -4878,7 +4901,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         }).finally(() => { if (revAtual === r) renderRevisao(); });
     }
     const GROK_ESPERA_MS = 6000;
-    async function rodarMaster(r, m) { // m = 'fable' (Claude) ou 'argon' (Gemini) — v1.50
+    async function rodarMaster(r, m) { // m = 'fable' (Claude), 'argon' ou 'carbon' (Gemini) — v1.50/v1.51
         if (r.ativos.includes(m) && (r.res[m] || !r.err[m])) return;
         r.carregando = true; renderRevisao();
         await rodarMotor(r, m);
@@ -6110,5 +6133,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
     if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
-        comBotoesLaudo, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
+        comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
