@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.48.1
+// @version      1.49.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -3785,7 +3785,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     function comBotoesLaudo() {
         const crit = caixaCritico(true);
         let b = document.querySelector('.pp-com-btn');
-        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); const a0 = document.querySelector('.pp-anam-btn'); if (a0) a0.remove(); return; }
+        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); const a0 = document.querySelector('.pp-anam-btn'); if (a0) a0.remove(); const r0 = document.querySelector('.pp-rad-btn'); if (r0) r0.remove(); return; }
         setCss('pp-com-ico-css', COM_ICON_CSS);
         if (!crit.hasAttribute('data-pp-crit')) { crit.setAttribute('data-pp-crit', ''); crit.title = 'Resultado crítico'; }
         const lab = crit.querySelector('.v-label');
@@ -3831,6 +3831,35 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             });
             c.after(an);
         }
+        // v1.49.0 — ↗ abrir ESTE exame no RadiAnt, na barra do laudo (antes só dava pela lista ou, para os anteriores, pelo
+        // histórico). Usa o script "LADI - Abrir no RadiAnt" (≥ 0.4.0, controller.openExam) — sem ele (Mac), o botão não existe.
+        // Fica logo depois do 👁 Abrir Visualizador (mesma função: ver imagens); sem o 👁 na barra, vai depois da Anamnese.
+        try {
+            let rd = document.querySelector('.pp-rad-btn');
+            const vmR = laudoComp(), exR = vmR && vmR.exame;
+            if (!radiantPronto() || !exR) { if (rd) rd.remove(); }
+            else {
+                // procura o 👁 só na própria barra (mesmo bloco da caixa "Resultado crítico", depois a linha) — nunca no histórico
+                let olho = null;
+                for (const esc of [crit.parentElement, crit.closest('.row')]) {
+                    if (!esc || olho) continue;
+                    olho = [...esc.querySelectorAll('.mdi-eye')].map(i => i.closest('button') || i)
+                        .find(x => x.offsetParent && !x.closest('table, .pp-ico-btn, #pp-rev, .hl-ac') && !x.classList.contains('pp-ico-btn')) || null;
+                }
+                const ancora = olho || an;
+                if (!rd || rd.previousElementSibling !== ancora) {
+                    if (rd) rd.remove();
+                    rd = comIcone('pp-rad-btn', 'mdi-open-in-new', '#64b5f6', 'Abrir este exame no RadiAnt', () => {
+                        const v2 = laudoComp(); if (!v2 || !v2.exame) return;
+                        radiantAbrir(v2.exame, v2.exame.paciente && v2.exame.paciente.pac_nome);
+                    });
+                    ancora.after(rd);
+                }
+                const img = !!(exR.exa_idnexecutadopacs || exR.exa_pacs_iuid);
+                rd.style.opacity = img ? '' : '.35';
+                rd.title = img ? 'Abrir este exame no RadiAnt' : 'Exame ainda sem imagens no PACS (o RadiAnt avisa se não houver estudo)';
+            }
+        } catch (e) { /* botão opcional: nunca atrapalha a barra */ }
         const v3 = laudoComp(), txtAn = v3 && v3.exame ? String(v3.exame.exa_anamnese || '').replace(/\[FICHA TC HAMC[\s\S]*?\[\/FICHA TC\]/gi, '').trim() : '';
         const icA = an.querySelector('.v-icon'), corA = txtAn ? '#c50ec5' : '#808080';
         if (icA && icA.style.color !== corA && icA.dataset.cor !== corA) { icA.style.color = corA; icA.dataset.cor = corA; }
@@ -6048,5 +6077,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
     if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
-        renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
+        comBotoesLaudo, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
