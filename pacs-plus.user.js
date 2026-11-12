@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.49.0
+// @version      1.50.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -387,7 +387,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.argon { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -3269,7 +3269,7 @@ ${c.texto}`;
         let d;
         try {
             d = await iaProxy({ acao: 'claude_mensagem', modelo, max_tokens: fonte === 'sonnet' ? 6000 : 12000, thinking: { type: 'adaptive' }, output_config: { effort: esforco },
-                system: revSistema(c, (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : fonte === 'fable' ? '\nVocê é o REVISOR MASTER (última instância, acima do sênior): leia o laudo inteiro, confira cada número, classificação e conduta, e aponte SÓ o que é erro de verdade — falso alarme custa tempo do médico.' : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.'),
+                system: revSistema(c, (fonte === 'opus' ? '\nVocê é o REVISOR SÊNIOR: leia o laudo inteiro com atenção redobrada a coerência global, conclusões e condutas.' : fonte === 'fable' ? REV_MASTER_TXT : '') + '\nResponda SEMPRE chamando a ferramenta "revisao" uma única vez, sem texto adicional.'),
                 tools: [REV_TOOL], tool_choice: { type: 'auto' }, messages: [{ role: 'user', content: revMensagem(c) }] });
         } catch (e) { if (tentativa < 2) return revClaude(c, modelo, esforco, fonte, tentativa + 1); throw e; }
         // v1.45: o servidor troca modelo desconhecido pelo padrão — não deixa o Sonnet passar por Fable/Opus
@@ -3291,16 +3291,38 @@ ${c.texto}`;
     // v1.47 — Fable 5.2 também corrige e atende pedidos; mesma trava do revisor: o servidor não pode trocar o modelo calado
     const CLAUDE_ID = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5', fable: 'claude-fable-5-2' };
     const claudeTrocado = (d, modelo) => !!(d && d.modelo && !String(d.modelo).startsWith(modelo.replace(/-\d+(-\d+)?$/, '')));
-    const GEMINI_REVISOR = 'gemini-3.8-flash'; // v1.24: custo × benefício (Argon = papel do Opus, 2–5× o preço); o servidor cai para 3.6 Flash se falhar
-    const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
-    async function revGemini(c) {
-        const t0 = performance.now();
-        const d = await iaProxy({ acao: 'gemini', modelo: GEMINI_REVISOR, system: revSistema(c), parts: [{ text: revMensagem(c) }],
-            generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0, thinkingConfig: { thinkingLevel: 'low' } } }); // v1.32.1: raciocínio low (padrão medium = lento)
+    // v1.50.0 (12/11/2026) — Gemini 4 Hydrogen no lugar do 3.8 Flash (o Google lançou o Hydrogen em 12/11/2026 como sucessor
+    // do Flash; id gemini-4-hydrogen) e Gemini 4 Argon (gemini-4-argon) como segundo revisor MASTER, ao lado do Fable.
+    // O servidor (ia-proxy) só conhece o Hydrogen a partir da v17 dele: enquanto não for atualizado, ele devolveria o 3.6 Flash
+    // calado → o Plus percebe (modelo devolvido ≠ pedido e sem lista de falhas) e volta a pedir o 3.8 Flash até recarregar a página.
+    const REV_MASTER_TXT = '\nVocê é o REVISOR MASTER (última instância, acima do sênior): leia o laudo inteiro, confira cada número, classificação e conduta, e aponte SÓ o que é erro de verdade — falso alarme custa tempo do médico.';
+    const GEMINI_REVISOR = 'gemini-4-hydrogen', GEMINI_ANTERIOR = 'gemini-3.8-flash', GEMINI_MASTER = 'gemini-4-argon';
+    let geminiSrvAntigo = false;
+    const geminiNome = m => /argon/.test(m || '') ? 'Gemini 4 Argon' : /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
+    const geminiChamar = (c, modelo, nivel, extra) => iaProxy({ acao: 'gemini', modelo, system: revSistema(c, extra || ''), parts: [{ text: revMensagem(c) }],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0, thinkingConfig: { thinkingLevel: nivel } } }); // v1.32.1: revisor comum em low (padrão medium = lento)
+    function geminiResultado(d, fonte, t0) {
         let j = null; try { j = JSON.parse(d.texto); } catch (e) { const m = String(d.texto || '').match(/\{[\s\S]*\}/); if (m) { try { j = JSON.parse(m[0]); } catch (x) { /* segue */ } } }
         if (!j || !Array.isArray(j.achados)) throw new Error('resposta sem a lista de achados');
         const u = d.usage || {};
-        return { achados: limparAchados(j.achados, 'gemini'), ms: performance.now() - t0, tin: u.promptTokenCount || 0, tout: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0), modelo: d.modelo || 'gemini' };
+        return { achados: limparAchados(j.achados, fonte), ms: performance.now() - t0, tin: u.promptTokenCount || 0, tout: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0), modelo: d.modelo || 'gemini' };
+    }
+    async function revGemini(c) {
+        const t0 = performance.now();
+        let d = await geminiChamar(c, geminiSrvAntigo ? GEMINI_ANTERIOR : GEMINI_REVISOR, 'low');
+        if (!geminiSrvAntigo && !/hydrogen/.test(d.modelo || '') && !(Array.isArray(d.falhas) && d.falhas.length)) { // servidor ainda sem o Hydrogen
+            geminiSrvAntigo = true;
+            d = await geminiChamar(c, GEMINI_ANTERIOR, 'low');
+        }
+        return geminiResultado(d, 'gemini', t0);
+    }
+    // Revisor MASTER do Google: Argon em raciocínio médio (padrão do modelo), só sob pedido. Se o Google não entregar o Argon
+    // (o servidor cairia para o Flash), é erro visível — nunca um Flash passando por Master.
+    async function revArgon(c) {
+        const t0 = performance.now();
+        const d = await geminiChamar(c, GEMINI_MASTER, 'medium', REV_MASTER_TXT);
+        if (!/argon/.test(d.modelo || '')) throw new Error('o Google não respondeu com o Argon (veio ' + geminiNome(d.modelo) + ')' + (Array.isArray(d.falhas) && d.falhas.length ? ': ' + d.falhas.join(' | ').slice(0, 160) : ''));
+        return geminiResultado(d, 'argon', t0);
     }
     // v1.22.1 — Grok (xAI, grok-4.7): revisor independente opcional (☑ + Grok no painel). Mesmo prompt; resposta em JSON.
     async function revGrok(c) {
@@ -4678,7 +4700,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
             return;
         }
-        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${m === 'gemini' && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
         const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : f === 'luna' && a.probL != null ? ' ' + fmt(a.probL, 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
@@ -4709,10 +4731,10 @@ ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <button class="pr-b sec" id="pr-cfg" title="Opções pouco usadas: revisar ao colar, + Gemini, + Grok">⚙ Opções${[rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).length ? ' <small>· ' + [rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).join(', ') + '</small>' : ''} ${revOpcoesAbertas ? '▴' : '▾'}</button>
 ${revOpcoesAbertas ? `<div class="pr-cfgbox"><label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
-<label title="Gemini 3.8 Flash como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
+<label title="Gemini 4 Hydrogen como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label></div>` : ''}
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
-<span style="display:flex;gap:6px;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-fable" ${r.ativos.includes('fable') ? 'disabled' : ''} title="Revisor MASTER — Claude Fable 5.2, acima do Opus. Use em laudo complexo ou quando quiser a palavra final (≈ 2× o custo do Opus, ~10–30 s)">👑 Master (Fable)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
+<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><button class="pr-b sec" id="pr-fable" ${r.ativos.includes('fable') ? 'disabled' : ''} title="Revisor MASTER — Claude Fable 5.2, acima do Opus. Use em laudo complexo ou quando quiser a palavra final (≈ 2× o custo do Opus, ~10–30 s)">👑 Master (Fable)</button><button class="pr-b sec" id="pr-argon" ${r.ativos.includes('argon') && (r.res.argon || !r.err.argon) ? 'disabled' : ''} title="Revisor MASTER do Google — Gemini 4 Argon (raciocínio médio). Segunda opinião de outra família de modelo; só roda quando você clica (~5–20 s)">👑 Master (Argon)</button><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
         p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
@@ -4737,7 +4759,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const poa = p.querySelector('#pr-opus-auto'); if (poa) poa.onchange = e => { cfg.rev = Object.assign(revCfg(), { opusAuto: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-de-novo').onclick = () => revisar(true);
         p.querySelector('#pr-opus').onclick = () => rodarOpus(r, 'pedido manual');
-        const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarFable(r);
+        const pfb = p.querySelector('#pr-fable'); if (pfb) pfb.onclick = () => rodarMaster(r, 'fable');
+        const pag = p.querySelector('#pr-argon'); if (pag) pag.onclick = () => rodarMaster(r, 'argon');
         p.querySelectorAll('.pr-motivo [data-mot]').forEach(b => { b.onclick = () => { if (r.ultIgn) revNuvemReg([linhaAchado(r, r.ultIgn, 'motivo', b.dataset.mot)]); r.ultIgn = null; renderRevisao(); }; });
         const mx = p.querySelector('.pr-mot-x'); if (mx) mx.onclick = () => { r.ultIgn = null; renderRevisao(); };
         p.querySelectorAll('.pr-mini[data-maxi]').forEach(el => { el.onclick = () => { mini.delete(el.dataset.maxi); abertos.add(el.dataset.maxi); renderRevisao(); }; });
@@ -4773,6 +4796,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
         opus: { nome: 'Opus', fn: c => revOpus(c) },
         fable: { nome: 'Fable', fn: c => revFable(c) },
+        argon: { nome: 'Argon', fn: c => revArgon(c) },
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
     const REV_MODOS = { // v1.25: Gemini e Grok viraram caixinhas opcionais (+ Gemini / + Grok)
@@ -4783,14 +4807,14 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const motoresDo = modo => REV_MODOS[modo].motores.filter(m => m !== 'luna' || lunaLigada());
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
-    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable'];
+    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon'];
     // v1.23 — limiares do Jev num só lugar (calibrar com o registro de Ignorar/Corrigir): mostrar ≥ 0,5; sozinho ≥ 0,7; grave ≥ 0,85; juiz < 0,3 = provável falso alarme
     const JEV_LIM = Object.assign({ mostrar: 0.5, sozinho: 0.7, grave: 0.85, falso: 0.3 }, (cfg.rev && cfg.rev.jevLim) || {});
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
+        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
         const base = juntarAchados(listas);
         // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
         ['jev', 'luna'].forEach(eng => { const pk = CK[eng].pk; if (r.res[eng]) r.res[eng].achados.slice().sort((x, y) => y[pk] - x[pk]).forEach(j => {
@@ -4835,7 +4859,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
         // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
-        const lim = m === 'opus' || m === 'fable' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
+        const lim = m === 'opus' || m === 'fable' || m === 'argon' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
         const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
         return corrida.then(x => { r.res[m] = x; }).catch(e => {
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
@@ -4845,10 +4869,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         }).finally(() => { if (revAtual === r) renderRevisao(); });
     }
     const GROK_ESPERA_MS = 6000;
-    async function rodarFable(r) {
-        if (r.ativos.includes('fable') && (r.res.fable || !r.err.fable)) return;
+    async function rodarMaster(r, m) { // m = 'fable' (Claude) ou 'argon' (Gemini) — v1.50
+        if (r.ativos.includes(m) && (r.res[m] || !r.err[m])) return;
         r.carregando = true; renderRevisao();
-        await rodarMotor(r, 'fable');
+        await rodarMotor(r, m);
         await revJevJuiz(r);
         r.carregando = false;
         if (revAtual === r) renderRevisao();
@@ -5300,7 +5324,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         b.type = 'button';
         b.className = 'v-btn v-btn--text theme--dark v-size--small pp-rev-btn';
         b.innerHTML = '<span class="v-btn__content">🛡 Rev.</span>';
-        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Claude Opus ou Sonnet, Gemini 3.8 Flash, Grok). Revisa sozinho ao colar e ao Liberar; laudo normal não chama as IAs. ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
+        b.title = 'Revisão do laudo: regras fixas + Jev + IA (Claude Opus ou Sonnet, Gemini 4 Hydrogen, Grok). Revisa sozinho ao colar e ao Liberar; laudo normal não chama as IAs. ✍ Corrigir só altera o laudo ao clicar Aplicar (Ctrl+Z desfaz).';
         b.addEventListener('mousedown', e => e.preventDefault());
         b.onclick = e => { e.stopPropagation(); abrirRevisao(); };
         const calc = tb.querySelector(':scope > .pp-calc-laudo');
@@ -6077,5 +6101,5 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
     if (window.__PP_TEST__) window.__PP_TEST__.api = { serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
-        comBotoesLaudo, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
+        comBotoesLaudo, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
