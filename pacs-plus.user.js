@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.48.0
+// @version      1.48.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1062,7 +1062,12 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const s = a && a.sla; if (!s) return;
             if (s.ultimoacao_tipo === 'CONFIRMADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - agora) / 1000));
             else if (s.ultimoacao_tipo === 'PENDENCIADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - new Date(s.ultimoacao_created)) / 1000));
-            else if (s.slaTempoRestante != null) s.slaTempoRestante = null;
+            else if (s.slaTempoRestante !== null) {
+                // v1.48.1: exame SEM SLA chega com o campo indefinido e o PACS mostra as bolinhas de "carregando" enquanto ele não
+                // vira null (o cronômetro do PACS fazia isso a cada segundo; a 1.46.0 pulava o indefinido → bolinhas eternas).
+                // $set: avisa a tela quando o campo ainda não existia no objeto.
+                if (!('slaTempoRestante' in s) && typeof comp.$set === 'function') comp.$set(s, 'slaTempoRestante', null); else s.slaTempoRestante = null;
+            }
         });
     }
 
