@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.54.0
+// @version      1.54.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1046,7 +1046,13 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (isNaN(seg)) return 'n';
         return (seg < 0 ? '-' : seg === 0 ? '0' : seg < 7200 ? 'l' : 'a') + Math.floor(Math.abs(seg) / 60); // sinal (texto “-0d 0h 0m”), cor (0 e 2 h) e minuto
     }
-    function slaGravar(sla, seg) { if (!on('listaLeve') || slaFaixa(seg) !== slaFaixa(sla.slaTempoRestante)) sla.slaTempoRestante = seg; }
+    // v1.54.1 — o SLA que volta do PACS (POST exame/sla) NÃO traz o campo slaTempoRestante. Criar o campo com "=" não avisa a
+    // tela (Vue 2): o número ficava calculado na memória e as bolinhas continuavam até algo redesenhar a tabela (30 s, 90 s…).
+    // Medido em 12/11/2026: com $set o prazo aparece em 0,3 s. O cronômetro do PACS não tinha isso porque recriava a lista toda.
+    function slaGravar(sla, seg, comp) {
+        if (!('slaTempoRestante' in sla) && comp && typeof comp.$set === 'function') { comp.$set(sla, 'slaTempoRestante', seg); return; }
+        if (!on('listaLeve') || slaFaixa(seg) !== slaFaixa(sla.slaTempoRestante)) sla.slaTempoRestante = seg;
+    }
     function tickSlaProprio(ex) { slaGravar(ex.sla, Math.floor((new Date(ex.sla.sla_prazo_final).getTime() - Date.now()) / 1000)); }
     // Cronômetro leve: assume o lugar do cronômetro do PACS (GridExames.iniciarCronometros, que a cada 1 s recria a lista
     // inteira). Mesma conta do PACS, gravando só quando muda o que aparece. Desligando o bloco, o do PACS volta.
@@ -1068,8 +1074,8 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const agora = Date.now();
         comp.exames.forEach(a => {
             const s = a && a.sla; if (!s) return;
-            if (s.ultimoacao_tipo === 'CONFIRMADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - agora) / 1000));
-            else if (s.ultimoacao_tipo === 'PENDENCIADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - new Date(s.ultimoacao_created)) / 1000));
+            if (s.ultimoacao_tipo === 'CONFIRMADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - agora) / 1000), comp);
+            else if (s.ultimoacao_tipo === 'PENDENCIADO') slaGravar(s, Math.floor((new Date(s.sla_prazo_final).getTime() - new Date(s.ultimoacao_created)) / 1000), comp);
             else if (s.slaTempoRestante !== null) {
                 // v1.48.1: exame SEM SLA chega com o campo indefinido e o PACS mostra as bolinhas de "carregando" enquanto ele não
                 // vira null (o cronômetro do PACS fazia isso a cada segundo; a 1.46.0 pulava o indefinido → bolinhas eternas).
