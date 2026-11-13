@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.53.0
+// @version      1.54.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -39,7 +39,7 @@
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
-        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Na janela 🕘 Histórico vale para qualquer exame com imagem. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
+        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Nos históricos (janela 🕘 e dentro do laudo) vale para qualquer exame com imagem. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
         ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
@@ -407,6 +407,10 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 .document-editor__toolbar > .v-btn.pp-calc-laudo { color: #5eead4 !important; font-weight: 700 !important; }
 #pp-panel[data-pos="laudo"] { top: var(--pp-top, 96px); left: auto; right: 16px; width: 440px; max-height: calc(100vh - var(--pp-top, 96px) - 12px); }`,
         historicoAcoes: `
+#datatableExamesHistorico tr[data-pp-hf] { display: none !important; }
+.pp-hi-fil { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 10px 6px; font-size: 12px; color: #9ca3af; }
+.pp-hi-fil button { background: rgba(127,127,127,.15); color: inherit; border: 1px solid rgba(127,127,127,.4); border-radius: 11px; padding: 1px 9px; font: inherit; cursor: pointer; }
+.pp-hi-fil button:hover { border-color: #a78bfa; } .pp-hi-fil button.on { background: #6d28d9; border-color: #a78bfa; color: #fff; }
 #datatableExamesHistorico .pp-hist-acoes { display: inline-flex !important; align-items: center; gap: 3px; margin-left: 6px; vertical-align: middle; }
 #datatableExamesHistorico td:nth-child(10) .v-icon { font-size: 17px !important; }
 #datatableExamesHistorico .pp-hist-acoes .pp-ha { position: relative; cursor: pointer; font-size: 17px !important; width: 20px; height: 20px; line-height: 20px; text-align: center; color: #808080; border-radius: 4px; }
@@ -2352,6 +2356,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     function histAcoes() {
         const t = document.getElementById('datatableExamesHistorico');
         if (!t) return;
+        try { hiAtualizar(t); } catch (e) { /* filtro/contador do histórico interno: nunca atrapalha os ícones */ }
         if (!on('historicoAcoes')) { t.querySelectorAll('.pp-hist-acoes').forEach(e => e.remove()); return; }
         const vm = laudoVm();
         if (!vm) return;
@@ -4122,7 +4127,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     }
     function serIconesLista() {
         const f = findListTable(), comp = f && componenteLista();
-        const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => { if (!x.closest('#pp-hl')) x.remove(); }); // os da janela 🕘 são do hlPintarSeries
+        const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => { if (!x.closest('#pp-hl, #datatableExamesHistorico')) x.remove(); }); // os dos históricos têm pintura própria
         if (!f || !comp || !on('contarSeries')) { limpar(); serAlvo = new Map(); return; }
         const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
@@ -4450,27 +4455,81 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         });
         if (algum) { serProximo(() => { hlPintarSeries(); serIconesLista(); }); hlPintarSeries(); }
     }
+    // pinta (ou tira) o selo de séries num 👁; exs/i servem para achar as TCs do mesmo dia (qual tem o volume)
+    function serSelo(olho, exs, i) {
+        const ex = exs[i];
+        let bd = olho.querySelector(':scope > .pp-ser');
+        let v = on('contarSeries') && hlSerTem(ex) ? serVis(ex) : null;
+        if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
+        if (!v) { if (bd) bd.remove(); return; }
+        if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; if (olho.style.position !== 'relative') { olho.style.position = 'relative'; olho.style.overflow = 'visible'; } olho.appendChild(bd); }
+        let txt = '…', cls = 'pp-ser', tit = 'Contando as séries deste exame…';
+        if (v.st === 'ok') {
+            const vals = hlSerGrupo(exs, i).map(j => serVis(exs[j])).filter(w => w && w.st === 'ok');
+            const maior = Math.max(...vals.map(w => w.img)), scout = hlMod(ex) === 'CT' && v.img <= 2, vol = vals.length > 1 && v.img === maior && !scout;
+            txt = String(v.ser); cls += scout ? ' pp-ser-pouco' : vol ? ' pp-ser-maior' : '';
+            tit = `${v.ser} série(s) de imagem · ${v.img} imagem(ns)` + (scout ? ' — só o scout/topograma' : vol ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
+        } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar: ' + v.msg; }
+        if (bd.textContent !== txt) bd.textContent = txt;
+        if (bd.className !== cls) bd.className = cls;
+        if (bd.title !== tit) bd.title = tit;
+    }
     function hlPintarSeries() {
         const p = document.getElementById('pp-hl'); if (!p || !Array.isArray(p.__exs)) return;
-        const exs = p.__exs;
-        p.querySelectorAll('.hl-l[data-i]').forEach(l => {
-            const i = Number(l.dataset.i), ex = exs[i], olho = l.querySelector('[data-a="img"]'); if (!olho) return;
-            let bd = olho.querySelector(':scope > .pp-ser');
-            let v = on('contarSeries') && hlSerTem(ex) ? serVis(ex) : null;
-            if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
-            if (!v) { if (bd) bd.remove(); return; }
-            if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; olho.appendChild(bd); }
-            let txt = '…', cls = 'pp-ser', tit = 'Contando as séries deste exame…';
-            if (v.st === 'ok') {
-                const vals = hlSerGrupo(exs, i).map(j => serVis(exs[j])).filter(w => w && w.st === 'ok');
-                const maior = Math.max(...vals.map(w => w.img)), scout = hlMod(ex) === 'CT' && v.img <= 2, vol = vals.length > 1 && v.img === maior && !scout;
-                txt = String(v.ser); cls += scout ? ' pp-ser-pouco' : vol ? ' pp-ser-maior' : '';
-                tit = `${v.ser} série(s) de imagem · ${v.img} imagem(ns)` + (scout ? ' — só o scout/topograma' : vol ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
-            } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar: ' + v.msg; }
-            if (bd.textContent !== txt) bd.textContent = txt;
-            if (bd.className !== cls) bd.className = cls;
-            if (bd.title !== tit) bd.title = tit;
+        p.querySelectorAll('.hl-l[data-i]').forEach(l => { const olho = l.querySelector('[data-a="img"]'); if (olho) serSelo(olho, p.__exs, Number(l.dataset.i)); });
+    }
+    // v1.54 — o mesmo filtro por modalidade e o mesmo contador no "Histórico de exames" de DENTRO do laudo (tabela nativa).
+    // O filtro só esconde a linha na tela (atributo data-pp-hf); a escolha é a mesma da janela 🕘. Contador: mouse parado 0,4 s.
+    let hiTimer = 0;
+    function hiPares(t) {
+        const vm = laudoVm(); if (!vm) return null;
+        const exs = vm.examesPacienteHistorico || [];
+        const linhas = [...t.querySelectorAll('tbody > tr')].filter(tr => !tr.classList.contains('v-data-table__expanded__content') && tr.children.length >= 10);
+        return { exs, pares: linhas.map((tr, i) => { const it = itemDaLinha(vm, tr, i); return { tr, it, i: it ? exs.indexOf(it) : -1 }; }) };
+    }
+    function hiSerPedir(exs, i) {
+        if (!on('contarSeries')) return;
+        let algum = false;
+        hlSerGrupo(exs, i).forEach(j => {
+            const ex = exs[j], v0 = serLer(ex);
+            if (v0 && !serVelho(v0)) return;
+            ex.__ppHist = true; serMem.set(serChave(ex), { st: 'carregando', ant: v0 || null }); serFila.push(ex); algum = true;
         });
+        if (algum) { const d = () => { const t = document.getElementById('datatableExamesHistorico'); if (t) hiAtualizar(t); hlPintarSeries(); serIconesLista(); }; serProximo(d); d(); }
+    }
+    function hiAtualizar(t) {
+        const h = hiPares(t); if (!h) return;
+        const { exs, pares } = h, cont = {};
+        pares.forEach(p => { if (p.it) { const g = hlMod(p.it); cont[g] = (cont[g] || 0) + 1; } });
+        const ativos = [...hlFiltro].filter(g => cont[g]);
+        let vis = 0;
+        pares.forEach(p => {
+            const esconder = !!p.it && ativos.length > 0 && !ativos.includes(hlMod(p.it));
+            if (esconder) { if (!p.tr.hasAttribute('data-pp-hf')) p.tr.setAttribute('data-pp-hf', ''); } else { vis++; if (p.tr.hasAttribute('data-pp-hf')) p.tr.removeAttribute('data-pp-hf'); }
+            const eye = p.tr.querySelector('.mdi-eye'), olho = eye && (eye.closest('button') || eye);
+            if (olho && p.i >= 0) serSelo(olho, exs, p.i);
+        });
+        // barra de filtros logo acima da tabela
+        const tipos = HL_MODS.filter(([g]) => cont[g]);
+        let bar = t.parentElement && t.parentElement.querySelector(':scope > .pp-hi-fil');
+        if (tipos.length < 2) { if (bar) bar.remove(); }
+        else {
+            if (!bar) {
+                bar = document.createElement('div'); bar.className = 'pp-hi-fil'; t.parentElement.insertBefore(bar, t);
+                bar.addEventListener('click', ev => { const b = ev.target.closest('button[data-f]'); if (!b) return; ev.stopPropagation(); ev.preventDefault(); const g = b.dataset.f; if (!g) hlFiltro = new Set(); else if (hlFiltro.has(g)) hlFiltro.delete(g); else hlFiltro.add(g); hiAtualizar(t); hlAplicarFiltro(); });
+            }
+            const html = 'Mostrar: <button data-f="" class="' + (ativos.length ? '' : 'on') + '">Todos</button>' + tipos.map(([g, n]) => `<button data-f="${g}" class="${ativos.includes(g) ? 'on' : ''}">${n} <small>${cont[g]}</small></button>`).join('') + (ativos.length ? ` <span>mostrando ${vis} de ${pares.length}</span>` : '');
+            if (bar.__html !== html) { bar.innerHTML = html; bar.__html = html; }
+        }
+        if (!t.__ppHi) {
+            t.__ppHi = true;
+            t.addEventListener('mouseover', ev => {
+                const tr = ev.target.closest && ev.target.closest('tbody > tr'); clearTimeout(hiTimer);
+                if (!tr || !on('contarSeries')) return;
+                hiTimer = setTimeout(() => { const h2 = hiPares(t), p = h2 && h2.pares.find(x => x.tr === tr); if (p && p.i >= 0) hiSerPedir(h2.exs, p.i); }, 400);
+            });
+            t.addEventListener('mouseleave', () => clearTimeout(hiTimer));
+        }
     }
     async function hlAbrir(pac, exaAtual) {
         let p = document.getElementById('pp-hl');
@@ -6244,6 +6303,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
