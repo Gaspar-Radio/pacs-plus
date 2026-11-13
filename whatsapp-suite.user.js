@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.8.0
+// @version      1.9.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -83,7 +83,11 @@
   // =====================================================================
   // 2. CONFIG E PROMPTS
   // =====================================================================
-  const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+  // v1.9 (12/11/2026): Gemini 4 Hydrogen (sucessor do Flash) como padrão; reserva 3.8 → 3.6 Flash.
+  // Raciocínio sempre em "low": o padrão do Hydrogen é "high" (lento demais para reescrever/transcrever).
+  const MODEL_MAIN = 'gemini-4-hydrogen', MODEL_ALT = 'gemini-3.8-flash';
+  const MODELS = [MODEL_MAIN, MODEL_ALT, 'gemini-3.6-flash'];
+  const modelName = m => /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : (m || 'Gemini');
   const N_CONTEXTO = 10;
 
   const BASE = `Você reescreve mensagens de WhatsApp do Dr. Gabriel Gaspar, médico radiologista brasileiro (US, Doppler, TC), que conversa principalmente com colegas médicos.
@@ -114,7 +118,26 @@ Regras obrigatórias:
     { k: '3', nome: 'Formal / cordial', desc: 'direção, gestão', inst: 'Tom formal, cordial e institucional (direção hospitalar, gestão, Prefeitura, convênio).' },
     { k: '4', nome: 'Para paciente', desc: 'linguagem leiga', inst: 'Linguagem simples e acolhedora para paciente leigo, sem jargão e sem alarmismo.' },
     { k: '5', nome: 'Eu digo o quê…', desc: 'você dá a ideia', inst: null },
+    { k: '6', nome: 'Familiar / amigável', desc: 'esposa, mãe, irmã, amigos', fam: true,
+      inst: 'Tom familiar, leve e carinhoso, do jeito que ele fala com a família e amigos próximos. Nada técnico, nada formal.' },
   ];
+
+  // v1.9 — respostas para família e amigos (sem tom de médico). O estilo pessoal fica só no navegador/Supabase (fam_style), nunca no código.
+  const FAM_BASE = `Você escreve mensagens de WhatsApp em nome do Gabriel para familiares e amigos próximos (esposa, mãe, irmã, amigos).
+Regras obrigatórias:
+- Responda SOMENTE com o texto da mensagem pronta para enviar. Sem aspas, sem comentários, sem alternativas.
+- Português do Brasil, informal e natural, como numa conversa de família: frases curtas, simples e diretas.
+- Proibido: tom profissional ou de médico, linguagem rebuscada, termos técnicos, "prezado", "atenciosamente", "fico à disposição", "conforme", "contudo", "portanto".
+- Tamanho proporcional à conversa: se a mensagem recebida é curta, a resposta é curta (muitas vezes 1 linha).
+- Sem saudação ou despedida que ele não usaria; emoji no máximo 1, e só se combinar com o momento.
+- Baseie-se apenas na conversa. Não invente fatos, horários, valores, compromissos ou promessas; se faltar algo que só ele sabe, use [colchetes].
+- Não repita o que a pessoa disse. Sem markdown.`;
+  const FAM_STYLE_DEF = 'Frases curtas, linguagem do dia a dia, carinhoso sem exagero. Pouca pontuação, pode abreviar (vc, tb, pra, hj). Riso como "kkk" quando couber. Emojis raros.';
+  const famStyle = () => (GM_getValue('fam_style', '') || '').trim() || FAM_STYLE_DEF;
+  const famSystem = () => FAM_BASE + '\n\nJEITO DE ESCREVER DO GABRIEL (siga de perto; escolha a parte que vale para a pessoa desta conversa):\n' + famStyle();
+  let fam = false; // tom familiar escolhido no pedido em andamento
+  const toneOf = chat => (GM_getValue('tone_by_chat', {}) || {})[chat] || '';
+  const setTone = (chat, k) => { if (!chat) return; const m = GM_getValue('tone_by_chat', {}) || {}; m[chat] = k; GM_setValue('tone_by_chat', m); };
 
   const TRANSCRICAO = `Transcreva fielmente este áudio de WhatsApp em português do Brasil.
 - Texto corrido, com pontuação e parágrafos curtos; sem comentários, sem cabeçalho.
@@ -134,6 +157,8 @@ Regras obrigatórias:
     { k: '5', nome: 'Para paciente', desc: 'linguagem leiga',
       inst: 'Reescreva para paciente leigo: linguagem simples e acolhedora, sem jargão, sem alarmismo e sem antecipar diagnóstico que não esteja no texto. Quando pertinente, oriente levar o resultado ao médico solicitante.' },
     { k: '6', nome: 'Instrução livre…', desc: 'você escreve o pedido', inst: null },
+    { k: '7', nome: 'Familiar / amigável', desc: 'família e amigos', fam: true,
+      inst: 'Reescreva do jeito que ele fala com a família e amigos próximos: leve, simples e carinhoso, sem nada técnico ou formal. Mantenha o que ele quis dizer e todos os dados (nomes, valores, horários).' },
   ];
 
   // =====================================================================
@@ -324,44 +349,77 @@ Regras obrigatórias:
   // =====================================================================
   // 7. GEMINI
   // =====================================================================
-  function gemini(system, parts, cb, i = 0) {
+  // Caminho 1 (preferido): função ia-proxy do Supabase — a chave do Google fica só nos Secrets do projeto.
+  // Caminho 2 (reserva): chave Gemini guardada neste navegador.
+  const usaNuvem = () => { const sb = getSb(); return !!(sb && sb.refresh) && !GM_getValue('ia_direct', false); };
+
+  function gemini(system, parts, cb, opts) {
+    const o = (opts && typeof opts === 'object') ? opts : {};
+    if (!usaNuvem()) return geminiDirect(system, parts, cb, o.modelo);
+    geminiNuvem(system, parts, o.modelo || MODEL_MAIN).then(
+      r => cb(null, r.texto, r.modelo),
+      e => {
+        if (GM_getValue('gemini_key', '')) return geminiDirect(system, parts, cb, o.modelo); // reserva silenciosa
+        cb('IA pela nuvem: ' + (e && e.message || e));
+      });
+  }
+
+  async function geminiNuvem(system, parts, modelo) {
+    const tok = await sbToken();
+    const sb = getSb();
+    const r = await new Promise(res => GM_xmlhttpRequest({
+      method: 'POST', url: sb.url.replace(/\/+$/, '') + '/functions/v1/ia-proxy', timeout: 140000,
+      headers: { 'Content-Type': 'application/json', apikey: sb.key, Authorization: 'Bearer ' + tok },
+      data: JSON.stringify({ acao: 'gemini', modelo, system, parts, generationConfig: { temperature: 0.2, thinkingConfig: { thinkingLevel: 'low' } } }),
+      onload: x => { let j = null; try { j = JSON.parse(x.responseText); } catch (_) {} res({ status: x.status, json: j }); },
+      onerror: () => res({ status: 0, json: null }), ontimeout: () => res({ status: -1, json: null }),
+    }));
+    if (r.status === 0) throw new Error('falha de rede');
+    if (r.status === -1) throw new Error('tempo esgotado');
+    const d = r.json || {};
+    if (r.status < 200 || r.status >= 300 || !d.texto) throw new Error(`${r.status} ${String(d.detalhe || d.erro || 'sem resposta').slice(0, 200)}`);
+    return { texto: String(d.texto).trim(), modelo: d.modelo || modelo };
+  }
+
+  function geminiDirect(system, parts, cb, modelo, i = 0, semThink = false) {
     const key = getKey();
-    if (!key) return cb('Sem chave Gemini configurada.');
-    const model = MODELS[i];
-    const next = () => gemini(system, parts, cb, i + 1);
+    if (!key) return cb('Sem chave Gemini. Conecte a sincronização (Ajustes → Sincronizar) ou cadastre a chave.');
+    const fila = modelo && modelo !== MODEL_MAIN ? [modelo, ...MODELS.filter(m => m !== modelo && m !== MODEL_MAIN)] : MODELS;
+    const model = fila[i];
+    const next = () => geminiDirect(system, parts, cb, modelo, i + 1, false);
+    const gc = { temperature: 0.2 };
+    if (!semThink) gc.thinkingConfig = { thinkingLevel: 'low' };
     GM_xmlhttpRequest({
       method: 'POST',
       url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      timeout: 90000,
-      data: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts }],
-        generationConfig: { temperature: 0.2 },
-      }),
+      timeout: 120000,
+      data: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts }], generationConfig: gc }),
       onload: r => {
         if (r.status >= 200 && r.status < 300) {
           try {
             const j = JSON.parse(r.responseText);
             const out = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
-            return out ? cb(null, out, model) : cb('Resposta vazia do modelo.');
+            if (out) return cb(null, out, model);
+            return i + 1 < fila.length ? next() : cb('Resposta vazia do modelo.');
           } catch (e) { return cb('Falha ao ler resposta: ' + e.message); }
         }
-        if (i + 1 < MODELS.length && [404, 429, 500, 503].includes(r.status)) return next();
         let msg = '';
         try { msg = JSON.parse(r.responseText).error.message; } catch (_) { msg = (r.responseText || '').slice(0, 200); }
+        if (r.status === 400 && !semThink && /thinking/i.test(msg)) return geminiDirect(system, parts, cb, modelo, i, true); // modelo sem nível de raciocínio
+        if (i + 1 < fila.length && [400, 404, 429, 500, 503].includes(r.status) && !/API key/i.test(msg)) return next();
         cb(`Erro ${r.status} (${model}): ${msg}`);
       },
-      onerror: () => (i + 1 < MODELS.length ? next() : cb('Falha de rede.')),
-      ontimeout: () => (i + 1 < MODELS.length ? next() : cb('Tempo esgotado.')),
+      onerror: () => (i + 1 < fila.length ? next() : cb('Falha de rede.')),
+      ontimeout: () => (i + 1 < fila.length ? next() : cb('Tempo esgotado.')),
     });
   }
 
-  function rewrite(c, inst, usarCtx, cb) {
-    let prompt = kbBlock();
+  function rewrite(c, inst, usarCtx, cb, isFam) {
+    let prompt = isFam ? '' : kbBlock();
     if (usarCtx && c.contexto) prompt += `CONTEXTO (últimas mensagens da conversa, da mais antiga para a mais recente):\n${c.contexto}\n\n`;
     prompt += `INSTRUÇÃO: ${inst}\n\nRASCUNHO A REESCREVER:\n<<<\n${c.text}\n>>>`;
-    gemini(BASE, [{ text: prompt }], (err, out, model) => {
+    gemini(isFam ? famSystem() : BASE, [{ text: prompt }], (err, out, model) => {
       if (err) return cb(err);
       out = out.replace(/^<<<\s*|\s*>>>$/g, '').replace(/^["“](.*)["”]$/s, '$1').trim();
       cb(null, out, model);
@@ -402,11 +460,14 @@ Regras obrigatórias:
     } else {
       box = el('div', { cls: 'gz-tr' + (out ? ' out' : '') },
         el('div', { cls: 'gz-tr-h' },
-          el('span', { text: '📝 Transcrição' }),
+          el('span', { text: '📝 Transcrição' + (a.model ? ' · ' + modelName(a.model) : '') }),
           el('button', { text: 'Copiar', onclick: e => { e.stopPropagation(); copy(a.transcript); } }),
           el('button', { text: 'Responder', onclick: e => { e.stopPropagation(); ctx = capture(); openReply(a.transcript); } }),
           el('button', { text: a.summary ? (a.showSum ? 'Ocultar resumo' : 'Ver resumo') : (a.busy ? 'Resumindo…' : 'Resumir'), onclick: e => { e.stopPropagation(); toggleSummary(id); } })),
         el('div', { text: a.transcript }),
+        a.blob ? el('div', { cls: 'gz-tr-h', style: 'margin:4px 0 0' }, el('button', {
+          text: '↻ Refazer com ' + modelName(/hydrogen/.test(a.model || '') ? MODEL_ALT : MODEL_MAIN) + ' (comparar)',
+          onclick: e => { e.stopPropagation(); retranscribe(id); } })) : null,
         a.summary && a.showSum ? el('div', { cls: 'gz-tr-sum', text: a.summary }) : null);
       box.dataset.kind = 'tr'; box.dataset.v = String(a.v || 0);
     }
@@ -416,7 +477,21 @@ Regras obrigatórias:
   function decorateAll() { for (const id of audios.keys()) decorate(id); }
   function bump(id) { const a = audios.get(id); if (a) { a.v = (a.v || 0) + 1; decorate(id); } }
 
-  async function transcribe(id = lastAudioId) {
+  // refaz a transcrição com o outro modelo (guarda as duas: alternar é instantâneo)
+  function retranscribe(id) {
+    const a = audios.get(id);
+    if (!a || a.busy) return;
+    a.byModel = a.byModel || {};
+    if (a.model) a.byModel[a.model] = a.transcript;
+    const alvo = /hydrogen/.test(a.model || '') ? MODEL_ALT : MODEL_MAIN;
+    const pronto = Object.keys(a.byModel).find(m => m !== a.model && (alvo === MODEL_MAIN ? /hydrogen/.test(m) : !/hydrogen/.test(m)));
+    a.summary = null;
+    if (pronto) { a.transcript = a.byModel[pronto]; a.model = pronto; return bump(id); }
+    a.transcript = null;
+    transcribe(id, alvo);
+  }
+
+  async function transcribe(id = lastAudioId, modelo) {
     const a = id && audios.get(id);
     if (!a) return toast('Dê play no áudio que você quer transcrever (pode pausar logo) e clique em "📝 Transcrever este áudio" embaixo dele.', 6000);
     if (a.busy) return;
@@ -431,11 +506,15 @@ Regras obrigatórias:
     const mime = (a.blob.type || 'audio/ogg').split(';')[0];
     gemini(TRANSCRICAO, [{ text: 'Transcreva o áudio.' }, { inline_data: { mime_type: mime, data: b64 } }], (err, out, model) => {
       a.busy = false;
-      if (err) { bump(id); return toast(err, 7000); }
+      if (err) {
+        if (a.byModel && a.model && a.byModel[a.model]) a.transcript = a.byModel[a.model]; // volta à anterior
+        bump(id); return toast(err, 7000);
+      }
       a.transcript = out; a.model = model;
+      if (modelo && model !== modelo) toast(`${modelName(modelo)} indisponível agora; veio ${modelName(model)}.`, 5000);
       bump(id);
       if (!rowOf(id)) showTranscriptPanel(a); // áudio sem balão identificado
-    });
+    }, { modelo });
   }
 
   function toggleSummary(id) {
@@ -515,11 +594,11 @@ Regras obrigatórias:
     cb.addEventListener('change', () => GM_setValue('use_ctx', cb.checked));
     shell(ctx.scope === 'sel' ? '· trecho selecionado' : '· mensagem inteira',
       el('div', { cls: 'gz-modes' },
-        MODOS.map(m => el('button', { cls: 'gz-m', onmousedown: e => e.preventDefault(), onclick: () => choose(m) },
+        MODOS.map(m => el('button', { cls: 'gz-m', style: m.fam && toneOf(currentChatName()) === 'fam' ? 'border-color:#00a884' : '', onmousedown: e => e.preventDefault(), onclick: () => choose(m) },
           el('b', { text: m.k }), m.nome, el('small', { text: m.desc })))),
       el('label', { cls: 'gz-ctx' }, cb, `Usar contexto da conversa (${nCtx} últimas mensagens) — tecla C`),
       el('div', { cls: 'gz-row' }, el('button', { cls: 'gz-b', text: '💬 Sugerir resposta nova (tecla S)', onmousedown: e => e.preventDefault(), onclick: () => openReply('') })),
-      el('div', { cls: 'gz-msg', text: 'Teclas 1–6 · Esc fecha · nada é enviado sem você apertar Enter no WhatsApp' }));
+      el('div', { cls: 'gz-msg', text: 'Teclas 1–7 · Esc fecha · nada é enviado sem você apertar Enter no WhatsApp' }));
   }
 
   // ---------- RESPONDER: sugere resposta a partir da conversa (com áudios transcritos) ----------
@@ -542,20 +621,22 @@ Regras obrigatórias:
       quote ? el('div', { cls: 'gz-orig', text: quote }) : null,
       nota,
       el('div', { cls: 'gz-modes' },
-        TONS.map(t => el('button', { cls: 'gz-m', onmousedown: e => e.preventDefault(), onclick: () => chooseTone(t) },
+        TONS.map(t => el('button', { cls: 'gz-m', style: t.fam && toneOf(currentChatName()) === 'fam' ? 'border-color:#00a884' : '', onmousedown: e => e.preventDefault(), onclick: () => chooseTone(t) },
           el('b', { text: t.k }), t.nome, el('small', { text: t.desc })))),
       el('div', { cls: 'gz-msg', text: `Lê as últimas ${n} mensagens${nAud ? ` + áudios transcritos` : ''}${rctx.draft ? ' e usa seu rascunho como base' : ''}. Áudio só entra se tiver sido transcrito (📝).` }),
-      el('div', { cls: 'gz-msg', text: 'Escreva o contexto (opcional) e escolha o tom · teclas 1–5 fora do campo · Esc fecha · nada é enviado sozinho' }));
+      el('div', { cls: 'gz-msg', text: 'Escreva o contexto (opcional) e escolha o tom · teclas 1–6 fora do campo · Esc fecha · nada é enviado sozinho' }));
     panel.querySelector('.gz-h span').firstChild.textContent = '💬 Responder ';
   }
 
   function chooseTone(t) {
-    if (t.inst) return runReply(t.inst, t.nome, (rctx.note || '').trim());
+    const chat = currentChatName();
+    if (t.inst) { fam = !!t.fam; setTone(chat, fam ? 'fam' : 'pro'); return runReply(t.inst, t.nome, (rctx.note || '').trim()); }
+    fam = toneOf(chat) === 'fam'; // "Eu digo o quê": segue o último tom usado nesta conversa
     stage = 'rfree';
     const ta = el('textarea', { placeholder: 'Ex.: confirmar que vou reforçar com a direção que o portátil é só para urgência; agradecer o retorno' });
     ta.value = rctx.note || '';
     ta.style.minHeight = '70px';
-    const go = () => { const v = ta.value.trim(); if (!v) return; runReply('Tom técnico e cordial.', 'Sua ideia', v); };
+    const go = () => { const v = ta.value.trim(); if (!v) return; runReply(fam ? TONS[5].inst : 'Tom técnico e cordial.', fam ? 'Sua ideia · familiar' : 'Sua ideia', v); };
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go(); } });
     shell('· o que você quer responder', ta,
       el('div', { cls: 'gz-row' },
@@ -570,13 +651,15 @@ Regras obrigatórias:
     stage = 'loading';
     shell(`· ${nome}`, el('div', { cls: 'gz-msg', text: 'Lendo a conversa e preparando a resposta…' }));
     panel.querySelector('.gz-h span').firstChild.textContent = '💬 Responder ';
-    let prompt = kbBlock() + `CONVERSA (da mais antiga para a mais recente; "Eu (Dr. Gaspar)" sou eu):\n${getContext(N_CONVERSA) || '(sem mensagens visíveis)'}\n\n`;
+    const isFam = fam;
+    let prompt = (isFam ? `CONVERSA COM: ${currentChatName() || '(familiar)'}\n\n` : kbBlock()) + `CONVERSA (da mais antiga para a mais recente; "Eu (Dr. Gaspar)" sou eu):\n${getContext(N_CONVERSA) || '(sem mensagens visíveis)'}\n\n`;
     if (r.quote) prompt += `RESPONDA PRINCIPALMENTE A ESTE TRECHO:\n<<<\n${r.quote}\n>>>\n\n`;
     else prompt += 'TAREFA: escreva minha próxima mensagem, respondendo ao que o interlocutor disse/perguntou mais recentemente e ainda não foi respondido por mim.\n\n';
     if (r.draft) prompt += `MEU RASCUNHO (use como base do conteúdo):\n<<<\n${r.draft}\n>>>\n\n`;
     if (ideia) prompt += `O QUE EU QUERO DIZER: ${ideia}\n\n`;
     prompt += `TOM: ${tom}`;
-    gemini(RESP_BASE, [{ text: prompt }], (err, out, model) => {
+    if (isFam) prompt = prompt.replace(/Eu \(Dr\. Gaspar\)/g, 'Eu (Gabriel)');
+    gemini(isFam ? famSystem() : RESP_BASE, [{ text: prompt }], (err, out, model) => {
       if (stage === 'closed') return;
       if (err) {
         stage = 'error';
@@ -590,7 +673,7 @@ Regras obrigatórias:
       const ta = el('textarea'); ta.value = out;
       const apply = async () => { const txt = ta.value; close(); await replaceText(r.c, txt); };
       ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); apply(); } });
-      shell(`· ${nome} · ${model}`,
+      shell(`· ${nome} · ${modelName(model)}`,
         r.quote ? el('div', { cls: 'gz-orig', text: r.quote }) : null,
         ta,
         el('div', { cls: 'gz-msg', text: 'Revise os [colchetes] antes de enviar.' }),
@@ -606,7 +689,9 @@ Regras obrigatórias:
   }
 
   function choose(m) {
-    if (m.inst) return run(m.inst, m.nome);
+    const chat = currentChatName();
+    if (m.inst) { fam = !!m.fam; setTone(chat, fam ? 'fam' : 'pro'); return run(m.inst, m.nome); }
+    fam = false;
     stage = 'free';
     const ta = el('textarea', { placeholder: 'Ex.: responda à última mensagem agradecendo e dizendo que o laudo sai hoje à tarde, tom técnico' });
     ta.value = GM_getValue('last_free', '');
@@ -626,7 +711,7 @@ Regras obrigatórias:
     stage = 'loading';
     const comCtx = usarCtx() && !!ctx.contexto;
     shell(`· ${nome}`, el('div', { cls: 'gz-msg', text: comCtx ? 'Lendo a conversa e reescrevendo…' : 'Reescrevendo…' }));
-    const myCtx = ctx;
+    const myCtx = ctx, isFam = fam;
     rewrite(myCtx, inst, comCtx, (err, out, model) => {
       if (stage === 'closed') return;
       if (err) {
@@ -641,7 +726,7 @@ Regras obrigatórias:
       ta.value = out;
       const apply = async () => { const txt = ta.value; close(); await replaceText(myCtx, txt); };
       ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); apply(); } });
-      shell(`· ${nome}${comCtx ? ' · com contexto' : ''} · ${model}`,
+      shell(`· ${nome}${comCtx ? ' · com contexto' : ''} · ${modelName(model)}`,
         el('div', { cls: 'gz-orig', text: myCtx.text }),
         ta,
         orientRow(v => run(inst + ' Orientação adicional do Dr. Gaspar: ' + v, nome)),
@@ -651,7 +736,7 @@ Regras obrigatórias:
           el('button', { cls: 'gz-b', text: 'Copiar', onclick: () => copy(ta.value) }),
           el('button', { cls: 'gz-b pri', text: 'Substituir (Ctrl+Enter)', onclick: apply })));
       ta.focus();
-    });
+    }, isFam);
   }
 
   // =====================================================================
@@ -669,10 +754,10 @@ Regras obrigatórias:
     if (stage === 'closed') return;
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return close(); }
     if (e.target && e.target.closest && e.target.closest('#gz-panel') && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-    if (stage === 'rmenu' && /^[1-5]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); return chooseTone(TONS[+e.key - 1]); }
+    if (stage === 'rmenu' && /^[1-6]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); return chooseTone(TONS[+e.key - 1]); }
     if (stage === 'menu' && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); e.stopPropagation(); return openReply(''); }
     if (stage === 'menu') {
-      if (/^[1-6]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); return choose(MODOS[+e.key - 1]); }
+      if (/^[1-7]$/.test(e.key)) { e.preventDefault(); e.stopPropagation(); return choose(MODOS[+e.key - 1]); }
       if (e.key.toLowerCase() === 'c') {
         e.preventDefault(); e.stopPropagation();
         const cb = panel && panel.querySelector('.gz-ctx input');
@@ -1511,7 +1596,12 @@ Regras obrigatórias:
       })),
       el('div', { cls: 'gz-note', text: 'Arraste o ✨ para onde quiser. Os painéis se movem arrastando pelo título (duplo clique no título = posição padrão).' }),
 
+      sec('Tom familiar (esposa, mãe, irmã, amigos)'),
+      famSettingsBox(),
+
       sec('Gemini'),
+      chk('Usar a IA pela nuvem (chave só no Supabase; exige a sincronização conectada)', () => !GM_getValue('ia_direct', false), v => GM_setValue('ia_direct', !v)),
+      el('div', { cls: 'gz-note', text: `Modelo: ${modelName(MODEL_MAIN)} (reserva automática: 3.8 Flash → 3.6 Flash). ${usaNuvem() ? 'Agora: pela nuvem.' : 'Agora: chave deste navegador.'}` }),
       el('div', { cls: 'gz-row' }, btn('Alterar chave da API', () => {
         const k = (prompt('Nova chave da API Gemini:', '') || '').trim();
         if (k) { GM_setValue('gemini_key', k); toast('Chave salva.'); }
@@ -2128,6 +2218,14 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     draw();
     return box;
   }
+  function famSettingsBox() {
+    const ta = el('textarea', { placeholder: FAM_STYLE_DEF });
+    ta.value = GM_getValue('fam_style', '');
+    ta.style.minHeight = '90px';
+    ta.addEventListener('change', () => GM_setValue('fam_style', ta.value.trim()));
+    return el('div', {}, ta,
+      el('div', { cls: 'gz-note', text: 'Descreva como você escreve para cada pessoa (ex.: "Mãe: começo com Bom dia Mãe…"). Usado só no tom "Familiar / amigável". Fica no seu navegador e na sua sincronização, nunca no código.' }));
+  }
   setTimeout(() => { try { loadKb(); } catch (_) {} }, 4000);
   setInterval(() => { try { loadKb(); } catch (_) {} }, 30 * 60e3);
 
@@ -2136,7 +2234,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   // 14. SINCRONIZAÇÃO ENTRE COMPUTADORES (Supabase, só o usuário logado)  (v1.8)
   //   Tabela public.wa_suite_config (RLS: auth.uid() = user_id). Credenciais só no navegador.
   // =====================================================================
-  const SYNC_KEYS = ['gemini_key', 'cal_sources', 'kb_sources', 'reminders', 'ui_cfg', 'kb_off', 'use_ctx', 'hide_fab'];
+  const SYNC_KEYS = ['gemini_key', 'cal_sources', 'kb_sources', 'reminders', 'ui_cfg', 'kb_off', 'use_ctx', 'hide_fab', 'fam_style', 'ia_direct'];
   const LOCAL_LAYOUT = ['layoutOn', 'sideW', 'sideZoom', 'headZoom', 'headMain', 'railZoom', 'sideHidden'];
   const getSb = () => GM_getValue('sb_conn', null);
   const setSb = v => GM_setValue('sb_conn', v);
