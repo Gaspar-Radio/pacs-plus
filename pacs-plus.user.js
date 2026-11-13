@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.52.0
+// @version      1.53.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -39,7 +39,7 @@
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
-        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
+        ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Na janela 🕘 Histórico vale para qualquer exame com imagem. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
         ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
@@ -4066,7 +4066,12 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         return v;
     }
     async function serBuscar(ex) {
-        const uid = String(ex.exa_pacs_iuid || '');
+        let uid = String(ex.exa_pacs_iuid || '');
+        if (!/^\d+(\.\d+)+$/.test(uid) && ex.__ppHist) { // v1.53: exame da janela 🕘 pode vir sem o UID — busca no próprio exame (só leitura)
+            const e2 = await comExameApi(ex.exa_codigo);
+            ex.exa_pacs_iuid = e2.exa_pacs_iuid; if (!ex.exa_pacs_link) ex.exa_pacs_link = e2.exa_pacs_link;
+            uid = String(ex.exa_pacs_iuid || '');
+        }
         if (!/^\d+(\.\d+)+$/.test(uid)) throw new Error('exame sem UID');
         let k = await serChaveVisualizador(ex, false);
         const pedir = kk => fetch(`/dcm4chee-arc/aets/${encodeURIComponent(kk.aet)}/rs/studies/${uid}/series`, {
@@ -4117,7 +4122,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     }
     function serIconesLista() {
         const f = findListTable(), comp = f && componenteLista();
-        const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => x.remove());
+        const limpar = () => document.querySelectorAll('.pp-ser').forEach(x => { if (!x.closest('#pp-hl')) x.remove(); }); // os da janela 🕘 são do hlPintarSeries
         if (!f || !comp || !on('contarSeries')) { limpar(); serAlvo = new Map(); return; }
         const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
@@ -4165,7 +4170,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             if (bd.title !== tit) bd.title = tit;
         });
     }
-    setInterval(() => { try { if (cfg.master) serIconesLista(); } catch (e) { /* segue */ } }, 1500);
+    setInterval(() => { try { if (cfg.master) { serIconesLista(); hlPintarSeries(); } } catch (e) { /* segue */ } }, 1500);
 
     // ---------- v1.36: trocar a situação (Aberto ↔ Digitado ↔ Revisar) clicando na lista ----------
     // Mesmo caminho do botão do laudo (salvarLaudo): GET exame/{id} → laudo atual (ou laudo vazio padrão via limparLaudo
@@ -4399,7 +4404,74 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 #pp-hl .hl-ac .v-icon > .hl-n { position: absolute; top: -6px; right: -7px; z-index: 2; min-width: 15px; height: 15px; padding: 0 3px; box-sizing: border-box; border-radius: 8px; background: #4caf50; color: #fff; font: 700 10px/15px Roboto, Arial, sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
 #pp-hl .hl-ac .v-icon[data-a="anx"].tem { color: #2196f3 !important; } #pp-hl .hl-ac .v-icon[data-a="com"].tem { color: #c50ec5 !important; }
 #pp-hl .hl-txt { grid-column: 1 / -1; white-space: pre-wrap; background: #111; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; margin: 4px 0 6px; max-height: 320px; overflow: auto; font-size: 12.5px; user-select: text; }
-#pp-hl .hl-msg { padding: 14px; color: #9ca3af; }`);
+#pp-hl .hl-msg { padding: 14px; color: #9ca3af; }
+#pp-hl .hl-fil { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 6px 12px; border-bottom: 1px solid #3f3f46; font-size: 12px; color: #9ca3af; }
+#pp-hl .hl-fil button { background: #2a2a2a; color: #d1d5db; border: 1px solid #3f3f46; border-radius: 11px; padding: 1px 9px; font: inherit; cursor: pointer; }
+#pp-hl .hl-fil button:hover { border-color: #a78bfa; } #pp-hl .hl-fil button.on { background: #6d28d9; border-color: #a78bfa; color: #fff; }
+#pp-hl .hl-l[hidden] { display: none; }`);
+    // v1.53 — filtro por modalidade na janela 🕘 (TC / US / RX / Outros; nenhum marcado = todos). Vale até recarregar a página,
+    // e o subtítulo sempre mostra "x de y" para não esconder exame sem avisar.
+    const HL_MODS = [['CT', 'TC'], ['US', 'US'], ['RX', 'RX'], ['OUT', 'Outros']];
+    let hlFiltro = new Set();
+    const hlMod = x => grupoMod(x && x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla);
+    function hlAplicarFiltro() {
+        const p = document.getElementById('pp-hl'); if (!p || !Array.isArray(p.__exs)) return;
+        const exs = p.__exs, cont = {}; exs.forEach(x => { const g = hlMod(x); cont[g] = (cont[g] || 0) + 1; });
+        const ativos = [...hlFiltro].filter(g => cont[g]); // filtro de modalidade que este paciente não tem não esconde tudo
+        let vis = 0;
+        p.querySelectorAll('.hl-l[data-i]').forEach(l => { const ok = !ativos.length || ativos.includes(hlMod(exs[Number(l.dataset.i)])); l.hidden = !ok; if (ok) vis++; });
+        const bar = p.querySelector('.hl-fil');
+        if (bar) {
+            const tipos = HL_MODS.filter(([g]) => cont[g]);
+            bar.style.display = tipos.length > 1 ? '' : 'none';
+            bar.innerHTML = 'Mostrar: <button data-f="" class="' + (ativos.length ? '' : 'on') + '">Todos</button>' + tipos.map(([g, n]) => `<button data-f="${g}" class="${ativos.includes(g) ? 'on' : ''}">${n} <small>${cont[g]}</small></button>`).join('');
+            bar.onclick = ev => { const b = ev.target.closest('button[data-f]'); if (!b) return; const g = b.dataset.f; if (!g) hlFiltro = new Set(); else if (hlFiltro.has(g)) hlFiltro.delete(g); else hlFiltro.add(g); hlAplicarFiltro(); };
+        }
+        const sub = p.querySelector('.hl-sub'); if (sub) sub.textContent = `(${ativos.length ? vis + ' de ' + exs.length : exs.length})${p.__nome ? ' · ' + p.__nome : ''}`;
+    }
+    // v1.53 — contador de séries/imagens no 👁 também na janela 🕘. Mesma regra da lista: só consulta quando o mouse PARA
+    // na linha (0,4 s), com a mesma validade e a mesma chave reaproveitada. Aqui vale para qualquer exame com imagem;
+    // TCs do mesmo dia são consultadas juntas e a que tem o volume fica verde.
+    let hlSerTimer = 0;
+    const hlSerTem = x => !!(x && x.exa_idnexecutadopacs);
+    function hlSerGrupo(exs, i) {
+        const x = exs[i], dia = y => String(y.exa_data || '').slice(0, 10);
+        if (!hlSerTem(x)) return [];
+        if (hlMod(x) !== 'CT') return [i];
+        return exs.map((y, j) => hlSerTem(y) && hlMod(y) === 'CT' && dia(y) === dia(x) ? j : -1).filter(j => j >= 0);
+    }
+    function hlSerPedir(i) {
+        const p = document.getElementById('pp-hl'); if (!p || !Array.isArray(p.__exs) || !on('contarSeries')) return;
+        let algum = false;
+        hlSerGrupo(p.__exs, i).forEach(j => {
+            const ex = p.__exs[j], v0 = serLer(ex);
+            if (v0 && !serVelho(v0)) return;
+            ex.__ppHist = true; serMem.set(serChave(ex), { st: 'carregando', ant: v0 || null }); serFila.push(ex); algum = true;
+        });
+        if (algum) { serProximo(() => { hlPintarSeries(); serIconesLista(); }); hlPintarSeries(); }
+    }
+    function hlPintarSeries() {
+        const p = document.getElementById('pp-hl'); if (!p || !Array.isArray(p.__exs)) return;
+        const exs = p.__exs;
+        p.querySelectorAll('.hl-l[data-i]').forEach(l => {
+            const i = Number(l.dataset.i), ex = exs[i], olho = l.querySelector('[data-a="img"]'); if (!olho) return;
+            let bd = olho.querySelector(':scope > .pp-ser');
+            let v = on('contarSeries') && hlSerTem(ex) ? serVis(ex) : null;
+            if (v && v.st === 'erro' && Date.now() - v.t > 120000) { serMem.delete(serChave(ex)); v = null; }
+            if (!v) { if (bd) bd.remove(); return; }
+            if (!bd) { bd = document.createElement('span'); bd.className = 'pp-ser'; olho.appendChild(bd); }
+            let txt = '…', cls = 'pp-ser', tit = 'Contando as séries deste exame…';
+            if (v.st === 'ok') {
+                const vals = hlSerGrupo(exs, i).map(j => serVis(exs[j])).filter(w => w && w.st === 'ok');
+                const maior = Math.max(...vals.map(w => w.img)), scout = hlMod(ex) === 'CT' && v.img <= 2, vol = vals.length > 1 && v.img === maior && !scout;
+                txt = String(v.ser); cls += scout ? ' pp-ser-pouco' : vol ? ' pp-ser-maior' : '';
+                tit = `${v.ser} série(s) de imagem · ${v.img} imagem(ns)` + (scout ? ' — só o scout/topograma' : vol ? ' — este é o código com o volume' : '') + (v.desc ? '\n' + v.desc : '');
+            } else if (v.st === 'erro') { txt = '?'; cls += ' pp-ser-erro'; tit = 'Não consegui contar: ' + v.msg; }
+            if (bd.textContent !== txt) bd.textContent = txt;
+            if (bd.className !== cls) bd.className = cls;
+            if (bd.title !== tit) bd.title = tit;
+        });
+    }
     async function hlAbrir(pac, exaAtual) {
         let p = document.getElementById('pp-hl');
         if (!p) {
@@ -4407,7 +4479,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('pp-hl')) document.getElementById('pp-hl').remove(); });
         }
         if (typeof arrAplicar === 'function') arrAplicar(p);
-        p.innerHTML = `<div class="hl-top"><b>🕘 Histórico de exames</b><span class="hl-sub">carregando…</span><button class="hl-x" title="Fechar (Esc)">✕</button></div><div class="hl-lista"><div class="hl-msg">⏳ Buscando no PACS…</div></div>`;
+        p.innerHTML = `<div class="hl-top"><b>🕘 Histórico de exames</b><span class="hl-sub">carregando…</span><button class="hl-x" title="Fechar (Esc)">✕</button></div><div class="hl-fil" style="display:none"></div><div class="hl-lista"><div class="hl-msg">⏳ Buscando no PACS…</div></div>`;
         p.querySelector('.hl-x').onclick = () => p.remove();
         let d;
         try { d = await pacsGet('paciente/' + pac); } catch (e) { p.querySelector('.hl-lista').innerHTML = `<div class="hl-msg">⚠ ${esc(e.message)}</div>`; return; }
@@ -4416,7 +4488,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const exs = (d && Array.isArray(d.exames) ? d.exames : []).slice().sort((a, b) => quando(b).localeCompare(quando(a)));
         const nomePac = (() => { try { const comp = componenteLista(); const ex = comp && comp.exames.find(x => x.exa_codigo === exaAtual); return ex && ex.paciente ? ex.paciente.pac_nome : ''; } catch (e) { return ''; } })();
         p.querySelector('.hl-sub').textContent = `(${exs.length})${nomePac ? ' · ' + nomePac : ''}`;
-        p.dataset.pac = pac;
+        p.dataset.pac = pac; p.__nome = nomePac;
         const lista = p.querySelector('.hl-lista');
         if (!exs.length) { lista.innerHTML = '<div class="hl-msg">Nenhum exame encontrado.</div>'; return; }
         const rad = radiantPronto();
@@ -4459,6 +4531,12 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
                 }
             } catch (e) { const m = document.createElement('div'); m.className = 'hl-txt'; m.textContent = '⚠ PACS: ' + e.message; linha.appendChild(m); setTimeout(() => m.remove(), 6000); }
         };
+        lista.onmouseover = ev => {
+            const l = ev.target.closest && ev.target.closest('.hl-l[data-i]'); clearTimeout(hlSerTimer);
+            if (l && on('contarSeries')) hlSerTimer = setTimeout(() => hlSerPedir(Number(l.dataset.i)), 400);
+        };
+        lista.onmouseleave = () => clearTimeout(hlSerTimer);
+        hlAplicarFiltro(); hlPintarSeries();
         hlPintarContagens();
     }
     // v1.41.0 — balões de anexos (📎) e comentários (💬) no painel 🕘, mesma contagem/cache do histórico do laudo
@@ -6166,6 +6244,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
