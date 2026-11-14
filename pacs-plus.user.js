@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.54.1
+// @version      1.55.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -334,6 +334,9 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-mini { padding: 6px 12px; cursor: pointer; font-weight: 700; white-space: nowrap; }
 #pp-rev .pr-mini .pr-g { color: #f87171; } #pp-rev .pr-mini .pr-exp { color: #94a3b8; margin-left: 6px; }
 #pp-rev .pr-conf { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: #172033; border: 1px solid #334155; color: #cbd5e1; } #pp-rev .pr-conf.ok { background: #052e2b; border-color: #10b981; color: #a7f3d0; } #pp-rev .pr-conf.g { background: #422006; border-color: #f59e0b; color: #fde68a; } #pp-rev .pr-conf.err { color: #fca5a5; } #pp-rev .pr-confp { margin-top: 3px; font-weight: 400; } #pp-rev .pr-confp small { color: #94a3b8; }
+#pp-rev .pr-f.gdec { background: #134e4a; color: #99f6e4; }
+#pp-rev .pr-tri { margin-top: 6px; font-size: 11.5px; color: #94a3b8; } #pp-rev .pr-tri > button { background: none; border: 0; color: #94a3b8; cursor: pointer; font: inherit; padding: 2px 0; text-align: left; }
+#pp-rev .pr-tri > button:hover { color: #e2e8f0; } #pp-rev .pr-tri-l { padding: 3px 8px; border-left: 2px solid #334155; margin: 3px 0 0 4px; color: #cbd5e1; }
 #pp-rev .pr-cfgbox { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 6px 8px; border: 1px dashed #334155; border-radius: 6px; }
 #pp-rev .pr-alt { margin: 6px 10px 0; padding: 6px 8px; border-radius: 6px; background: #422006; border: 1px solid #b45309; color: #fde68a; display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
 #pp-rev .pr-ped { padding: 8px 10px 2px; }
@@ -3239,13 +3242,18 @@ ${c.texto}`;
     // Probabilidade final = média das que responderam (uma falhou → vale a outra). Luna sem chave → some até recarregar.
     // v1.38.1 (pedido do usuário): Jev e Luna SEPARADOS — cada um é um motor/fonte própria, com selo e valor próprios,
     // para ver os falsos alarmes de cada um e comparar. Mesmas perguntas; Luna = OpenAI Decisions API (gpt-6-luna).
-    let lunaSemChave = false;
-    const CK = { jev: { acao: 'jev', nome: 'Jev', pk: 'prob', jk: 'juiz' }, luna: { acao: 'decisions', nome: 'Luna', pk: 'probL', jk: 'juizL' } };
+    // v1.55 — TRIAGEM com 3 votos: + Gemini Decision 1 (Google Decisions API, ia-proxy 21 "gemini_decisions"), mesmas perguntas.
+    // Pergunta que só os modelos de decisão acenderam vira alarme com 2 votos (≥ JEV_LIM.mostrar); a triagem acesa chama
+    // sozinha o PARECER do Argon (um achado por erro, com explicação). Bateria 2 (13/11/2026, testes/RESULTADOS-bateria-2.md):
+    // 24/24 erros acionaram o parecer, o Argon apontou os 24, e nenhum alarme indevido nos 24 laudos corretos.
+    let lunaSemChave = false, gdecFora = false;
+    const DECS = ['jev', 'luna', 'gdec'];
+    const CK = { jev: { acao: 'jev', nome: 'Jev', pk: 'prob', jk: 'juiz' }, luna: { acao: 'decisions', nome: 'Luna', pk: 'probL', jk: 'juizL' }, gdec: { acao: 'gemini_decisions', nome: 'Gemini D', pk: 'probG', jk: 'juizG' } };
     async function checklist(eng, state, questions) {
         try { return await iaProxy({ acao: CK[eng].acao, state, questions }); }
-        catch (e) { if (eng === 'luna' && /OPENAI_API_KEY|nuvem 400 acao/.test(String(e.message))) lunaSemChave = true; throw e; }
+        catch (e) { if (eng === 'luna' && /OPENAI_API_KEY|nuvem 400 acao/.test(String(e.message))) lunaSemChave = true; if (eng === 'gdec' && /GEMINI_API_KEY|nuvem 400 acao/.test(String(e.message))) gdecFora = true; throw e; }
     }
-    const JUIZ_SEM = { jev: ['unidade_grandeza', 'esvaziamento_incoerente'], luna: ['unidade_grandeza', 'esvaziamento_incoerente', 'lado_exame'] };
+    const JUIZ_SEM = { jev: ['unidade_grandeza', 'esvaziamento_incoerente'], luna: ['unidade_grandeza', 'esvaziamento_incoerente', 'lado_exame'], gdec: ['unidade_grandeza', 'esvaziamento_incoerente'] };
     const JUIZ_MIN = { achado_omitido: 0.9 }; // v1.45: 16 ignorados × 3 corrigidos com média 0,79 → só acima de 0,9
     async function revJev(c, eng = 'jev') {
         const t0 = performance.now(), N = CK[eng].nome;
@@ -3267,16 +3275,16 @@ ${c.texto}`;
             const p = a && typeof a.noul === 'number' ? a.noul : null;
             if (p == null) return;
             probs[k] = p;
-            if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (${N} ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: [eng], [CK[eng].pk]: p }); return; }
+            if (k === 'critico_presente') { if (p >= JEV_LIM.sozinho) achados.push({ categoria: 'critico', gravidade: 'atencao', trecho: '', explicacao: `Possível achado crítico e “Resultado Crítico” desmarcado (${N} ${fmt(p, 2)}).`, sugestao: 'Conferir e marcar se for o caso.', fontes: [eng], [CK[eng].pk]: p, q: k, qtxt: 'Possível achado crítico e “Resultado Crítico” desmarcado.' }); return; }
             const m = mapa[k];
             if (!m || p < Math.max(JEV_LIM.mostrar, JUIZ_MIN[k] || 0)) return;
-            achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (${N} ${fmt(p, 2)})`, sugestao: '', fontes: [eng], [CK[eng].pk]: p });
+            achados.push({ categoria: m[0], gravidade: p >= JEV_LIM.grave ? m[1] : 'atencao', trecho: '', explicacao: `${m[2]} (${N} ${fmt(p, 2)})`, sugestao: '', fontes: [eng], [CK[eng].pk]: p, q: k, qtxt: m[2] });
         });
         // v1.23: lados por escolha (só com confiança ≥ 0,75)
         const lc = ans.lado_corpo_ch, lk = ans.lado_conc_ch, lado = x => x && x.confidence >= 0.75 && ['direito', 'esquerdo'].includes(x.choice) ? x.choice : null;
         const ladoC = lado(lc), ladoK = lado(lk), ladoN = ladoDoNome(c.exame);
-        if (ladoC && ladoK && ladoC !== ladoK) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `Achado principal ${aLado(ladoC)} no corpo do laudo e ${aLado(ladoK)} na conclusão (${N}, confiança ${fmt(Math.min(lc.confidence, lk.confidence), 2)}).`, sugestao: 'Conferir o lado.', fontes: [eng], [CK[eng].pk]: Math.min(lc.confidence, lk.confidence) });
-        else if (ladoN && ladoC && ladoN !== ladoC) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `O exame é do lado ${ladoN} e o achado principal descrito está ${aLado(ladoC)} (${N}, confiança ${fmt(lc.confidence, 2)}).`, sugestao: 'Conferir o lado do exame e do texto.', fontes: [eng], [CK[eng].pk]: lc.confidence });
+        if (ladoC && ladoK && ladoC !== ladoK) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `Achado principal ${aLado(ladoC)} no corpo do laudo e ${aLado(ladoK)} na conclusão (${N}, confiança ${fmt(Math.min(lc.confidence, lk.confidence), 2)}).`, sugestao: 'Conferir o lado.', fontes: [eng], [CK[eng].pk]: Math.min(lc.confidence, lk.confidence), q: 'lado_ch', qtxt: `Achado principal ${aLado(ladoC)} no corpo do laudo e ${aLado(ladoK)} na conclusão.` });
+        else if (ladoN && ladoC && ladoN !== ladoC) achados.push({ categoria: 'lateralidade', gravidade: 'grave', trecho: '', explicacao: `O exame é do lado ${ladoN} e o achado principal descrito está ${aLado(ladoC)} (${N}, confiança ${fmt(lc.confidence, 2)}).`, sugestao: 'Conferir o lado do exame e do texto.', fontes: [eng], [CK[eng].pk]: lc.confidence, q: 'lado_nome', qtxt: `O exame é do lado ${ladoN} e o achado principal descrito está ${aLado(ladoC)}.` });
         const u = d.usage || {};
         return { achados, probs, lados: { corpo: lc && lc.choice, conclusao: lk && lk.choice }, ms: performance.now() - t0, tin: u.input_tokens || 0, tout: u.output_tokens || 0, modelo: d.model || eng };
     }
@@ -4886,7 +4894,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             return;
         }
         const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon' || m === 'carbon') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
-        const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${f === 'jev' && a.prob != null ? ' ' + fmt(a.prob, 2) : f === 'luna' && a.probL != null ? ' ' + fmt(a.probL, 2) : ''}</span>`;
+        const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${CK[f] && a[CK[f].pk] != null ? ' ' + fmt(a[CK[f].pk], 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
 <div class="pr-top"><b>🛡 Revisão · ${r.ctx.tipo === 'GERAL' ? esc(r.ctx.mod) : r.ctx.tipo}</b>
@@ -4899,7 +4907,7 @@ ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde est
 <div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button><button class="pr-b cor" id="pr-ped-fab" title="Claude Fable 5.2 (esforço médio), acima do Opus — mais lento e ≈ 2× o custo">👑 Enviar ao Fable</button></div>
 ${(r.pedidos || []).slice().reverse().map(k => !r.corr[k] ? '' : mini.has(k) ? `<div class="pr-mini" data-maxi="${k}">▸ 💬 “${esc(String(r.corr[k].pedido).slice(0, 70))}” — ${estadoCorr(r.corr[k])}</div>` : `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k], k)}</div>`).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
-${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}
+${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}${r.parecerAuto ? `<div class="pr-info">🔎 A triagem acendeu: parecer do Argon chamado${r.res.argon ? '' : r.err.argon ? ' (falhou)' : '…'}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
 ${r.depois ? `<div class="pr-lib ${pendTot ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : confRod ? '⏳ Conferindo o texto corrigido (Jev + Luna)…' : pendTot ? `⚠ ${pendTot} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nConf ? ` — ${nConf} da conferência rápida` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo${r.conf && r.conf.estado === 'ok' ? ', conferidas' : ''}.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando || confRod ? 'Liberar sem esperar' : pendTot ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
@@ -4912,9 +4920,11 @@ ${a.trecho ? `<div class="pr-tr">“${esc(a.trecho)}”</div>` : ''}
 ${a.sugestao ? `<div class="pr-sg">→ ${esc(a.sugestao)}</div>` : ''}
 <div class="pr-ac">${a.trecho ? '<button class="pr-b sec" data-loc>Localizar</button>' : ''}${r.corr && r.corr[chaveAchado(a)] ? '' : `<button class="pr-b cor" data-cor title="Propõe a correção (antes → depois); nada muda sem Aplicar">✍ Corrigir <small>${NIVEL_NOME[nivelCorrecao(a)]}</small></button>`}${a.categoria === 'critico' ? '<button class="pr-b cor" data-com title="Gera a mensagem para o WhatsApp">📣 Comunicação</button>' : ''}<button class="pr-b sec" data-mini-it title="Recolhe este item numa linha">▁</button><button class="pr-b sec" data-ign>Ignorar</button></div>${htmlCorrecao(r.corr && r.corr[chaveAchado(a)], chaveAchado(a))}</div>`; }).join('')
             : `<div class="pr-vazio">${r.carregando ? 'Analisando…' : '✓ Nenhuma incompatibilidade encontrada.'}</div>`}</div>
+${(r.triRecolhida || []).length ? `<div class="pr-tri"><button id="pr-tri-b" title="Perguntas que 2 modelos de triagem acenderam e que nenhuma IA de parecer confirmou. Não contam como pendência.">🔎 Triagem: ${r.triRecolhida.length} pergunta(s) acesa(s) sem confirmação do parecer ${r.triAberta ? '▴' : '▾'}</button>${r.triAberta ? r.triRecolhida.map(a => `<div class="pr-tri-l">${esc(a.explicacao)} ${a.fontes.map(f => fonteChip(f, a)).join('')}</div>`).join('') : ''}</div>` : ''}
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <button class="pr-b sec" id="pr-cfg" title="Opções pouco usadas: revisar ao colar, + Gemini, + Grok">⚙ Opções${[rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).length ? ' <small>· ' + [rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).join(', ') + '</small>' : ''} ${revOpcoesAbertas ? '▴' : '▾'}</button>
 ${revOpcoesAbertas ? `<div class="pr-cfgbox"><label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
+<label title="Quando 2 dos 3 modelos de triagem (Jev, Luna, Gemini Decision) acendem a mesma pergunta, o Argon é chamado sozinho para dar o parecer: um achado por erro, com explicação. Laudo sem alarme não chama."><input type="checkbox" id="pr-parecer" ${rc.parecerAuto !== false ? 'checked' : ''}> Parecer do Argon se a triagem acender</label>
 <label title="Gemini 4 Hydrogen como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label></div>` : ''}
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
@@ -4936,6 +4946,8 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         p.querySelector('#pr-revisor').onchange = e => { cfg.rev = Object.assign(revCfg(), { revisor: e.target.value }); saveCfg(); revisar(true); };
         p.querySelector('#pr-auto').onchange = e => { cfg.rev = Object.assign(revCfg(), { noLiberar: e.target.checked }); saveCfg(); };
         p.querySelector('#pr-cfg').onclick = () => { revOpcoesAbertas = !revOpcoesAbertas; renderRevisao(); }; // v1.48: opções pouco usadas ficam recolhidas
+        const opa = p.querySelector('#pr-parecer'); if (opa) opa.onchange = e => { cfg.rev = Object.assign(revCfg(), { parecerAuto: e.target.checked }); saveCfg(); renderRevisao(); };
+        const triB = p.querySelector('#pr-tri-b'); if (triB) triB.onclick = () => { r.triAberta = !r.triAberta; renderRevisao(); };
         const og = p.querySelector('#pr-gemini'); if (og) og.onchange = e => { cfg.rev = Object.assign(revCfg(), { gemini: e.target.checked }); saveCfg(); if (e.target.checked && !r.ativos.includes('gemini')) rodarMotor(r, 'gemini'); renderRevisao(); };
         const oc = p.querySelector('#pr-colar'); if (oc) oc.onchange = e => { cfg.rev = Object.assign(revCfg(), { aoColar: e.target.checked }); saveCfg(); renderRevisao(); };
         const tf = p.querySelector('#pr-tri-full'); if (tf) tf.onclick = () => revisar(true, r.depois);
@@ -4999,6 +5011,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const MOTORES = {
         jev: { nome: 'Jev', fn: c => revJev(c, 'jev') },
         luna: { nome: 'Luna', fn: c => revJev(c, 'luna') },
+        gdec: { nome: 'Gemini D', fn: c => revJev(c, 'gdec') },
         haiku: { nome: 'Haiku', fn: c => revHaiku(c) },
         sonnet: { nome: 'Sonnet', fn: c => revSonnet(c) },
         gemini: { nome: 'Gemini', fn: c => revGemini(c) },
@@ -5009,11 +5022,12 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
     const REV_MODOS = { // v1.25: Gemini e Grok viraram caixinhas opcionais (+ Gemini / + Grok)
-        completo: { nome: 'Jev + Luna + Claude', motores: ['jev', 'luna', 'claude'] },
+        completo: { nome: 'Triagem + Claude', motores: ['jev', 'luna', 'gdec', 'claude'] },
         so_claude: { nome: 'Só Claude', motores: ['claude'] }
     };
     const lunaLigada = () => !lunaSemChave && !(cfg.rev && cfg.rev.luna === false);
-    const motoresDo = modo => REV_MODOS[modo].motores.filter(m => m !== 'luna' || lunaLigada());
+    const gdecLigado = () => !gdecFora && !(cfg.rev && cfg.rev.gdec === false);
+    const motoresDo = modo => REV_MODOS[modo].motores.filter(m => (m !== 'luna' || lunaLigada()) && (m !== 'gdec' || gdecLigado()));
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
     const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon', 'carbon'];
@@ -5025,17 +5039,33 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         const listas = [r.regras || []];
         ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'carbon', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
         const base = juntarAchados(listas);
-        // Jev confirma itens da mesma categoria (selo com a probabilidade); sozinho só aparece se ≥ 0,7
-        ['jev', 'luna'].forEach(eng => { const pk = CK[eng].pk; if (r.res[eng]) r.res[eng].achados.slice().sort((x, y) => y[pk] - x[pk]).forEach(j => {
+        // Triagem confirma itens da mesma categoria (selo com a probabilidade). v1.55: o que SÓ a triagem acendeu vira alarme por
+        // VOTO — 2 modelos de decisão com ≥ mostrar (0,5) na mesma pergunta; com um modelo só respondendo, vale o antigo ≥ 0,7.
+        const soltos = new Map(), nResp = DECS.filter(e => r.res[e]).length;
+        DECS.forEach(eng => { const pk = CK[eng].pk; if (r.res[eng]) r.res[eng].achados.slice().sort((x, y) => y[pk] - x[pk]).forEach(j => {
             const iguais = base.filter(o => o.categoria === j.categoria);
             if (iguais.length) { iguais.forEach(o => { if (!o.fontes.includes(eng)) o.fontes.push(eng); o[pk] = Math.max(o[pk] || 0, j[pk]); }); return; }
-            if (j[pk] >= JEV_LIM.sozinho) base.push(Object.assign({}, j, { fontes: [eng], gravidade: j[pk] >= JEV_LIM.grave ? j.gravidade : 'atencao' }));
+            const k = j.q || j.categoria + '|' + j.explicacao;
+            if (!soltos.has(k)) soltos.set(k, { j, votos: {} });
+            soltos.get(k).votos[eng] = j[pk];
         }); });
+        const temParecer = REV_LLMS.some(m => r.res[m]);
+        soltos.forEach(({ j, votos }) => {
+            const quem = Object.keys(votos).filter(e => votos[e] >= JEV_LIM.mostrar), ps = quem.map(e => votos[e]);
+            if (nResp >= 2 ? quem.length < 2 : !ps.some(p => p >= JEV_LIM.sozinho)) return;
+            const forte = ps.every(p => p >= JEV_LIM.grave);
+            const item = Object.assign({}, j, { fontes: quem, gravidade: forte ? j.gravidade : 'atencao', soTriagem: true });
+            if (j.qtxt) item.explicacao = j.qtxt;
+            quem.forEach(e => { item[CK[e].pk] = votos[e]; });
+            // com parecer de IA na mesa e sem confirmação dela, a pergunta fica RECOLHIDA (não é pendência) — salvo unanimidade forte
+            if (temParecer && !(forte && quem.length === nResp && nResp >= 2)) item.recolhido = true;
+            base.push(item);
+        });
         // v1.23 — Jev como JUIZ: probabilidade de cada achado das IAs ser erro real
         // v1.38.1: dois juízes separados (Jev e Luna); "provável falso alarme" só se TODOS os que responderam derem < 0,3
         base.forEach(a => {
             const k = chaveAchado(a), vals = [];
-            ['jev', 'luna'].forEach(eng => {
+            DECS.forEach(eng => {
                 const p = r[CK[eng].jk] && r[CK[eng].jk][k]; if (p == null) return;
                 a[CK[eng].jk] = p; vals.push(p);
                 if (p >= JEV_LIM.sozinho && !a.fontes.includes(eng)) { a.fontes.push(eng); a[CK[eng].pk] = Math.max(a[CK[eng].pk] || 0, p); }
@@ -5046,11 +5076,21 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         // v1.24: texto mudou pouco (reaproveitado) → some o achado das IAs cujo trecho já não existe (provavelmente corrigido)
         const txtN = r.alterado ? norm(r.ctx.texto) : '';
         const vale = a => !r.alterado || !a.trecho || a.fontes.includes('regra') || txtN.includes(norm(a.trecho).slice(0, 40));
-        return base.filter(vale).sort((x, y) => peso(y) - peso(x));
+        const todos = base.filter(vale).sort((x, y) => peso(y) - peso(x));
+        r.triRecolhida = todos.filter(a => a.recolhido);
+        return todos.filter(a => !a.recolhido);
+    }
+    // v1.55 — a triagem "acendeu"? (mesma regra do voto, olhando todas as perguntas respondidas)
+    function triagemAcesa(r) {
+        const resp = DECS.filter(e => r.res[e]); if (!resp.length) return false;
+        const chaves = new Set(); resp.forEach(e => Object.keys(r.res[e].probs || {}).forEach(k => chaves.add(k)));
+        const lim = resp.length >= 2 ? JEV_LIM.mostrar : JEV_LIM.sozinho, precisa = resp.length >= 2 ? 2 : 1;
+        for (const k of chaves) { if (k === 'critico_presente' && r.ctx.critico) continue; if (resp.filter(e => ((r.res[e].probs || {})[k] || 0) >= lim).length >= precisa) return true; }
+        return resp.filter(e => r.res[e].achados.some(a => a.categoria === 'lateralidade')).length >= precisa;
     }
     async function revJevJuiz(r) {
         if (r.ctx.texto.length < 30) return;
-        await Promise.all(['jev', 'luna'].filter(eng => r.ativos.includes(eng) && r.res[eng]).map(async eng => {
+        await Promise.all(DECS.filter(eng => r.ativos.includes(eng) && r.res[eng]).map(async eng => {
             const jk = CK[eng].jk; r[jk] = r[jk] || {};
             const lista = achadosAtuais(r).filter(a => a.fontes.some(f => REV_LLMS.includes(f)) && !(chaveAchado(a) in r[jk])).slice(0, 40);
             if (!lista.length) return;
@@ -5074,6 +5114,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
             if (m === 'grok' && /XAI_API_KEY/.test(e.message)) { grokSemChave = true; r.ativos = r.ativos.filter(x => x !== 'grok'); return; }
             if (m === 'luna' && lunaSemChave) { r.ativos = r.ativos.filter(x => x !== 'luna'); return; } // sem chave/proxy antigo: some em silêncio
+            if (m === 'gdec' && gdecFora) { r.ativos = r.ativos.filter(x => x !== 'gdec'); return; }
             r.err[m] = e.message;
         }).finally(() => { if (revAtual === r) renderRevisao(); });
     }
@@ -5113,7 +5154,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     }
     function precisaIA(r) {
         if (r.regras.length) return true;
-        const prontos = ['jev', 'luna'].filter(e => r.res[e]);
+        const prontos = DECS.filter(e => r.res[e]);
         if (!prontos.length) return true; // checklists falharam → revisão completa
         if (prontos.some(e => r.res[e].achados.some(a => (a[CK[e].pk] || 0) >= JEV_LIM.mostrar))) return true;
         if (r.ctx.texto.length > REV_EXTENSO) return true;
@@ -5231,10 +5272,13 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (c.texto.length >= 30) {
             const motores = motoresDo(modo);
             const triar = !forcar && rc.triagem !== false && motores.includes('jev') && (opc.auto || !!depois);
-            if (triar) { await Promise.all(['jev', 'luna'].filter(m => motores.includes(m)).map(m => rodarMotor(r, m))); if (!precisaIA(r)) r.triagem = 'normal'; }
+            if (triar) { await Promise.all(DECS.filter(m => motores.includes(m)).map(m => rodarMotor(r, m))); if (!precisaIA(r)) r.triagem = 'normal'; }
         }
         if (c.texto.length >= 30 && r.triagem !== 'normal') {
-            const onda = motoresDo(modo).filter(m => !((m === 'jev' || m === 'luna') && r.res[m])).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
+            const decP = Promise.all(motoresDo(modo).filter(m => DECS.includes(m) && !r.res[m]).map(m => rodarMotor(r, m)));
+            const onda = motoresDo(modo).filter(m => !DECS.includes(m)).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
+            // v1.55: triagem acesa (2 votos) → parecer automático do Argon, em paralelo com o Claude
+            onda.push(decP.then(() => { if (rc.parecerAuto !== false && !r.ativos.includes('argon') && triagemAcesa(r)) { r.parecerAuto = true; return rodarMotor(r, 'argon'); } }));
             // v1.45: Grok demora 4–47 s (mediana ~16 s; Opus ~4 s) → corre em paralelo, mas a revisão espera por ele no máximo GROK_ESPERA_MS
             // depois dos outros; se chegar mais tarde, os achados dele entram no painel quando chegarem
             const grokP = rc.grok && !grokSemChave ? rodarMotor(r, 'grok').then(async () => { if (r.grokTarde) { await revJevJuiz(r); if (revAtual === r) renderRevisao(); } }) : null;
@@ -6309,6 +6353,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
