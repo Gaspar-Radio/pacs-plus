@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.56.0
+// @version      1.56.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -5402,6 +5402,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
                 ['mousedown', 'mouseup'].forEach(t => b.addEventListener(t, ev => ev.stopPropagation()));
                 b.addEventListener('click', ev => { ev.stopPropagation(); ev.preventDefault(); const m = document.getElementById('pp-fl-menu'); if (m && m.dataset.fl === k) m.remove(); else flMenu(k, b); });
                 th.appendChild(b);
+                try { if (getComputedStyle(th).position === 'static') th.style.position = 'relative'; } catch (e) { /* ok */ }
             }
             const html = conj.size ? `▾ ${conj.size}` : '▾', tit = conj.size ? `Filtro ligado: ${[...conj].map(x => FL_SIT_NOME[x] || x).join(', ')} — clique para mudar` : (k === 'ex' ? 'Filtrar por tipo de exame (só os que estão na lista)' : 'Mostrar só uma situação (ex.: Digitado)');
             // o texto vai por CSS (::before): texto de verdade dentro do <th> mudaria o nome da coluna que o Plus usa para achar a lista
@@ -5459,7 +5460,9 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     document.addEventListener('keydown', ev => { if (ev.key === 'Escape') { const m = document.getElementById('pp-fl-menu'); if (m) m.remove(); } });
     setInterval(() => { try { if (cfg.master) { flCabecalho(); flPagina(componenteLista()); if (document.getElementById('pp-fl-menu')) flMenu(); } } catch (e) { /* segue */ } }, 1000);
     setCss('pp-fl-css', `
-.v-data-table thead th .pp-fl-b { margin-left: 4px; padding: 0 5px; min-width: 20px; height: 20px; line-height: 18px; border-radius: 10px; border: 1px solid rgba(160,160,170,.5); background: transparent; color: inherit; font: 700 11px Roboto, Arial, sans-serif; cursor: pointer; vertical-align: middle; }
+/* v1.56.1: o título da coluna é um botão do PACS que ocupa a célula inteira; solto ali, o ▾ caía para a linha de baixo e o cabeçalho
+   passava de 40 para 62 px (medido no PACS em 17/11/2026). Fica sobreposto, à direita, sem mudar a altura. */
+.v-data-table thead th .pp-fl-b { position: absolute; right: 1px; top: 50%; transform: translateY(-50%); z-index: 2; padding: 0 4px; min-width: 18px; height: 18px; line-height: 16px; border-radius: 9px; border: 1px solid rgba(160,160,170,.5); background: #1e1e1e; color: #e5e7eb; font: 700 10.5px Roboto, Arial, sans-serif; cursor: pointer; }
 .v-data-table thead th .pp-fl-b::before { content: attr(data-n); }
 .v-data-table thead th .pp-fl-b:hover { border-color: #a78bfa; } .v-data-table thead th .pp-fl-b.on { background: #6d28d9; border-color: #a78bfa; color: #fff; }
 #pp-fl-info { padding: 4px 12px; font: 12.5px Roboto, Arial, sans-serif; color: #c4b5fd; background: rgba(109,40,217,.16); border-left: 3px solid #7c3aed; }
