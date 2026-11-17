@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.55.0
+// @version      1.56.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -38,6 +38,7 @@
         ['historico', 'Histórico de exames', 'Tabela de histórico compacta (fonte 12 px), só Exame, Data/Hora, Situação e Ações'],
         ['historicoLinha', 'Histórico em uma linha', 'Exame à esquerda e só a sigla da modalidade (CR, CT, US) à direita'],
         ['laudosPendentes', 'Barra: 📝 laudos pendentes (US e TC)', 'Na barra do topo: quantos laudos de US e TC estão em Revisar/Digitado, por dia de prazo (US 3, TC 5 dias úteis), vencidos em vermelho. Clique num dia filtra a lista direto (mais atrasados primeiro). Envia só os números para a nuvem (Agenda e celular)'],
+        ['filtroLista', 'Lista: filtro por exame e por situação', 'Botão de filtro no título das colunas Exame e Situação: mostra só os tipos de exame (ou situações) escolhidos, entre os que estão na lista. O paciente aparece sempre inteiro e urgente nunca é escondido. Não muda o filtro do PACS nem a ordem'],
         ['situacaoRapida', 'Lista: trocar situação no clique', 'Clique na Situação (Aberto / Digitado / Revisar) da lista principal para trocar entre elas sem abrir o laudo. Liberado não muda'],
         ['contarSeries', 'Lista: 🖼 nº de séries nas TCs de laudo conjunto', 'TC do mesmo paciente no mesmo dia (ex.: abdome superior + inferior), em qualquer situação (inclusive liberada): pare o mouse na linha e o 👁 de cada código mostra quantas séries de imagem recebeu — cinza = só o scout, verde = o que tem o volume. Nos históricos (janela 🕘 e dentro do laudo) vale para qualquer exame com imagem. Só consulta quando você para o mouse (o PACS registra no log do exame como acesso às imagens)'],
         ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
@@ -284,7 +285,9 @@ html[data-pp-viewer] #pp-dock { display: none !important; }
 #pp-dock .ppd-oc .ppd-chip { cursor: pointer; padding: 0 5px; font-size: 10.5px; }
 #pp-dock .ppd-oc .ppd-chip.on { background: #7f1d1d; border-color: #ef4444; color: #fecaca; text-decoration: line-through; }
 #pp-dock .ppd-oc .ppd-n { color: #fbbf24; font-size: 11px; font-weight: 700; min-width: 0; }
-.v-data-table tbody > tr[data-pp-oc] { display: none !important; }`,
+.v-data-table tbody > tr[data-pp-oc] { display: none !important; }
+.v-data-table tbody > tr[data-pp-acomp] > td { opacity: .5; }
+.v-data-table tbody > tr[data-pp-acomp] > td:first-child, .v-data-table tbody > tr[data-pp-acomp] > td:last-child { opacity: 1; }`,
         laudoBotoes: `
 .v-dialog__content button[title="Gravar Áudio"] { display: none !important; }
 .v-dialog__content .v-input:has(> .v-input__control input[value="UNICA"]) { display: none !important; }
@@ -4328,7 +4331,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             const x = lpDados && lpDados[m];
             if (!x) return `<div class="lp-sec"><h4>${LP_NOME[m]}</h4><div class="lp-msg">${lpRodando ? '⏳ contando…' : '—'}</div></div>`;
             const linhas = x.por_dia.map(e => `<div class="lp-l${e.venc ? ' venc' : e.prazo === chaveDia(new Date()) ? ' hoje' : ''}"><span class="lp-p">${e.venc ? '⚠ venceu' : 'vence'} ${lpSem(e.prazo)} ${lpDM(e.prazo)}</span><span class="lp-n"><b>${e.n}</b> ${e.n === 1 ? 'laudo' : 'laudos'}${e.dig ? ` <small>(${e.dig} dig.)</small>` : ''}</span><span class="lp-d">exames ${lpDM(e.d0)}${e.d1 !== e.d0 ? '–' + lpDM(e.d1) : ''}</span><button class="lp-f" data-m="${m}" data-d0="${e.d0}" data-d1="${e.d1}" title="Filtrar a lista: ${LP_NOME[m]}, Revisar/Digitado, exames de ${lpDM(e.d0)}${e.d1 !== e.d0 ? ' a ' + lpDM(e.d1) : ''}">Filtrar ›</button></div>`).join('');
-            return `<div class="lp-sec"><h4>${LP_NOME[m]} <span>${x.total} pendente(s)${x.vencidos ? ` · <b class="r">${x.vencidos} vencido(s)</b>` : ''}${x.hoje ? ` · <b class="a">${x.hoje} vence(m) hoje</b>` : ''}</span>${x.por_dia.length ? `<button class="lp-f lp-old" data-m="${m}" data-d0="${x.por_dia[0].d0}" data-d1="${x.por_dia[0].d1}">⏪ Mais atrasados</button>` : ''}</h4>${linhas || '<div class="lp-msg">Nenhum laudo pendente ✓</div>'}</div>`;
+            const cd = x.por_dia.filter(e => e.dig), nd = cd.reduce((t, e) => t + e.dig, 0), dd0 = cd.map(e => e.d0).sort()[0] || '', dd1 = cd.map(e => e.d1).sort().pop() || '';
+            return `<div class="lp-sec"><h4>${LP_NOME[m]} <span>${x.total} pendente(s) <small>(${x.total - nd} revisar · ${nd} digitado${nd === 1 ? '' : 's'})</small>${x.vencidos ? ` · <b class="r">${x.vencidos} vencido(s)</b>` : ''}${x.hoje ? ` · <b class="a">${x.hoje} vence(m) hoje</b>` : ''}</span>${x.por_dia.length ? `<button class="lp-f lp-old" data-m="${m}" data-d0="${x.por_dia[0].d0}" data-d1="${x.por_dia[0].d1}">⏪ Mais atrasados</button>` : ''}${nd ? `<button class="lp-f lp-dig" data-m="${m}" data-sit="DIGITADO" data-d0="${dd0}" data-d1="${dd1}" title="Abre a lista só com os exames em Digitado desta modalidade, de todos os dias">✍ Só digitados (${nd})</button>` : ''}</h4>${linhas || '<div class="lp-msg">Nenhum laudo pendente ✓</div>'}</div>`;
         };
         p.innerHTML = `<div class="lp-top"><b>📝 Laudos pendentes</b><span class="lp-at">${lpErro ? '⚠ ' + esc(lpErro) : lpDados ? 'atualizado ' + hm(lpDados.em) : ''}</span><button class="lp-b" data-a="atual" title="Contar de novo agora">🔄</button>${lpFiltroAntes ? '<button class="lp-b" data-a="volta" title="Voltar ao filtro que estava antes">↺ Filtro anterior</button>' : ''}<button class="lp-x" data-a="fechar">✕</button></div>${sec('US')}${sec('CT')}<div class="lp-rod">Revisar + Digitado · eletivos · prazo US ${diasPorModalidade(cfg.sla).US || 3} / TC ${diasPorModalidade(cfg.sla).CT || 5} dias úteis</div>`;
     }
@@ -4338,14 +4342,14 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         if (b.dataset.a === 'fechar') { document.getElementById('pp-lp').remove(); return; }
         if (b.dataset.a === 'atual') { lpAtualizar(true); lpPainel(); return; }
         if (b.dataset.a === 'volta') { lpVoltarFiltro(); return; }
-        if (b.dataset.m) lpFiltrar(b.dataset.m, b.dataset.d0, b.dataset.d1);
+        if (b.dataset.m) lpFiltrar(b.dataset.m, b.dataset.d0, b.dataset.d1, b.dataset.sit || '');
     }
-    function lpFiltrar(m, d0, d1) {
+    function lpFiltrar(m, d0, d1, sit) {
         const comp = componenteLista();
         if (!comp || !comp.filtro) { alertaCurto('Abra a página Exames para filtrar.'); return; }
         if (!lpFiltroAntes) lpFiltroAntes = JSON.parse(JSON.stringify(comp.filtro));
         const f = comp.filtro, set = (k, v) => (comp.$set ? comp.$set(f, k, v) : (f[k] = v));
-        set('exa_situacao', LP_SIT.slice()); set('mod_codigo', [LP_MOD[m]]); set('data_codigo', 1); set('data_inicial', d0); set('data_final', d1);
+        set('exa_situacao', sit ? [sit] : LP_SIT.slice()); set('mod_codigo', [LP_MOD[m]]); flSit = new Set(); flEx = new Set(); set('data_codigo', 1); set('data_inicial', d0); set('data_final', d1);
         set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
         if ('page' in comp) comp.page = 1;
         // se a modalidade estiver oculta pelo 👁 da barra, mostra de novo (senão a lista filtrada ficaria vazia)
@@ -4379,7 +4383,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 #pp-lp .lp-l:nth-child(odd) { background: #242424; } #pp-lp .lp-l.venc { background: rgba(220,38,38,.18); } #pp-lp .lp-l.venc .lp-p { color: #fca5a5; font-weight: 700; } #pp-lp .lp-l.hoje .lp-p { color: #fbbf24; font-weight: 700; }
 #pp-lp .lp-d { color: #9ca3af; font-size: 11.5px; } #pp-lp .lp-n small { color: #9ca3af; }
 #pp-lp .lp-f { background: #1d4ed8; color: #fff; border: 0; border-radius: 12px; padding: 2px 9px; cursor: pointer; font-size: 11.5px; font-weight: 700; } #pp-lp .lp-f:hover { background: #2563eb; }
-#pp-lp .lp-old { background: #b45309; } #pp-lp .lp-msg { color: #9ca3af; padding: 4px 6px; } #pp-lp .lp-rod { color: #6b7280; font-size: 11px; padding: 6px 10px; }
+#pp-lp .lp-old { background: #b45309; } #pp-lp .lp-dig { background: #6d28d9; margin-left: 4px; } #pp-lp .lp-msg { color: #9ca3af; padding: 4px 6px; } #pp-lp .lp-rod { color: #6b7280; font-size: 11px; padding: 6px 10px; }
 .pp-lp-aviso { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 2147483001; background: #1f2937; color: #fff; padding: 8px 14px; border-radius: 8px; font: 13px Roboto, Arial, sans-serif; }`);
     async function sitTrocar(comp, exa, sit) {
         if (!SIT_TROCA.includes(sit)) throw new Error('situação inválida');
@@ -5342,6 +5346,131 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const OCUL_GRUPOS = [['lib', 'LIB', 'Exames LIBERADOS'], ['rev', 'REV', 'Exames em REVISAR (Digitado continua aparecendo)'], ['CT', 'TC', 'Tomografia (CT)'], ['US', 'US', 'Ultrassom']]; // v1.39: só LIB, TC e US; v1.39.3: + REV
     const grupoMod = sig => { sig = String(sig || '').toUpperCase(); return sig === 'CT' || sig === 'US' ? sig : (sig === 'CR' || sig === 'DX') ? 'RX' : 'OUT'; };
     let oculStat = { n: 0, total: 0 };
+    // ---------- v1.56: FILTRO da lista por tipo de exame e por situação (botão no título das colunas) ----------
+    // Só esconde linhas na tela (mesmo atributo data-pp-oc dos botões LIB/REV/TC/US): não muda o filtro do PACS nem a ordem,
+    // por isso não se perde quando a lista recarrega. O menu lista só o que está na lista. Regras de segurança:
+    // paciente sempre inteiro (os outros exames do mesmo paciente no mesmo dia ficam, apagados), urgente não liberado nunca some,
+    // e filtro que não casa com nenhuma linha não esconde nada. Vale até limpar ou recarregar a página.
+    const FL_PEND = ['ABERTO', 'DIGITADO', 'REVISAR'], FL_SIT_NOME = { ABERTO: 'Aberto', DIGITADO: 'Digitado', REVISAR: 'Revisar', LIBERADO: 'Liberado' };
+    let flEx = new Set(), flSit = new Set(), flPac = true, flIppAntes = null, flStat = null, flIppEm = 0;
+    const flTipo = ex => String(ex && ex.tipoexame && ex.tipoexame.tpe_descricao || '').replace(/\s+/g, ' ').trim().toUpperCase() || '(SEM NOME)';
+    const flSitDe = ex => String(ex && ex.exa_situacao || '').toUpperCase();
+    const flPendente = ex => FL_PEND.includes(flSitDe(ex)) && ex.exa_idnnecessitalaudo !== false;
+    const flPacK = ex => `${ex.pac_codigo}|${String(ex.exa_data || '').slice(0, 10)}`;
+    const flAtivo = () => on('filtroLista') && (flEx.size > 0 || flSit.size > 0);
+    // devolve, para cada exame da lista, 'ok' | 'urg' | 'acomp' | 'fora' — ou null quando não há filtro (ou ele não casa com nada)
+    function flClassificar(exs) {
+        if (!flAtivo()) { flStat = null; return null; }
+        const casa = ex => (!flEx.size || flEx.has(flTipo(ex))) && (!flSit.size || flSit.has(flSitDe(ex)));
+        const dentro = exs.filter(casa);
+        if (!dentro.length) { flStat = { vazio: true }; return null; }
+        const pacs = new Set(dentro.map(flPacK));
+        const cls = ex => casa(ex) ? 'ok' : (ex.exa_idnurgente && flSitDe(ex) !== 'LIBERADO') ? 'urg' : (flPac && pacs.has(flPacK(ex))) ? 'acomp' : 'fora';
+        const c = exs.map(cls);
+        flStat = { ok: dentro.length, pend: dentro.filter(flPendente).length, acomp: c.filter(x => x === 'acomp').length, urg: c.filter(x => x === 'urg').length, fora: c.filter(x => x === 'fora').length };
+        return c;
+    }
+    function flLimpar(qual) {
+        if (!qual || qual === 'ex') flEx = new Set();
+        if (!qual || qual === 'sit') flSit = new Set();
+        flAtualizar();
+    }
+    function flAtualizar() { try { ocultarLinhasLista(); flCabecalho(); flMenu(); } catch (e) { /* segue */ } }
+    // 100 linhas enquanto houver filtro e a lista tiver mais de uma página (liberados também ocupam lugar na página)
+    function flPagina(comp) {
+        if (!comp || !('itemsPerPage' in comp) || plantaoAtivo()) return;
+        if (flAtivo()) {
+            if (comp.itemsPerPage < 100 && Number(comp.countTotalItems) > comp.exames.length && Date.now() - flIppEm > 8000) {
+                flIppEm = Date.now(); if (flIppAntes == null) flIppAntes = comp.itemsPerPage;
+                comp.itemsPerPage = 100; if ('page' in comp) comp.page = 1; comp.getExames();
+            }
+        } else if (flIppAntes != null) {
+            const v = flIppAntes; flIppAntes = null;
+            if (comp.itemsPerPage === 100 && v < 100) { comp.itemsPerPage = v; if ('page' in comp) comp.page = 1; comp.getExames(); }
+        }
+    }
+    function flCabecalho() {
+        const f = findListTable(), comp = f && componenteLista();
+        const liga = !!(f && comp && on('filtroLista'));
+        if (!liga) { document.querySelectorAll('.pp-fl-b, #pp-fl-info').forEach(x => x.remove()); const m = document.getElementById('pp-fl-menu'); if (m) m.remove(); return; }
+        const ths = f.t.querySelectorAll(':scope thead tr:first-child > th');
+        [['exame', 'ex', flEx], ['situacao', 'sit', flSit]].forEach(([nome, k, conj]) => {
+            const th = ths[f.names.indexOf(nome)]; if (!th) return;
+            let b = th.querySelector(':scope .pp-fl-b');
+            if (!b) {
+                b = document.createElement('button'); b.type = 'button'; b.className = 'pp-fl-b'; b.dataset.fl = k;
+                ['mousedown', 'mouseup'].forEach(t => b.addEventListener(t, ev => ev.stopPropagation()));
+                b.addEventListener('click', ev => { ev.stopPropagation(); ev.preventDefault(); const m = document.getElementById('pp-fl-menu'); if (m && m.dataset.fl === k) m.remove(); else flMenu(k, b); });
+                th.appendChild(b);
+            }
+            const html = conj.size ? `▾ ${conj.size}` : '▾', tit = conj.size ? `Filtro ligado: ${[...conj].map(x => FL_SIT_NOME[x] || x).join(', ')} — clique para mudar` : (k === 'ex' ? 'Filtrar por tipo de exame (só os que estão na lista)' : 'Mostrar só uma situação (ex.: Digitado)');
+            // o texto vai por CSS (::before): texto de verdade dentro do <th> mudaria o nome da coluna que o Plus usa para achar a lista
+            if (b.dataset.n !== html) b.dataset.n = html;
+            if (b.title !== tit) b.title = tit;
+            b.classList.toggle('on', conj.size > 0);
+        });
+        // linha de aviso acima da tabela
+        let info = document.getElementById('pp-fl-info');
+        if (!flAtivo()) { if (info) info.remove(); return; }
+        if (!info || info.nextElementSibling !== f.t) {
+            if (info) info.remove();
+            info = document.createElement('div'); info.id = 'pp-fl-info'; f.t.parentElement.insertBefore(info, f.t);
+            info.addEventListener('click', ev => { if (ev.target.closest('[data-fl-limpar]')) flLimpar(); });
+        }
+        const nomes = [...flEx, ...[...flSit].map(x => FL_SIT_NOME[x] || x)].join(' · ');
+        const st = flStat || {}, outras = Number(comp.countTotalItems) > comp.exames.length ? ` · <b class="a">+${Number(comp.countTotalItems) - comp.exames.length} em outras páginas</b>` : '';
+        const html = st.vazio ? `🔎 Filtro <b>${esc(nomes)}</b>: nenhuma linha nesta lista — mostrando tudo${outras} · <button data-fl-limpar>limpar</button>`
+            : `🔎 Filtro <b>${esc(nomes)}</b>: ${st.pend ? `<b>${st.pend}</b> a laudar` : '<b class="v">nada a laudar neste filtro</b>'} · ${st.ok || 0} na lista${st.acomp ? ` · +${st.acomp} do mesmo paciente` : ''}${st.urg ? ` · +${st.urg} urgente(s)` : ''} · ${st.fora || 0} oculta(s)${outras} · <button data-fl-limpar>limpar</button>`;
+        if (info.__html !== html) { info.innerHTML = html; info.__html = html; }
+    }
+    function flMenu(k, ancora) {
+        let m = document.getElementById('pp-fl-menu');
+        if (!k) { if (!m) return; k = m.dataset.fl; }
+        const comp = componenteLista(); if (!comp) { if (m) m.remove(); return; }
+        if (!m) {
+            m = document.createElement('div'); m.id = 'pp-fl-menu'; document.body.appendChild(m);
+            m.addEventListener('click', ev => {
+                ev.stopPropagation();
+                const o = ev.target.closest('[data-v]'), kk = m.dataset.fl, conj = kk === 'ex' ? flEx : flSit;
+                if (ev.target.closest('[data-pac]')) { flPac = !flPac; flAtualizar(); return; }
+                if (!o) return;
+                const v = o.dataset.v;
+                if (v === '') { flLimpar(kk); return; }
+                if (conj.has(v)) conj.delete(v); else conj.add(v);
+                flAtualizar();
+            });
+        }
+        m.dataset.fl = k;
+        if (ancora) { const r = ancora.getBoundingClientRect(); m.style.left = Math.max(8, Math.min(r.left - 40, window.innerWidth - 360)) + 'px'; m.style.top = Math.round(r.bottom + 6) + 'px'; }
+        const exs = comp.exames, conj = k === 'ex' ? flEx : flSit;
+        // as contagens de um menu respeitam o filtro do OUTRO (ex.: tipos entre os Digitados)
+        const base = exs.filter(ex => k === 'ex' ? (!flSit.size || flSit.has(flSitDe(ex))) : (!flEx.size || flEx.has(flTipo(ex))));
+        const g = new Map();
+        base.forEach(ex => { const v = k === 'ex' ? flTipo(ex) : flSitDe(ex); const e = g.get(v) || { v, n: 0, pend: 0 }; e.n++; if (flPendente(ex)) e.pend++; g.set(v, e); });
+        conj.forEach(v => { if (!g.has(v)) g.set(v, { v, n: 0, pend: 0 }); }); // marcado que saiu da lista continua aparecendo (para poder desmarcar)
+        const ordemSit = ['ABERTO', 'DIGITADO', 'REVISAR', 'LIBERADO'];
+        const itens = [...g.values()].sort((a, b) => k === 'sit' ? ((ordemSit.indexOf(a.v) + 1 || 9) - (ordemSit.indexOf(b.v) + 1 || 9)) : (b.pend - a.pend || a.v.localeCompare(b.v)));
+        const tot = base.filter(flPendente).length;
+        m.innerHTML = `<button class="fl-o${conj.size ? '' : ' on'}" data-v=""><span>${k === 'ex' ? 'Todos os exames' : 'Todas as situações'}</span><small>${tot} a laudar</small></button><div class="fl-sep"></div>` +
+            itens.map(e => `<button class="fl-o${conj.has(e.v) ? ' on' : ''}${e.pend ? '' : ' zero'}" data-v="${esc(e.v)}"><span>${conj.has(e.v) ? '✓ ' : ''}${esc(k === 'sit' ? (FL_SIT_NOME[e.v] || e.v) : e.v)}</span><small>${k === 'sit' ? e.n : `${e.pend} a laudar · ${e.n}`}</small></button>`).join('') +
+            `<div class="fl-sep"></div><label class="fl-pac" data-pac title="Se um paciente tem um exame no filtro, os outros exames dele no mesmo dia continuam na tela (apagados), para laudo conjunto"><span class="fl-cx">${flPac ? '☑' : '☐'}</span> Manter os outros exames do mesmo paciente</label>`;
+    }
+    document.addEventListener('click', ev => { const m = document.getElementById('pp-fl-menu'); if (m && !m.contains(ev.target) && !ev.target.closest('.pp-fl-b')) m.remove(); });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape') { const m = document.getElementById('pp-fl-menu'); if (m) m.remove(); } });
+    setInterval(() => { try { if (cfg.master) { flCabecalho(); flPagina(componenteLista()); if (document.getElementById('pp-fl-menu')) flMenu(); } } catch (e) { /* segue */ } }, 1000);
+    setCss('pp-fl-css', `
+.v-data-table thead th .pp-fl-b { margin-left: 4px; padding: 0 5px; min-width: 20px; height: 20px; line-height: 18px; border-radius: 10px; border: 1px solid rgba(160,160,170,.5); background: transparent; color: inherit; font: 700 11px Roboto, Arial, sans-serif; cursor: pointer; vertical-align: middle; }
+.v-data-table thead th .pp-fl-b::before { content: attr(data-n); }
+.v-data-table thead th .pp-fl-b:hover { border-color: #a78bfa; } .v-data-table thead th .pp-fl-b.on { background: #6d28d9; border-color: #a78bfa; color: #fff; }
+#pp-fl-info { padding: 4px 12px; font: 12.5px Roboto, Arial, sans-serif; color: #c4b5fd; background: rgba(109,40,217,.16); border-left: 3px solid #7c3aed; }
+#pp-fl-info b { color: #fff; } #pp-fl-info b.v { color: #86efac; } #pp-fl-info b.a { color: #fcd34d; }
+#pp-fl-info button { background: none; border: 0; color: #93c5fd; text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
+#pp-fl-menu { position: fixed; z-index: 2147483001; width: 340px; max-height: calc(100vh - 140px); overflow: auto; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.55); padding: 6px; font: 13px Roboto, Arial, sans-serif; }
+#pp-fl-menu .fl-o { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; background: none; border: 0; color: inherit; font: inherit; text-align: left; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+#pp-fl-menu .fl-o:hover { background: #2f2f33; } #pp-fl-menu .fl-o.on { background: #4c1d95; color: #fff; } #pp-fl-menu .fl-o small { color: #a1a1aa; white-space: nowrap; } #pp-fl-menu .fl-o.on small { color: #ddd6fe; }
+#pp-fl-menu .fl-o.zero:not(.on) { color: #71717a; } #pp-fl-menu .fl-sep { border-top: 1px solid #3f3f46; margin: 5px 0; }
+#pp-fl-menu .fl-pac { display: block; padding: 4px 8px; color: #a1a1aa; font-size: 12px; cursor: pointer; } #pp-fl-menu .fl-cx { color: #c4b5fd; }`);
+
     function ocultarLinhasLista() {
         const f = findListTable(), comp = f && componenteLista();
         const o = cfg.ocultarLista || { lib: false, mods: [] };
@@ -5349,6 +5478,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (f && comp) {
             const linhas = [...f.t.querySelectorAll('tbody > tr')];
             const ok = linhas.length === comp.exames.length;
+            let flC = null; try { flC = ok && cfg.master ? flClassificar(comp.exames) : (flStat = null); } catch (e) { flC = null; } // o filtro novo nunca derruba os botões LIB/REV/TC/US
             linhas.forEach((tr, i) => {
                 const ex = ok ? comp.exames[i] : null;
                 if (ex) total++;
@@ -5357,7 +5487,10 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
                 // v1.39 Plantão: some TC NÃO urgente (US todos, TC urgente, liberados ficam); com "+ontem", some o que é de ontem e já foi liberado
                 const plOc = !!ex && cfg.master && plantaoAtivo() && ((String(mod || '').toUpperCase() === 'CT' && !ex.exa_idnurgente) || (cfg.plantao.ontem && sit === 'LIBERADO' && String(ex.exa_data || '').slice(0, 10) < chaveDia(new Date())));
                 if (plOc) nPl++;
-                const esconder = plOc || (!!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || (o.rev && sit === 'REVISAR') || o.mods.includes(grupoMod(mod))));
+                const esconder = plOc || (!!ex && cfg.master && ((o.lib && sit === 'LIBERADO') || (o.rev && sit === 'REVISAR') || o.mods.includes(grupoMod(mod)))) || (!!flC && flC[i] === 'fora');
+                const acomp = !esconder && !!flC && flC[i] === 'acomp';
+                if (acomp) { if (!tr.hasAttribute('data-pp-acomp')) { tr.setAttribute('data-pp-acomp', ''); tr.title = 'Fora do filtro — aparece porque é do mesmo paciente'; } }
+                else if (tr.hasAttribute('data-pp-acomp')) { tr.removeAttribute('data-pp-acomp'); tr.removeAttribute('title'); }
                 if (esconder) { n++; if (!tr.hasAttribute('data-pp-oc')) tr.setAttribute('data-pp-oc', ''); }
                 else if (tr.hasAttribute('data-pp-oc')) tr.removeAttribute('data-pp-oc');
             });
@@ -6353,6 +6486,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
