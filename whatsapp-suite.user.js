@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.10.3
+// @version      1.10.4
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -1143,9 +1143,18 @@ Regras obrigatórias:
 
   // o WhatsApp escuta o clique num elemento interno da linha: o clique é disparado no próprio nome
   // (o mais interno possível), e sobe por todos os elementos até a linha
+  // v1.10.4: no Tampermonkey o `window` do script é um invólucro e o Chrome recusa usá-lo como `view` de evento
+  // ("Failed to construct 'MouseEvent' … 'view'"). Escolhe uma vez o que o navegador aceita: window, a janela real, ou nada.
+  const GZ_VIEW = (() => {
+    for (const w of [window, (typeof unsafeWindow !== 'undefined' ? unsafeWindow : null)]) {
+      if (!w) continue;
+      try { new MouseEvent('click', { view: w }); return w; } catch (_) {}
+    }
+    return null;
+  })();
   function clickRow(target) {
     const r = target.getBoundingClientRect();
-    const o = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, buttons: 1,
+    const o = { bubbles: true, cancelable: true, composed: true, view: GZ_VIEW, button: 0, buttons: 1,
       clientX: r.left + Math.min(10, r.width / 2), clientY: r.top + r.height / 2 };
     target.dispatchEvent(new PointerEvent('pointerdown', { ...o, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
     target.dispatchEvent(new MouseEvent('mousedown', o));
@@ -2479,7 +2488,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     if (pacsMenuFalhou || !row || !row.isConnected) { pacsNLset(pacsMenuFalhou ? 'desistiu: menu sem a opção nesta sessão' : 'linha sumiu da lista'); return false; }
     const alvo = row.querySelector('span[title]') || row;
     const r = alvo.getBoundingClientRect();
-    alvo.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: window, button: 2, buttons: 2, clientX: r.left + 8, clientY: r.top + r.height / 2 }));
+    alvo.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: GZ_VIEW, button: 2, buttons: 2, clientX: r.left + 8, clientY: r.top + r.height / 2 }));
     let item = null;
     for (let i = 0; i < 12 && !item; i++) {
       await new Promise(ok => setTimeout(ok, 80));
