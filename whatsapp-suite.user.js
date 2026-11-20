@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.11.1
+// @version      1.11.2
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -2624,22 +2624,20 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       texto = linhas[iSep + 1] || '';
     }
     if (tits[1]) texto = tits[1].replace(/\s*\n\s*/g, ' · ');
-    // ícone de mídia: svg/[data-icon] depois do nome e antes do texto da mensagem, fora de selos e de elementos da própria Suíte
-    let midia = false;
-    if (nomeEl) for (const ic of row.querySelectorAll('svg, [data-icon]')) {
-      if (ic.closest('[aria-label]') && row.contains(ic.closest('[aria-label]')) && ic.closest('[aria-label]') !== row) continue;
-      if (ic.closest('[class*="gz-"], [id^="gz-"]')) continue;
-      if (ic.tagName.toLowerCase() !== 'svg' && ic.querySelector('svg')) continue;                 // conta o svg de dentro, não o invólucro
-      if (!(nomeEl.compareDocumentPosition(ic) & 4)) continue;                                      // 4 = o ícone vem depois do nome
-      if (msgEl && !(ic.compareDocumentPosition(msgEl) & 4)) continue;                              // …e antes do texto da mensagem
-      midia = true; break;
-    }
+    // v1.11.2 (estrutura real, 20/11): o texto da última mensagem fica em span[data-testid="last-msg-status"] (o title é a mensagem
+    // inteira) e o ícone de mídia em [data-testid="chat-msg-symbol"] > svg > title ("ic-image" = foto). Selos ficam em outra célula.
+    const st = row.querySelector('[data-testid="last-msg-status"]') || msgEl;
+    const simbolos = st ? [...st.querySelectorAll('svg')].filter(v => !(v.closest('[aria-label]') && st.contains(v.closest('[aria-label]'))))
+      .map(v => ((v.querySelector('title') || {}).textContent || '?').trim().slice(0, 30)) : [];
+    const midia = simbolos.length > 0;
+    const ehFoto = simbolos.some(n => /image|photo|camera|album/i.test(n));
+    const naoEhPedido = simbolos.some(n => /mic|audio|ptt|voice|sticker|gif|block|delete|revoke|done|check|schedule|clock|time|poll|location|contact|person|call/i.test(n));
     const semPedido = GRP_NAO_PEDIDO.test(texto.trim());
     return {
-      nome, hora, previa, tudo, icones, arias, linhas, tits, quem, texto: texto.trim(), midia,
+      nome, hora, previa, tudo, icones, arias, linhas, tits, quem, texto: texto.trim(), midia, simbolos,
       meu: !quem,                                                                                   // sem remetente = mensagem minha ou de sistema
-      foto: !!quem && !semPedido && (midia || /📷/.test(previa) || resto.some(l => /^(foto|imagem|photo)$/i.test(l))),
-      marca: icones.some(x => /mention/i.test(x)) || arias.some(a => /men[çc]|mention/i.test(a)),
+      foto: !!quem && (ehFoto || (!semPedido && !naoEhPedido && (midia || /📷/.test(previa) || resto.some(l => /^(foto|imagem|photo)$/i.test(l))))),   // foto pelo nome do ícone; outra mídia desconhecida (documento, vídeo) também conta
+      marca: icones.some(x => /mention/i.test(x)) || arias.some(a => /men[çc]|mention/i.test(a)) || !!row.querySelector('[data-testid*="mention"]'),
       naoLida: arias.some(a => /n[ãa]o lida|unread/i.test(a)) || linhas.some(l => /^\d{1,3}$/.test(l)),
     };
   }
@@ -2775,7 +2773,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       const i = grpLer(row);
       d.grupos.push({ id: g.id, achouNaLista: true, role: row.getAttribute('role'), hora: i.hora, titulos: i.tits.map(t => t.length), linhas: i.linhas.map(l => l.length),
         previaTam: i.previa.length, temRemetente: !!i.quem, icones: i.icones, arias: i.arias.map(a => ok.test(a) && a.length < 40 ? a : '(outro:' + a.length + ')'),
-        meu: i.meu, midia: i.midia, foto: i.foto, marca: i.marca, temArroba: /@\S/.test(i.tudo), naoLida: i.naoLida, ignorada: GRP_IGNORA.test(i.previa), avisaria: grpAvaliar(g, i, c) || '(não)', esqueleto: grpEsq(row) });
+        meu: i.meu, midia: i.midia, simbolos: i.simbolos, foto: i.foto, marca: i.marca, temArroba: /@\S/.test(i.tudo), naoLida: i.naoLida, ignorada: GRP_IGNORA.test(i.previa), avisaria: grpAvaliar(g, i, c) || '(não)', esqueleto: grpEsq(row) });
     }
     return d;
   }
