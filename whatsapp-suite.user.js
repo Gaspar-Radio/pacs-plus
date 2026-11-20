@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.10.4
+// @version      1.11.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -177,6 +177,18 @@ Regras obrigatórias:
     .gz-pacs-c b{display:block;font-size:11px;color:#f59e0b;letter-spacing:.04em;margin-bottom:3px}
     .gz-pacs-c small{display:block;margin-top:4px;color:#8696a0;font-size:11px}
     .gz-pacs-row{box-shadow:inset 4px 0 0 #f59e0b}
+    #gz-pend{background:#1f2c33;color:#e9edef;border-left:4px solid #00a884;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.5);padding:8px 10px;font:13px -apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.35;max-height:60vh;overflow:auto}
+    #gz-pend .gz-pend-h{display:flex;align-items:center;gap:6px}
+    #gz-pend .gz-pend-h b{font-size:12px;color:#00a884;letter-spacing:.02em}
+    #gz-pend .gz-sp{flex:1}
+    #gz-pend .gz-pend-i{border-top:1px solid rgba(134,150,160,.25);margin-top:7px;padding-top:6px}
+    #gz-pend .gz-pend-i b{display:block;font-size:11px;color:#f59e0b}
+    #gz-pend .gz-pend-t{white-space:pre-wrap;word-break:break-word;margin:2px 0 4px}
+    #gz-pend .gz-pend-a{display:flex;align-items:center;gap:6px}
+    #gz-pend small{color:#8696a0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+    #gz-pend .gz-pend-b{background:#2a3942;color:#e9edef;border:1px solid #3b4a54;border-radius:6px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer}
+    #gz-pend .gz-pend-b.pri{background:#00a884;border-color:#00a884;color:#0b141a;font-weight:600}
+    #gz-pend .gz-pend-w{margin-top:7px;color:#f59e0b;font-size:11.5px}
     #gz-panel .gz-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:600}
     #gz-panel .gz-sub{font-weight:400;font-size:12px;color:#8696a0}
     #gz-panel .gz-x{background:none;border:none;color:#8696a0;font-size:18px;cursor:pointer}
@@ -1529,6 +1541,15 @@ Regras obrigatórias:
       return el('div', { cls: 'gz-line' }, el('span', { cls: 'gz-k', text: label }), r, v);
     };
     const btn = (t, f, pri) => el('button', { cls: 'gz-b' + (pri ? ' pri' : ''), text: t, onclick: f });
+    const grpCampo = (rotulo, chave, dica, semBotao) => {
+      const i = el('input', { cls: 'gz-in', placeholder: dica }); i.value = grpCfg()[chave] || '';
+      i.addEventListener('change', () => { grpSet({ [chave]: i.value.trim() }); grpRender(); });
+      return el('div', { style: 'margin-top:8px' }, el('div', { cls: 'gz-note', text: rotulo }),
+        el('div', { style: 'display:flex;gap:6px;align-items:center' }, i,
+          semBotao ? null : el('button', { cls: 'gz-b', text: 'Usar a conversa aberta', style: 'white-space:nowrap', onclick: () => {
+            const n = currentChatName(); if (!n) { toast('Abra o grupo antes de clicar.', 3000); return; }
+            i.value = n; grpSet({ [chave]: n }); grpRender(); toast('Grupo definido.', 2000); } })));
+    };
     const preset = (w, z, h, rz) => {
       Object.assign(ui, { sideW: w, sideZoom: z, headZoom: h, railZoom: rz, layoutOn: true, sideHidden: false });
       saveUi(); renderUiCss(); setTimeout(zoomChecks, 50); openSettings();
@@ -1606,6 +1627,17 @@ Regras obrigatórias:
       chk('Marcar a conversa como não lida (a bolinha aparece também no celular)', () => pacsCfg().naoLida, v => pacsSet({ naoLida: v })),
       el('div', { cls: 'gz-row' }, btn('Testar o aviso', () => pacsAvisar('PACS: 🧪 Teste da Suíte — aviso funcionando.', true)), btn('📋 Copiar diagnóstico dos avisos', pacsCopiarDiag)),
       el('div', { cls: 'gz-note', text: 'Vale só neste computador e só com o WhatsApp Web aberto. As mensagens "PACS:" são os avisos do hospital que o OpenBot publica no seu chat "Mensagem para você mesmo". Nunca envia nada.' }),
+
+      sec('Grupos vigiados (pedidos para laudo e ultrassom)'),
+      chk('Vigiar os grupos abaixo e manter a lista de pendentes na tela', () => grpCfg().on, v => { grpSet({ on: v }); if (v) pacsPedirPermissao(); grpRender(); }),
+      grpCampo('Grupo dos pedidos — toda FOTO enviada por outra pessoa vira pendente', 'fotoNome', 'Nome exato do grupo'),
+      grpCampo('Grupo de agendamento — só mensagens com as palavras abaixo, ou que marcam você', 'palNome', 'Nome exato do grupo'),
+      grpCampo('Palavras (separadas por vírgula; basta o começo da palavra)', 'palavras', GRP_KW_PADRAO, true),
+      chk('Avisar também quando me marcarem com @ no grupo de agendamento', () => grpCfg().mencao, v => grpSet({ mencao: v })),
+      chk('Notificação só de segunda a sexta, das 7h às 18h (fora disso entra só na lista)', () => grpCfg().horario, v => grpSet({ horario: v })),
+      chk('Marcar o grupo como não lido de novo, se o WhatsApp já tiver dado como lido', () => grpCfg().naoLida, v => grpSet({ naoLida: v })),
+      el('div', { cls: 'gz-row' }, btn('Testar', grpTestar), btn('📋 Copiar diagnóstico dos grupos', grpCopiarDiag)),
+      el('div', { cls: 'gz-note', text: 'Só lê a lista de conversas: nunca envia, responde nem reage, e não usa IA. Cada pendente fica na tela até o clique em "Ciente". Vale só neste computador, com o WhatsApp Web aberto e com o grupo na parte visível da lista (deixe os dois perto do topo). Mensagens que chegam com menos de 2 segundos de diferença no mesmo grupo podem passar.' }),
 
       sec('Botões flutuantes'),
       chk('Mostrar o botão flutuante ✨ (o ✦ do menu lateral continua)', () => !GM_getValue('hide_fab', false), v => GM_setValue('hide_fab', !v)),
@@ -2481,10 +2513,10 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     const c = el('div', { cls: 'gz-pacs-c', title: 'Clique para fechar' }, el('b', { text: teste ? 'PACS · TESTE' : 'PACS · AVISO' }), document.createTextNode(corpo), el('small', { text: hora + ' · clique para fechar' }));
     c.onclick = () => c.remove();
     box.prepend(c);
-    while (box.children.length > 5) box.lastChild.remove();
+    { const cs = box.querySelectorAll('.gz-pacs-c'); for (let i = 5; i < cs.length; i++) cs[i].remove(); }
   }
   // aciona "Marcar como não lida" pelo menu de contexto da linha; se o menu não tiver a opção, fecha e não tenta mais nesta sessão
-  async function pacsMarcarNaoLida(row) {
+  async function pacsMarcarNaoLida(row, quieto) {
     if (pacsMenuFalhou || !row || !row.isConnected) { pacsNLset(pacsMenuFalhou ? 'desistiu: menu sem a opção nesta sessão' : 'linha sumiu da lista'); return false; }
     const alvo = row.querySelector('span[title]') || row;
     const r = alvo.getBoundingClientRect();
@@ -2499,9 +2531,9 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       // rótulos do menu que abriu (textos da interface do WhatsApp, não de conversa) — para saber se o menu abriu e com que opções
       const rot = [...document.querySelectorAll('[role="application"] li, [role="menu"] [role="menuitem"], [role="menu"] li')].map(x => (x.innerText || x.textContent || '').trim().slice(0, 40)).filter(Boolean).slice(0, 15);
       pacsNLset(rot.length ? 'menu abriu sem a opção' : 'menu não abriu', { itens: rot, dialogos: document.querySelectorAll('[role="application"], [role="menu"]').length });
-      pacsMenuFalhou = true;
+      if (!quieto) pacsMenuFalhou = true;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-      toast('Avisos do PACS: não achei "Marcar como não lida" no menu desta versão do WhatsApp. O aviso na tela continua funcionando.', 6000);
+      if (!quieto) toast('Avisos do PACS: não achei "Marcar como não lida" no menu desta versão do WhatsApp. O aviso na tela continua funcionando.', 6000);
       return false;
     }
     const rotulo = (item.innerText || item.textContent || '').trim().slice(0, 40), tag = item.tagName + (item.getAttribute('role') ? '[' + item.getAttribute('role') + ']' : '');
@@ -2540,5 +2572,182 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   }
   setInterval(() => { try { pacsVarrer(); } catch (_) {} }, 3000);
   if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.pacs = { pacsVarrer, pacsPrevia, pacsAvisar, pacsMarcarNaoLida, pacsCfg, pacsSet, pacsDiag, base: () => pacsBase };
+
+  // =====================================================================
+  // 16. GRUPOS VIGIADOS  (v1.11 — 20/11/2026)
+  // Dois grupos do serviço, escolhidos nos Ajustes (os nomes ficam só neste navegador):
+  //   • "foto": toda FOTO enviada por outra pessoa = pedido de exame para laudo;
+  //   • "palavras": só mensagens com as palavras-chave (ultrassom/Doppler) ou que marcam o usuário.
+  // Cada achado entra numa LISTA DE PENDENTES que fica na tela até o clique em "Ciente" — não depende da
+  // bolinha de não lida do WhatsApp (que some ao abrir o grupo ou ler no celular).
+  // Só lê a lista de conversas. NUNCA envia, responde ou reage. Não usa IA nem serviço externo.
+  // =====================================================================
+  const GRP_KW_PADRAO = 'usg, ultras, doppler, dopler, transvaginal, endovaginal';
+  const grpCfg = () => Object.assign({ on: false, fotoNome: '', palNome: '', palavras: GRP_KW_PADRAO, mencao: true, horario: true, naoLida: true }, GM_getValue('grp_watch', {}) || {});
+  const grpSet = o => GM_setValue('grp_watch', Object.assign(grpCfg(), o));
+  const grpChave = t => pacsNorm(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  let grpPend = (GM_getValue('grp_pend', []) || []).slice(-60);
+  let grpSig = Object.assign({}, GM_getValue('grp_sig', {}) || {});   // grupo → assinatura da última mensagem vista
+  let grpJa = (GM_getValue('grp_ja', []) || []).slice(-80);            // assinaturas que já viraram pendente (não repete)
+  const grpVisto = {};                                                 // grupo → última vez em que a linha estava na lista
+  const grpIni = Date.now();
+  const GRP_IGNORA = /\b(digitando|gravando|typing|recording)\b|\breagiu com\b|\breacted\b/i; // estados passageiros e reações não são mensagem nova
+
+  function grpAlvos(c) {
+    const a = [];
+    if ((c.fotoNome || '').trim()) a.push({ id: 'foto', modo: 'foto', nome: c.fotoNome.trim(), chave: grpChave(c.fotoNome) });
+    if ((c.palNome || '').trim()) a.push({ id: 'pal', modo: 'palavras', nome: c.palNome.trim(), chave: grpChave(c.palNome) });
+    return a;
+  }
+  // lê uma linha da lista de conversas sem abrir a conversa
+  function grpLer(row) {
+    const tits = [...row.querySelectorAll('span[title]')].map(s => pacsNorm(s.getAttribute('title')).trim()).filter(Boolean);
+    const nome = tits[0] || '';
+    const linhas = pacsNorm(row.innerText || row.textContent).split('\n').map(s => s.trim()).filter(Boolean);
+    const icones = [...row.querySelectorAll('[data-icon]')].map(x => x.getAttribute('data-icon') || '');
+    const arias = [...row.querySelectorAll('[aria-label]')].map(x => (x.getAttribute('aria-label') || '').trim());
+    const hora = linhas.find(l => /^\d{1,2}:\d{2}$/.test(l)) || '';   // só a hora que está sozinha na linha (não um horário escrito na mensagem)
+    const resto = linhas.filter(l => l !== nome && l !== hora && !/^\d{1,3}$/.test(l));
+    const previa = resto.join(' ').replace(/\s+/g, ' ').trim();
+    const tudo = [...tits.slice(1), previa].join(' \n ');
+    const m = previa.match(/^(.{2,40}?):\s+(.*)$/);
+    return {
+      nome, hora, previa, tudo, icones, arias, linhas, tits,
+      quem: m ? m[1].replace(/^~\s*/, '') : '', texto: (m ? m[2] : previa).trim(),
+      meu: icones.some(i => /check|msg-time|status-time/i.test(i)) || /^voc[eê]:/i.test(previa) || arias.some(a => /^(entregue|lida|enviada|pendente|delivered|read|sent)$/i.test(a)),
+      foto: icones.some(i => /image|photo|camera|album/i.test(i)) || arias.some(a => /^(foto|imagem|photo|image)$/i.test(a)) || /📷/.test(previa) || resto.some(l => /^(foto|imagem|photo)$/i.test(l)),
+      marca: icones.some(i => /mention/i.test(i)) || arias.some(a => /men[çc][ãa]o|mention/i.test(a)),
+      naoLida: arias.some(a => /n[ãa]o lida|unread/i.test(a)) || linhas.some(l => /^\d{1,3}$/.test(l)),
+    };
+  }
+  function grpPalavras(c) { return String(c.palavras || '').split(',').map(grpChave).filter(k => k.length >= 2); }
+  // devolve o motivo do aviso, ou '' quando a mensagem não interessa
+  function grpAvaliar(g, info, c) {
+    if (info.meu || GRP_IGNORA.test(info.previa)) return '';
+    if (g.modo === 'foto') return info.foto ? 'Pedido para laudo' : '';
+    const base = ' ' + grpChave(info.tudo) + ' ';
+    const achou = grpPalavras(c).find(k => new RegExp('(^|[^a-z0-9])' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(base));
+    if (achou) return 'Ultrassom / Doppler';
+    if (c.mencao && info.marca && /@\S/.test(info.tudo)) return 'Você foi marcado';
+    return '';
+  }
+  const grpNoHorario = (d = new Date()) => d.getDay() >= 1 && d.getDay() <= 5 && d.getHours() >= 7 && d.getHours() < 18;
+  function grpSalvar() { GM_setValue('grp_pend', grpPend); }
+  function grpCiente(id) { grpPend = id === '*' ? [] : grpPend.filter(p => p.id !== id); grpSalvar(); grpRender(); }
+  function grpAbrir(chave) {
+    const row = chave && [...document.querySelectorAll(ROWS)].find(r => !r.closest('#gz-pinsec') && r.querySelector('span[title]') && grpChave(r.querySelector('span[title]').getAttribute('title')) === chave);
+    if (row) clickRow(row.querySelector('span[title]') || row); else toast('Não achei o grupo na parte visível da lista. Role a lista de conversas até ele.', 4500);
+  }
+  function grpRender() {
+    if (!document.body) return;
+    let p = document.getElementById('gz-pend');
+    const c = grpCfg();
+    if (!c.on || !grpPend.length) { if (p) p.remove(); return; }
+    let box = document.getElementById('gz-pacs');
+    if (!box) { box = el('div', { id: 'gz-pacs' }); document.body.append(box); }
+    if (p) p.remove();
+    const min = !!GM_getValue('grp_pend_min', false);
+    const fora = grpAlvos(c).filter(g => Date.now() - (grpVisto[g.id] || grpIni) > 90000).map(g => g.nome);
+    p = el('div', { id: 'gz-pend' },
+      el('div', { cls: 'gz-pend-h' },
+        el('b', { text: '📋 Pendentes do WhatsApp (' + grpPend.length + ')' }),
+        el('span', { cls: 'gz-sp' }),
+        min ? null : el('button', { cls: 'gz-pend-b', text: 'Ciente em todos', onclick: () => grpCiente('*') }),
+        el('button', { cls: 'gz-pend-b', text: min ? 'Mostrar' : 'Recolher', onclick: () => { GM_setValue('grp_pend_min', !min); grpRender(); } })),
+      min ? null : grpPend.slice().reverse().map(it => el('div', { cls: 'gz-pend-i' },
+        el('b', { text: it.rot + ' · ' + it.dia + ' ' + it.hora }),
+        el('div', { cls: 'gz-pend-t', text: (it.quem ? it.quem + ': ' : '') + (it.txt || '(sem texto)') }),
+        el('div', { cls: 'gz-pend-a' },
+          el('small', { text: it.grupo }),
+          el('span', { cls: 'gz-sp' }),
+          el('button', { cls: 'gz-pend-b', text: 'Abrir', onclick: () => grpAbrir(it.chave) }),
+          el('button', { cls: 'gz-pend-b pri', text: 'Ciente', onclick: () => grpCiente(it.id) })))),
+      (!min && fora.length) ? el('div', { cls: 'gz-pend-w', text: '⚠ Fora da parte visível da lista (não estou vendo): ' + fora.join(' · ') + '. Role a lista de conversas até o topo.' }) : null);
+    box.append(p);
+  }
+  function grpNovo(g, info, motivo, row, c, teste) {
+    const d = new Date();
+    grpPend.push({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 6), g: g.id, chave: g.chave, grupo: g.nome, rot: motivo,
+      hora: info.hora || d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), dia: d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }),
+      quem: String(info.quem || '').slice(0, 40), txt: String(info.texto || '').slice(0, 220), ts: Date.now() });
+    grpPend = grpPend.slice(-60); grpSalvar(); grpRender();
+    if (row) row.classList.add('gz-pacs-row');
+    // notificação do sistema SEM som e sem o conteúdo da mensagem (só o tipo, o grupo e a hora); fora do horário entra só na lista
+    if (teste || !c.horario || grpNoHorario(d)) {
+      try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+          const n = new Notification('WhatsApp — ' + motivo, { body: g.nome + ' · ' + (info.hora || ''), silent: true, tag: 'gz-grp-' + Date.now() });
+          n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
+        }
+      } catch (_) {}
+    }
+    // reforço: se o WhatsApp já deu a mensagem como lida (grupo aberto), marca de novo como não lida — menos quando se está digitando
+    if (row && c.naoLida && !teste) setTimeout(() => {
+      try {
+        if (!row.isConnected || grpLer(row).naoLida) return;
+        const ae = document.activeElement;
+        if (ae && ae.isContentEditable && document.hasFocus()) return;
+        pacsMarcarNaoLida(row, true).catch(() => {});
+      } catch (_) {}
+    }, 2500);
+  }
+  function grpVarrer() {
+    const c = grpCfg();
+    if (!c.on) return;
+    const alvos = grpAlvos(c);
+    if (!alvos.length) return;
+    const feito = {};
+    for (const row of document.querySelectorAll(ROWS)) {
+      if (row.closest('#gz-pinsec')) continue;
+      const sp = row.querySelector('span[title]');
+      if (!sp) continue;
+      const g = alvos.find(a => a.chave === grpChave(sp.getAttribute('title')));
+      if (!g || feito[g.id]) continue;
+      feito[g.id] = 1; grpVisto[g.id] = Date.now();
+      const info = grpLer(row);
+      if (!/^\d{1,2}:\d{2}$/.test(info.hora) || GRP_IGNORA.test(info.previa)) continue;   // "Ontem", digitando, reação: não é mensagem nova
+      const sig = g.id + '|' + info.hora + '|' + grpChave(info.tudo).slice(0, 200) + (info.foto ? '|f' : '');
+      const antes = grpSig[g.id];
+      if (antes === sig) continue;
+      grpSig[g.id] = sig; GM_setValue('grp_sig', grpSig);
+      if (antes === undefined || grpJa.includes(sig)) continue;                        // 1ª vez que vê o grupo: só registra
+      const motivo = grpAvaliar(g, info, c);
+      if (!motivo) continue;
+      grpJa.push(sig); grpJa = grpJa.slice(-80); GM_setValue('grp_ja', grpJa);
+      grpNovo(g, info, motivo, row, c, false);
+    }
+  }
+  // diagnóstico SEM conteúdo: nenhum nome de pessoa e nenhum texto de mensagem — só estrutura, ícones e o que foi decidido
+  function grpDiag() {
+    const c = grpCfg(), alvos = grpAlvos(c);
+    const ok = /lida|unread|men[çc]|mention|foto|photo|imag|fixad|pinned|silenc|mute|entregue|enviad|pendente|deliver|sent|read/i;
+    const d = { versao: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '?',
+      cfg: { on: c.on, temGrupoFoto: !!alvos.find(a => a.id === 'foto'), temGrupoPalavras: !!alvos.find(a => a.id === 'pal'), palavras: grpPalavras(c), mencao: c.mencao, horario: c.horario, naoLida: c.naoLida },
+      noHorario: grpNoHorario(), notif: ('Notification' in window) ? Notification.permission : 'sem', pendentes: grpPend.length,
+      linhasNaLista: document.querySelectorAll(ROWS).length, grupos: [] };
+    for (const g of alvos) {
+      const row = [...document.querySelectorAll(ROWS)].find(r => !r.closest('#gz-pinsec') && r.querySelector('span[title]') && grpChave(r.querySelector('span[title]').getAttribute('title')) === g.chave);
+      if (!row) { d.grupos.push({ id: g.id, achouNaLista: false }); continue; }
+      const i = grpLer(row);
+      d.grupos.push({ id: g.id, achouNaLista: true, role: row.getAttribute('role'), hora: i.hora, titulos: i.tits.map(t => t.length), linhas: i.linhas.map(l => l.length),
+        previaTam: i.previa.length, temRemetente: !!i.quem, icones: i.icones, arias: i.arias.map(a => ok.test(a) && a.length < 40 ? a : '(outro:' + a.length + ')'),
+        meu: i.meu, foto: i.foto, marca: i.marca, naoLida: i.naoLida, ignorada: GRP_IGNORA.test(i.previa), avisaria: grpAvaliar(g, i, c) || '(não)' });
+    }
+    return d;
+  }
+  async function grpCopiarDiag() {
+    try { await navigator.clipboard.writeText(JSON.stringify(grpDiag())); toast('Diagnóstico dos grupos copiado (sem nomes nem mensagens). Cole na conversa com o Claude.', 6000); }
+    catch (_) { toast('Não consegui copiar. Tente de novo.', 3000); }
+  }
+  function grpTestar() {
+    const c = grpCfg();
+    if (!c.on) { toast('Ligue antes a opção "Vigiar os grupos".', 3500); return; }
+    pacsPedirPermissao();
+    grpNovo({ id: 'teste', chave: '', nome: 'Teste da Suíte' }, { hora: '', quem: '', texto: '🧪 Exemplo de pendente — clique em "Ciente" para tirar da lista.' }, 'Teste', null, c, true);
+  }
+  setInterval(() => { try { grpVarrer(); } catch (_) {} }, 1500);
+  setTimeout(() => { try { grpRender(); } catch (_) {} }, 4000);
+  setInterval(() => { try { if (document.getElementById('gz-pend')) grpRender(); } catch (_) {} }, 60000);
+  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.grp = { grpVarrer, grpLer, grpAvaliar, grpCfg, grpSet, grpDiag, grpCiente, grpRender, grpNoHorario, pend: () => grpPend };
 
 })();
