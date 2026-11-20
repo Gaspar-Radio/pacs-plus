@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.10.0
+// @version      1.10.1
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -2406,7 +2406,10 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   // (sem som), um cartão na tela, destaca a linha e (opcional) aciona o "Marcar como não lida" do WhatsApp.
   // Só lê a lista; nunca envia. Configuração local deste computador (não sincroniza).
   // =====================================================================
-  const PACS_RE = /^\s*PACS:\s*(\S[\s\S]*)$/;
+  // v1.10.1: o OpenBot põe o NOME DA ROTINA na 1ª linha ("PACS LADI - avisos no WhatsApp") antes do "PACS: …";
+  // na lista de conversas a prévia mostra só esse começo. Vale qualquer prévia que COMECE pela palavra PACS.
+  const PACS_RE = /^\s*PACS(?![A-Za-zÀ-ÿ0-9])\s*\S/;
+  const pacsLimpo = t => String(t || '').replace(/^\s*PACS LADI\s*-\s*avisos no W[^\n]*\n?/i, '').replace(/^\s*PACS:\s*/, '').trim();
   const pacsCfg = () => Object.assign({ on: false, naoLida: true }, GM_getValue('pacs_alert', {}) || {});
   const pacsSet = o => GM_setValue('pacs_alert', Object.assign(pacsCfg(), o));
   let pacsBase = false, pacsVistos = Object.assign({}, GM_getValue('pacs_alert_seen2', {}) || {}), pacsMenuFalhou = false; // texto → hora da última vez
@@ -2431,7 +2434,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     GM_setValue('pacs_alert_seen2', pacsVistos);
   }
   function pacsAvisar(texto, teste) {
-    const corpo = String(texto || '').replace(/^\s*PACS:\s*/, '').slice(0, 400);
+    const corpo = (pacsLimpo(texto) || 'Novo aviso do PACS — abra a conversa "Mensagem para você mesmo".').slice(0, 400);
     try {
       if ('Notification' in window && Notification.permission === 'granted') {
         const n = new Notification('PACS — aviso', { body: corpo, silent: true, tag: 'gz-pacs-' + Date.now() });
