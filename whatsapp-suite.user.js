@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.10.1
+// @version      1.10.2
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -1595,7 +1595,7 @@ Regras obrigatórias:
       sec('Avisos do PACS (mensagens "PACS:" no seu chat)'),
       chk('Avisar quando chegar uma mensagem "PACS:" (notificação sem som + cartão na tela)', () => pacsCfg().on, v => { pacsSet({ on: v }); if (v) pacsPedirPermissao(); }),
       chk('Marcar a conversa como não lida (a bolinha aparece também no celular)', () => pacsCfg().naoLida, v => pacsSet({ naoLida: v })),
-      el('div', { cls: 'gz-row' }, btn('Testar o aviso', () => pacsAvisar('PACS: 🧪 Teste da Suíte — aviso funcionando.', true))),
+      el('div', { cls: 'gz-row' }, btn('Testar o aviso', () => pacsAvisar('PACS: 🧪 Teste da Suíte — aviso funcionando.', true)), btn('📋 Copiar diagnóstico dos avisos', pacsCopiarDiag)),
       el('div', { cls: 'gz-note', text: 'Vale só neste computador e só com o WhatsApp Web aberto. As mensagens "PACS:" são os avisos do hospital que o OpenBot publica no seu chat "Mensagem para você mesmo". Nunca envia nada.' }),
 
       sec('Botões flutuantes'),
@@ -2410,6 +2410,28 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   // na lista de conversas a prévia mostra só esse começo. Vale qualquer prévia que COMECE pela palavra PACS.
   const PACS_RE = /^\s*PACS(?![A-Za-zÀ-ÿ0-9])\s*\S/;
   const pacsLimpo = t => String(t || '').replace(/^\s*PACS LADI\s*-\s*avisos no W[^\n]*\n?/i, '').replace(/^\s*PACS:\s*/, '').trim();
+  // v1.10.2: o WhatsApp costuma pôr marcas invisíveis de direção do texto antes da prévia; sem tirá-las o "começa por PACS" falha.
+  const pacsNorm = t => String(t || '').replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
+  let pacsUlt = { quando: '', linhas: 0, comPacs: 0, novos: 0 };
+  // diagnóstico: só trechos que contêm a palavra PACS (nenhuma outra conversa entra)
+  function pacsDiag() {
+    const cod = t => [...String(t).slice(0, 5)].map(c => c.codePointAt(0).toString(16)).join(' ');
+    const d = { versao: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '?', cfg: pacsCfg(), base: pacsBase,
+      notif: ('Notification' in window) ? Notification.permission : 'sem', foco: document.hasFocus(), ult: pacsUlt, menuFalhou: pacsMenuFalhou,
+      vistos: Object.keys(pacsVistos).length, linhas: [] };
+    for (const row of document.querySelectorAll(ROWS)) {
+      if (!/PACS/.test(row.textContent || '')) continue;
+      const tit = [...row.querySelectorAll('span[title]')].map(sp => sp.getAttribute('title') || '').filter(t => /PACS/.test(t)).map(t => ({ t: t.slice(0, 50), cod: cod(t) }));
+      const lin = String(row.innerText || '').split('\n').filter(l => /PACS/.test(l)).map(l => ({ t: l.slice(0, 50), cod: cod(l) }));
+      const pv = pacsPrevia(row);
+      d.linhas.push({ role: row.getAttribute('role'), sel: row.getAttribute('aria-selected'), tit, lin, previa: pv.slice(0, 50), hora: pacsHora(row), visto: pacsVistos[pv.slice(0, 160)] });
+    }
+    return d;
+  }
+  async function pacsCopiarDiag() {
+    try { await navigator.clipboard.writeText(JSON.stringify(pacsDiag())); toast('Diagnóstico dos avisos copiado. Cole na conversa com o Claude.', 6000); }
+    catch (_) { toast('Não consegui copiar. Tente de novo.', 3000); }
+  }
   const pacsCfg = () => Object.assign({ on: false, naoLida: true }, GM_getValue('pacs_alert', {}) || {});
   const pacsSet = o => GM_setValue('pacs_alert', Object.assign(pacsCfg(), o));
   let pacsBase = false, pacsVistos = Object.assign({}, GM_getValue('pacs_alert_seen2', {}) || {}), pacsMenuFalhou = false; // texto → hora da última vez
@@ -2419,8 +2441,8 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   }
   // prévia "PACS: ..." de uma linha da lista (texto do span com title, ou a linha de texto da própria linha)
   function pacsPrevia(row) {
-    for (const sp of row.querySelectorAll('span[title]')) { const t = (sp.getAttribute('title') || '').trim(); if (PACS_RE.test(t)) return t; }
-    for (const ln of String(row.innerText || row.textContent || '').split('\n')) { if (PACS_RE.test(ln)) return ln.trim(); }
+    for (const sp of row.querySelectorAll('span[title]')) { const t = pacsNorm(sp.getAttribute('title')).trim(); if (PACS_RE.test(t)) return t; }
+    for (const ln of pacsNorm(row.innerText || row.textContent).split('\n')) { if (PACS_RE.test(ln)) return ln.trim(); }
     return '';
   }
   function pacsHora(row) {
@@ -2475,10 +2497,11 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     if (!pacsCfg().on) return;
     const rows = [...document.querySelectorAll(ROWS)];
     if (!rows.length) return;
-    const novos = [];
+    const novos = []; let comPacs = 0;
     for (const row of rows) {
       const t = pacsPrevia(row);
       if (!t) { row.classList.remove('gz-pacs-row'); continue; }
+      comPacs++;
       // novo = texto nunca visto, ou o mesmo texto com OUTRA hora (HH:MM). Quando a hora vira "Ontem" não é aviso novo.
       const tk = t.slice(0, 160), hora = pacsHora(row), antes = pacsVistos[tk];
       if (antes !== undefined && (!hora || hora === antes)) continue;
@@ -2486,6 +2509,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       if (pacsBase) novos.push({ row, t });
     }
     // 1ª varredura depois de abrir: só registra o que já estava na lista (não avisa mensagem antiga)
+    pacsUlt = { quando: new Date().toLocaleTimeString('pt-BR'), linhas: rows.length, comPacs, novos: novos.length };
     if (!pacsBase) { pacsBase = true; return; }
     for (const n of novos) {
       n.row.classList.add('gz-pacs-row');
@@ -2495,6 +2519,6 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     }
   }
   setInterval(() => { try { pacsVarrer(); } catch (_) {} }, 3000);
-  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.pacs = { pacsVarrer, pacsPrevia, pacsAvisar, pacsMarcarNaoLida, pacsCfg, pacsSet, base: () => pacsBase };
+  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.pacs = { pacsVarrer, pacsPrevia, pacsAvisar, pacsMarcarNaoLida, pacsCfg, pacsSet, pacsDiag, base: () => pacsBase };
 
 })();
