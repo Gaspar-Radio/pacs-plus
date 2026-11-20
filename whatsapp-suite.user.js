@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.10.2
+// @version      1.10.3
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -2413,11 +2413,13 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   // v1.10.2: o WhatsApp costuma pôr marcas invisíveis de direção do texto antes da prévia; sem tirá-las o "começa por PACS" falha.
   const pacsNorm = t => String(t || '').replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
   let pacsUlt = { quando: '', linhas: 0, comPacs: 0, novos: 0 };
+  let pacsNL = { quando: '', res: 'nunca tentou' }; // v1.10.3: resultado da última tentativa de "marcar como não lida" (vai no diagnóstico)
+  const pacsNLset = (res, extra) => { pacsNL = Object.assign({ quando: new Date().toLocaleTimeString('pt-BR'), res }, extra || {}); };
   // diagnóstico: só trechos que contêm a palavra PACS (nenhuma outra conversa entra)
   function pacsDiag() {
     const cod = t => [...String(t).slice(0, 5)].map(c => c.codePointAt(0).toString(16)).join(' ');
     const d = { versao: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '?', cfg: pacsCfg(), base: pacsBase,
-      notif: ('Notification' in window) ? Notification.permission : 'sem', foco: document.hasFocus(), ult: pacsUlt, menuFalhou: pacsMenuFalhou,
+      notif: ('Notification' in window) ? Notification.permission : 'sem', foco: document.hasFocus(), ult: pacsUlt, naoLida: pacsNL, menuFalhou: pacsMenuFalhou,
       vistos: Object.keys(pacsVistos).length, linhas: [] };
     for (const row of document.querySelectorAll(ROWS)) {
       if (!/PACS/.test(row.textContent || '')) continue;
@@ -2474,7 +2476,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   }
   // aciona "Marcar como não lida" pelo menu de contexto da linha; se o menu não tiver a opção, fecha e não tenta mais nesta sessão
   async function pacsMarcarNaoLida(row) {
-    if (pacsMenuFalhou || !row || !row.isConnected) return false;
+    if (pacsMenuFalhou || !row || !row.isConnected) { pacsNLset(pacsMenuFalhou ? 'desistiu: menu sem a opção nesta sessão' : 'linha sumiu da lista'); return false; }
     const alvo = row.querySelector('span[title]') || row;
     const r = alvo.getBoundingClientRect();
     alvo.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: window, button: 2, buttons: 2, clientX: r.left + 8, clientY: r.top + r.height / 2 }));
@@ -2485,12 +2487,19 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
         .find(x => /marcar como n[ãa]o lida|mark as unread/i.test((x.innerText || x.textContent || '') + ' ' + (x.getAttribute('aria-label') || '')));
     }
     if (!item) {
+      // rótulos do menu que abriu (textos da interface do WhatsApp, não de conversa) — para saber se o menu abriu e com que opções
+      const rot = [...document.querySelectorAll('[role="application"] li, [role="menu"] [role="menuitem"], [role="menu"] li')].map(x => (x.innerText || x.textContent || '').trim().slice(0, 40)).filter(Boolean).slice(0, 15);
+      pacsNLset(rot.length ? 'menu abriu sem a opção' : 'menu não abriu', { itens: rot, dialogos: document.querySelectorAll('[role="application"], [role="menu"]').length });
       pacsMenuFalhou = true;
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
       toast('Avisos do PACS: não achei "Marcar como não lida" no menu desta versão do WhatsApp. O aviso na tela continua funcionando.', 6000);
       return false;
     }
+    const rotulo = (item.innerText || item.textContent || '').trim().slice(0, 40), tag = item.tagName + (item.getAttribute('role') ? '[' + item.getAttribute('role') + ']' : '');
     clickRow(item.querySelector('span, div') || item);
+    await new Promise(ok => setTimeout(ok, 600));
+    const menuAinda = !!document.querySelector('[role="application"] li, [role="menu"] [role="menuitem"]');
+    pacsNLset('clicou na opção', { rotulo, tag, menuAindaAberto: menuAinda, linhaAindaNaLista: row.isConnected });
     return true;
   }
   function pacsVarrer() {
@@ -2515,7 +2524,9 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       n.row.classList.add('gz-pacs-row');
       pacsAvisar(n.t, false);
       const aberta = n.row.getAttribute('aria-selected') === 'true' || !!n.row.querySelector('[aria-selected="true"]');
-      if (pacsCfg().naoLida && !(aberta && document.hasFocus())) pacsMarcarNaoLida(n.row).catch(() => {});
+      if (!pacsCfg().naoLida) pacsNLset('opção desligada');
+      else if (aberta && document.hasFocus()) pacsNLset('pulou: a conversa estava aberta e a janela em foco');
+      else pacsMarcarNaoLida(n.row).catch(e => pacsNLset('erro: ' + String(e && e.message).slice(0, 80)));
     }
   }
   setInterval(() => { try { pacsVarrer(); } catch (_) {} }, 3000);
