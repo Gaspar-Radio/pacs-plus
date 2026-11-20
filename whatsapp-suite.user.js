@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.9.0
+// @version      1.10.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -172,6 +172,11 @@ Regras obrigatórias:
       background:#1f2c33;color:#e9edef;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.5);
       font:14px/1.4 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:12px;box-sizing:border-box}
     .gz-toast{width:auto;max-width:420px;font-size:13px}
+    #gz-pacs{position:fixed;right:22px;top:18px;z-index:100001;display:flex;flex-direction:column;gap:8px;width:360px;max-width:calc(100vw - 32px)}
+    .gz-pacs-c{background:#1f2c33;color:#e9edef;border-left:4px solid #f59e0b;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.5);padding:10px 12px;font-size:13px;line-height:1.35;white-space:pre-wrap;cursor:pointer}
+    .gz-pacs-c b{display:block;font-size:11px;color:#f59e0b;letter-spacing:.04em;margin-bottom:3px}
+    .gz-pacs-c small{display:block;margin-top:4px;color:#8696a0;font-size:11px}
+    .gz-pacs-row{box-shadow:inset 4px 0 0 #f59e0b}
     #gz-panel .gz-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:600}
     #gz-panel .gz-sub{font-weight:400;font-size:12px;color:#8696a0}
     #gz-panel .gz-x{background:none;border:none;color:#8696a0;font-size:18px;cursor:pointer}
@@ -1587,6 +1592,12 @@ Regras obrigatórias:
       sec('Base de referência (protocolos, respostas padrão)'),
       kbSettingsBox(),
 
+      sec('Avisos do PACS (mensagens "PACS:" no seu chat)'),
+      chk('Avisar quando chegar uma mensagem "PACS:" (notificação sem som + cartão na tela)', () => pacsCfg().on, v => { pacsSet({ on: v }); if (v) pacsPedirPermissao(); }),
+      chk('Marcar a conversa como não lida (a bolinha aparece também no celular)', () => pacsCfg().naoLida, v => pacsSet({ naoLida: v })),
+      el('div', { cls: 'gz-row' }, btn('Testar o aviso', () => pacsAvisar('PACS: 🧪 Teste da Suíte — aviso funcionando.', true))),
+      el('div', { cls: 'gz-note', text: 'Vale só neste computador e só com o WhatsApp Web aberto. As mensagens "PACS:" são os avisos do hospital que o OpenBot publica no seu chat "Mensagem para você mesmo". Nunca envia nada.' }),
+
       sec('Botões flutuantes'),
       chk('Mostrar o botão flutuante ✨ (o ✦ do menu lateral continua)', () => !GM_getValue('hide_fab', false), v => GM_setValue('hide_fab', !v)),
       el('div', { cls: 'gz-row' }, btn('Voltar ✨ e painéis à posição padrão', () => {
@@ -2386,5 +2397,101 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   setTimeout(() => syncNow(true), 3000);
   setInterval(() => { if (getSb()) syncNow(true); }, 60e3);
   setInterval(() => { try { markLocalChanges(); } catch (_) {} }, 5000);
+
+  // =====================================================================
+  // 15. AVISOS DO PACS  (v1.10 — 20/11/2026)
+  // O OpenBot publica os avisos do hospital no chat "Mensagem para você mesmo", começando por "PACS:".
+  // Como a mensagem sai da própria conta, o WhatsApp não notifica nem marca como não lida. Este módulo
+  // olha a lista de conversas e, quando aparece uma prévia nova "PACS:", mostra notificação do sistema
+  // (sem som), um cartão na tela, destaca a linha e (opcional) aciona o "Marcar como não lida" do WhatsApp.
+  // Só lê a lista; nunca envia. Configuração local deste computador (não sincroniza).
+  // =====================================================================
+  const PACS_RE = /^\s*PACS:\s*(\S[\s\S]*)$/;
+  const pacsCfg = () => Object.assign({ on: false, naoLida: true }, GM_getValue('pacs_alert', {}) || {});
+  const pacsSet = o => GM_setValue('pacs_alert', Object.assign(pacsCfg(), o));
+  let pacsBase = false, pacsVistos = Object.assign({}, GM_getValue('pacs_alert_seen2', {}) || {}), pacsMenuFalhou = false; // texto → hora da última vez
+
+  function pacsPedirPermissao() {
+    try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (_) {}
+  }
+  // prévia "PACS: ..." de uma linha da lista (texto do span com title, ou a linha de texto da própria linha)
+  function pacsPrevia(row) {
+    for (const sp of row.querySelectorAll('span[title]')) { const t = (sp.getAttribute('title') || '').trim(); if (PACS_RE.test(t)) return t; }
+    for (const ln of String(row.innerText || row.textContent || '').split('\n')) { if (PACS_RE.test(ln)) return ln.trim(); }
+    return '';
+  }
+  function pacsHora(row) {
+    const m = String(row.innerText || row.textContent || '').match(/\b\d{1,2}:\d{2}\b/);
+    return m ? m[0] : '';
+  }
+  function pacsLembrar(t, hora) {
+    delete pacsVistos[t]; pacsVistos[t] = hora; // reinsere no fim (ordem = mais recente por último)
+    const ks = Object.keys(pacsVistos);
+    if (ks.length > 60) ks.slice(0, ks.length - 40).forEach(k => delete pacsVistos[k]);
+    GM_setValue('pacs_alert_seen2', pacsVistos);
+  }
+  function pacsAvisar(texto, teste) {
+    const corpo = String(texto || '').replace(/^\s*PACS:\s*/, '').slice(0, 400);
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const n = new Notification('PACS — aviso', { body: corpo, silent: true, tag: 'gz-pacs-' + Date.now() });
+        n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
+      }
+    } catch (_) {}
+    if (!document.body) return;
+    let box = document.getElementById('gz-pacs');
+    if (!box) { box = el('div', { id: 'gz-pacs' }); document.body.append(box); }
+    const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const c = el('div', { cls: 'gz-pacs-c', title: 'Clique para fechar' }, el('b', { text: teste ? 'PACS · TESTE' : 'PACS · AVISO' }), document.createTextNode(corpo), el('small', { text: hora + ' · clique para fechar' }));
+    c.onclick = () => c.remove();
+    box.prepend(c);
+    while (box.children.length > 5) box.lastChild.remove();
+  }
+  // aciona "Marcar como não lida" pelo menu de contexto da linha; se o menu não tiver a opção, fecha e não tenta mais nesta sessão
+  async function pacsMarcarNaoLida(row) {
+    if (pacsMenuFalhou || !row || !row.isConnected) return false;
+    const alvo = row.querySelector('span[title]') || row;
+    const r = alvo.getBoundingClientRect();
+    alvo.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, view: window, button: 2, buttons: 2, clientX: r.left + 8, clientY: r.top + r.height / 2 }));
+    let item = null;
+    for (let i = 0; i < 12 && !item; i++) {
+      await new Promise(ok => setTimeout(ok, 80));
+      item = [...document.querySelectorAll('[role="application"] li, [role="menu"] [role="menuitem"], [role="application"] [role="button"], div[role="button"][aria-label]')]
+        .find(x => /marcar como n[ãa]o lida|mark as unread/i.test((x.innerText || x.textContent || '') + ' ' + (x.getAttribute('aria-label') || '')));
+    }
+    if (!item) {
+      pacsMenuFalhou = true;
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      toast('Avisos do PACS: não achei "Marcar como não lida" no menu desta versão do WhatsApp. O aviso na tela continua funcionando.', 6000);
+      return false;
+    }
+    clickRow(item.querySelector('span, div') || item);
+    return true;
+  }
+  function pacsVarrer() {
+    if (!pacsCfg().on) return;
+    const rows = [...document.querySelectorAll(ROWS)];
+    if (!rows.length) return;
+    const novos = [];
+    for (const row of rows) {
+      const t = pacsPrevia(row);
+      if (!t) { row.classList.remove('gz-pacs-row'); continue; }
+      // novo = texto nunca visto, ou o mesmo texto com OUTRA hora (HH:MM). Quando a hora vira "Ontem" não é aviso novo.
+      const tk = t.slice(0, 160), hora = pacsHora(row), antes = pacsVistos[tk];
+      if (antes !== undefined && (!hora || hora === antes)) continue;
+      pacsLembrar(tk, hora);
+      if (pacsBase) novos.push({ row, t });
+    }
+    // 1ª varredura depois de abrir: só registra o que já estava na lista (não avisa mensagem antiga)
+    if (!pacsBase) { pacsBase = true; return; }
+    for (const n of novos) {
+      n.row.classList.add('gz-pacs-row');
+      pacsAvisar(n.t, false);
+      const aberta = n.row.getAttribute('aria-selected') === 'true' || !!n.row.querySelector('[aria-selected="true"]');
+      if (pacsCfg().naoLida && !(aberta && document.hasFocus())) pacsMarcarNaoLida(n.row).catch(() => {});
+    }
+  }
+  setInterval(() => { try { pacsVarrer(); } catch (_) {} }, 3000);
+  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.pacs = { pacsVarrer, pacsPrevia, pacsAvisar, pacsMarcarNaoLida, pacsCfg, pacsSet, base: () => pacsBase };
 
 })();
