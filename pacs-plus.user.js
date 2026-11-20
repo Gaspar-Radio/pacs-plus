@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.56.1
+// @version      1.57.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -116,6 +116,7 @@
         som: true, notifWindows: true,
         ntfyServidor: 'https://ntfy.sh', ntfyTopico: '',
         tgToken: '', tgChat: '',
+        tgServidor: false,           // v1.57: Telegram pelo servidor (bot "PACS LADI Avisos"; a chave fica só no Supabase)
         poUser: '', poToken: '', poEmergencia: true,
         pausaAte: '',                // AAAA-MM-DD
         testeAte: 0                  // fim do modo teste (ms)
@@ -1326,8 +1327,22 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         try { const r = await fetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); ntfyMarcarCota(r); return r.ok; } catch (e) { return false; }
     }
     const tgTokenOk = t => /^\d{5,}:[\w-]{20,}$/.test(String(t || '').trim());
+    // v1.57 — Telegram pelo servidor: a função avisos-telegram (Supabase) guarda a chave do bot e o destino.
+    // Roda na região da Europa (x-region): de São Paulo a função não alcança a API de bots do Telegram (medido em 19/11/2026).
+    // Sempre silencioso (pedido do usuário: avisos sem som). Sem login na nuvem → não envia (devolve false).
+    async function tgServidor(texto) {
+        const n = sessaoNuvemPlus();
+        if (!n) return false;
+        try {
+            const r = await fetch(n.url + '/functions/v1/avisos-telegram', { method: 'POST',
+                headers: { 'content-type': 'application/json', 'x-region': 'eu-central-1', apikey: n.key, Authorization: 'Bearer ' + n.tok },
+                body: JSON.stringify({ acao: 'enviar', texto: String(texto || '').slice(0, 1500), silencioso: true }) });
+            return r.ok;
+        } catch (e) { return false; }
+    }
     async function tgEnviar(texto, forcar) {
         const u = cfg.urg;
+        if (u.tgServidor) return (!celOn() && !forcar) ? null : tgServidor(texto);
         if ((!celOn() && !forcar) || !tgTokenOk(u.tgToken) || !u.tgChat) return null;
         try {
             const r = await fetch(`https://api.telegram.org/bot${String(u.tgToken).trim()}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1899,7 +1914,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         } else out.push('Tela: desligado neste computador');
         if (cfg.urg.ntfyTopico) { const ok = await ntfyEnviar({ sid: 'pp-teste', titulo: '🧪 Teste PACS Plus', msg: 'Se você recebeu isto, os avisos de TC urgente vão chegar neste celular.', prio: 4, tags: 'test_tube' }, true); const c = ntfyCotaAte(); out.push('ntfy (celular): ' + (ok ? '✅ enviado' : c ? `❌ cota diária grátis do ntfy.sh esgotada nesta internet (erro 429) — volta às ${hm(c)}` : '❌ falhou (sem internet ou servidor fora)')); }
         else out.push('ntfy: sem tópico');
-        if (tgTokenOk(cfg.urg.tgToken) && cfg.urg.tgChat) out.push('Telegram: ' + ((await tgEnviar('🧪 Teste PACS Plus — avisos de TC urgente funcionando.', true)) ? '✅ enviado' : '❌ falhou'));
+        if (cfg.urg.tgServidor) out.push('Telegram (servidor): ' + ((await tgEnviar('🧪 Teste PACS Plus — avisos de TC urgente funcionando.', true)) ? '✅ enviado' : '❌ falhou (confira o login da nuvem na 📅 Agenda)'));
+        else if (tgTokenOk(cfg.urg.tgToken) && cfg.urg.tgChat) out.push('Telegram: ' + ((await tgEnviar('🧪 Teste PACS Plus — avisos de TC urgente funcionando.', true)) ? '✅ enviado' : '❌ falhou'));
         if (cfg.urg.poUser && cfg.urg.poToken) out.push('Pushover: ' + ((await poEnviar({ titulo: '🧪 Teste PACS Plus', msg: 'Avisos de TC urgente funcionando.', prio: 0 }, true)) ? '✅ enviado' : '❌ falhou'));
         return out;
     }
@@ -6169,6 +6185,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-u-topico" value="${esc(u.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-u-serv" value="${esc(u.ntfyServidor)}"></label></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-gerar">Gerar</button> <button class="pp-btn sec" id="pp-u-copiar">Copiar</button></span></div>
 <div class="pp-h">Telegram (opcional)</div>
+<label class="pp-tog"><input type="checkbox" id="pp-u-tgserv" ${u.tgServidor ? 'checked' : ''}><span>Enviar pelo servidor (bot “PACS LADI Avisos”)<small>Recomendado: a chave do bot fica só na nuvem e nada precisa ser preenchido abaixo. Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Sempre sem som.</small></span></label>
 <div class="pp-grid2"><label>Token do bot (@BotFather)<input id="pp-u-tgtok" value="${esc(u.tgToken)}"></label><label>Chat ID<input id="pp-u-tgchat" value="${esc(u.tgChat)}"></label></div>
 <div class="pp-row"><span class="pp-muted">Crie o bot no @BotFather, mande /start para ele e clique em Descobrir.</span><button class="pp-btn sec" id="pp-u-tgdesc">Descobrir</button></div>
 <div class="pp-h">Pushover (opcional — toca mesmo com o iPhone no silencioso)</div>
@@ -6213,6 +6230,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
                 som: false, notifWindows: $('#pp-u-notif').checked,
                 ntfyTopico: $('#pp-u-topico').value.trim(), ntfyServidor: $('#pp-u-serv').value.trim() || URG_PADRAO.ntfyServidor,
                 tgToken: $('#pp-u-tgtok').value.trim(), tgChat: $('#pp-u-tgchat').value.trim(),
+                tgServidor: $('#pp-u-tgserv').checked,
                 poUser: $('#pp-u-pouser').value.trim(), poToken: $('#pp-u-potok').value.trim(), poEmergencia: $('#pp-u-poemerg').checked
             };
             if (n.celular && !n.ntfyTopico) n.ntfyTopico = urgGerarTopico();
@@ -6489,6 +6507,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { tgEnviar, tgServidor, flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
