@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.11.0
+// @version      1.11.1
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -2600,25 +2600,69 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     return a;
   }
   // lê uma linha da lista de conversas sem abrir a conversa
+  // v1.11.1 (diagnóstico real de 20/11): as linhas NÃO têm data-icon. Estrutura do texto, em linhas:
+  //   nome · hora · remetente · ":" · mensagem · [contador] · [etiqueta]. Mensagem própria ou de sistema não tem a linha ":".
+  // Mídia = há um ícone (svg) entre o nome e o texto da mensagem, fora dos selos com aria-label (fixada, silenciada, não lidas).
+  const GRP_NAO_PEDIDO = /^(\d{1,2}:\d{2}|figurinha|sticker|gif|[áa]udio|mensagem de voz|mensagem apagada|esta mensagem foi apagada)$/i;
   function grpLer(row) {
-    const tits = [...row.querySelectorAll('span[title]')].map(s => pacsNorm(s.getAttribute('title')).trim()).filter(Boolean);
+    const spans = [...row.querySelectorAll('span[title]')];
+    const tits = spans.map(sp => pacsNorm(sp.getAttribute('title')).trim());
+    const nomeEl = spans[0] || null, msgEl = spans[1] || null;
     const nome = tits[0] || '';
-    const linhas = pacsNorm(row.innerText || row.textContent).split('\n').map(s => s.trim()).filter(Boolean);
+    const linhas = pacsNorm(row.innerText || row.textContent).split('\n').map(x => x.trim()).filter(Boolean);
     const icones = [...row.querySelectorAll('[data-icon]')].map(x => x.getAttribute('data-icon') || '');
     const arias = [...row.querySelectorAll('[aria-label]')].map(x => (x.getAttribute('aria-label') || '').trim());
     const hora = linhas.find(l => /^\d{1,2}:\d{2}$/.test(l)) || '';   // só a hora que está sozinha na linha (não um horário escrito na mensagem)
     const resto = linhas.filter(l => l !== nome && l !== hora && !/^\d{1,3}$/.test(l));
     const previa = resto.join(' ').replace(/\s+/g, ' ').trim();
     const tudo = [...tits.slice(1), previa].join(' \n ');
-    const m = previa.match(/^(.{2,40}?):\s+(.*)$/);
+    // remetente: a linha antes do ":" (ou uma linha curta terminada em ":")
+    let quem = '', texto = '';
+    const iSep = linhas.findIndex((l, k) => k > 0 && (l === ':' || (/:$/.test(l) && l.length <= 42 && l !== nome)));
+    if (iSep > 0) {
+      quem = (linhas[iSep] === ':' ? linhas[iSep - 1] : linhas[iSep].replace(/:$/, '')).replace(/^~\s*/, '').trim();
+      texto = linhas[iSep + 1] || '';
+    }
+    if (tits[1]) texto = tits[1].replace(/\s*\n\s*/g, ' · ');
+    // ícone de mídia: svg/[data-icon] depois do nome e antes do texto da mensagem, fora de selos e de elementos da própria Suíte
+    let midia = false;
+    if (nomeEl) for (const ic of row.querySelectorAll('svg, [data-icon]')) {
+      if (ic.closest('[aria-label]') && row.contains(ic.closest('[aria-label]')) && ic.closest('[aria-label]') !== row) continue;
+      if (ic.closest('[class*="gz-"], [id^="gz-"]')) continue;
+      if (ic.tagName.toLowerCase() !== 'svg' && ic.querySelector('svg')) continue;                 // conta o svg de dentro, não o invólucro
+      if (!(nomeEl.compareDocumentPosition(ic) & 4)) continue;                                      // 4 = o ícone vem depois do nome
+      if (msgEl && !(ic.compareDocumentPosition(msgEl) & 4)) continue;                              // …e antes do texto da mensagem
+      midia = true; break;
+    }
+    const semPedido = GRP_NAO_PEDIDO.test(texto.trim());
     return {
-      nome, hora, previa, tudo, icones, arias, linhas, tits,
-      quem: m ? m[1].replace(/^~\s*/, '') : '', texto: (m ? m[2] : previa).trim(),
-      meu: icones.some(i => /check|msg-time|status-time/i.test(i)) || /^voc[eê]:/i.test(previa) || arias.some(a => /^(entregue|lida|enviada|pendente|delivered|read|sent)$/i.test(a)),
-      foto: icones.some(i => /image|photo|camera|album/i.test(i)) || arias.some(a => /^(foto|imagem|photo|image)$/i.test(a)) || /📷/.test(previa) || resto.some(l => /^(foto|imagem|photo)$/i.test(l)),
-      marca: icones.some(i => /mention/i.test(i)) || arias.some(a => /men[çc][ãa]o|mention/i.test(a)),
+      nome, hora, previa, tudo, icones, arias, linhas, tits, quem, texto: texto.trim(), midia,
+      meu: !quem,                                                                                   // sem remetente = mensagem minha ou de sistema
+      foto: !!quem && !semPedido && (midia || /📷/.test(previa) || resto.some(l => /^(foto|imagem|photo)$/i.test(l))),
+      marca: icones.some(x => /mention/i.test(x)) || arias.some(a => /men[çc]|mention/i.test(a)),
       naoLida: arias.some(a => /n[ãa]o lida|unread/i.test(a)) || linhas.some(l => /^\d{1,3}$/.test(l)),
     };
+  }
+  // estrutura da linha SEM conteúdo (para diagnóstico): etiquetas, nomes de atributos, tamanhos de texto e identificação de ícones
+  function grpEsq(node, lim = { n: 1700 }) {
+    if (lim.n <= 0) return '';
+    if (node.nodeType === 3) { const t = node.textContent.trim(); if (!t) return ''; lim.n -= 4; return '#' + t.length; }
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase(), a = [];
+    for (const at of node.attributes) {
+      const k = at.name, v = at.value;
+      if (/^(class|style|src|href|tabindex|draggable|translate|id)$/.test(k)) continue;
+      if (/^(role|dir|aria-hidden|data-icon|data-testid|viewbox|aria-selected|aria-colindex)$/i.test(k)) a.push(k + '=' + v.slice(0, 30));
+      else if (k === 'aria-label') a.push('aria=' + (/lida|unread|men[çc]|mention|fixad|pinned|silenc|mute/i.test(v) && v.length < 40 ? v : v.length));
+      else if (k === 'title' || k === 'alt') a.push(k + ':' + v.length);
+      else a.push(k);
+    }
+    let dentro = '';
+    if (tag === 'svg') { const t = node.querySelector('title'), d = node.querySelector('path'); dentro = (t ? 'T=' + t.textContent.slice(0, 30) : '') + (d ? ' d=' + (d.getAttribute('d') || '').slice(0, 14) : ''); }
+    else dentro = [...node.childNodes].map(c => grpEsq(c, lim)).filter(Boolean).join(' ');
+    const s = '<' + tag + (a.length ? ' ' + a.join(' ') : '') + '>' + dentro + '</>';
+    lim.n -= tag.length + a.join(' ').length + 6;
+    return s;
   }
   function grpPalavras(c) { return String(c.palavras || '').split(',').map(grpChave).filter(k => k.length >= 2); }
   // devolve o motivo do aviso, ou '' quando a mensagem não interessa
@@ -2731,7 +2775,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
       const i = grpLer(row);
       d.grupos.push({ id: g.id, achouNaLista: true, role: row.getAttribute('role'), hora: i.hora, titulos: i.tits.map(t => t.length), linhas: i.linhas.map(l => l.length),
         previaTam: i.previa.length, temRemetente: !!i.quem, icones: i.icones, arias: i.arias.map(a => ok.test(a) && a.length < 40 ? a : '(outro:' + a.length + ')'),
-        meu: i.meu, foto: i.foto, marca: i.marca, naoLida: i.naoLida, ignorada: GRP_IGNORA.test(i.previa), avisaria: grpAvaliar(g, i, c) || '(não)' });
+        meu: i.meu, midia: i.midia, foto: i.foto, marca: i.marca, temArroba: /@\S/.test(i.tudo), naoLida: i.naoLida, ignorada: GRP_IGNORA.test(i.previa), avisaria: grpAvaliar(g, i, c) || '(não)', esqueleto: grpEsq(row) });
     }
     return d;
   }
@@ -2748,6 +2792,6 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   setInterval(() => { try { grpVarrer(); } catch (_) {} }, 1500);
   setTimeout(() => { try { grpRender(); } catch (_) {} }, 4000);
   setInterval(() => { try { if (document.getElementById('gz-pend')) grpRender(); } catch (_) {} }, 60000);
-  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.grp = { grpVarrer, grpLer, grpAvaliar, grpCfg, grpSet, grpDiag, grpCiente, grpRender, grpNoHorario, pend: () => grpPend };
+  if (typeof unsafeWindow !== 'undefined' && unsafeWindow.__GZ_TEST__) unsafeWindow.__GZ_TEST__.grp = { grpVarrer, grpLer, grpAvaliar, grpCfg, grpSet, grpDiag, grpEsq, grpCiente, grpRender, grpNoHorario, pend: () => grpPend };
 
 })();
