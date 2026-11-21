@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.57.0
+// @version      1.58.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -127,6 +127,7 @@
         ligado: false,               // este computador vigia (ligar em UM só: o de casa)
         tela: true,                  // notificação do sistema neste computador (nome completo)
         avisarNenhum: true,          // avisa se a janela terminar sem ficha
+        servidor: false,             // v1.58: aviso do 1º paciente também pelo servidor (Telegram + cópia no WhatsApp), sem som e sem iniciais
         dias: '1,2,3,4,5',
         janelas: '07:00-09:00\n12:00-14:00', // v1.44: janelas largas (antes 07:45-08:15 / 12:45-13:15)
         reserva: false,              // v1.44: computador reserva — só avisa se o principal não avisou em 2 min
@@ -2140,7 +2141,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         return {
             titulo: `${teste ? '🧪 [TESTE] ' : ''}🩺 1º paciente US (${NOME_PER[periodo]}) — ficha ${p.ficha}`,
             msg: linha1 + (extra.length ? '\n' + extra.join(' · ') : ''),
-            tela: (p.nome || '') + ' · ' + exTxt + (extra.length ? '\n' + extra.join(' · ') : '')
+            tela: (p.nome || '') + ' · ' + exTxt + (extra.length ? '\n' + extra.join(' · ') : ''),
+            srv: [exTxt, p.conv].filter(Boolean).join(' · ') + (extra.length ? '\n' + extra.join(' · ') : '') // v1.58 — Telegram/WhatsApp: sem nome nem iniciais
         };
     }
 
@@ -2182,6 +2184,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
             chegHistSalvar(e.dia, j.periodo, p.ficha);
             chegTela(m.titulo, m.tela, sid);
             if (cfg.cheg.ntfyTopico) per.entregue = !!(await chegNtfy({ sid, titulo: m.titulo, msg: m.msg, prio: 4, vibrar: true, tags: 'stethoscope' }));
+            // v1.58 — mesmo ponto do ntfy (depois da conferência principal/reserva): não duplica entre computadores
+            if (cfg.cheg.servidor) { per.servidor = !!(await tgServidor(m.titulo + '\n' + m.srv)); chegSalvar(e); }
         } else if (per.estado === 'vigiando' && agora >= fimJanela(new Date(agora), j)) {
             if (reservaEspera(per, 'nenhum', agora)) return;
             const jaAvisou = await principalJaAvisou(j, 'nenhum', agora);
@@ -2195,6 +2199,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
                 const msg = (ag ? `Agenda: 1º horário ${ag.primeiro} · ${ag.total} paciente${ag.total > 1 ? 's' : ''}. ` : '') + `Continuo vigiando até ${ate}: aviso quando a 1ª ficha entrar.`;
                 chegTela(t, msg, sid);
                 if (cfg.cheg.ntfyTopico) await chegNtfy({ sid: sid + '-nenhum', titulo: t, msg, prio: 3, vibrar: true, tags: 'hourglass' });
+                if (cfg.cheg.servidor) await tgServidor(t + '\n' + msg);
             }
         }
         if (per.estado !== 'vigiando') await chegAgendarVigia(e, agora);
@@ -2283,7 +2288,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         const m = chegMsg(p, periodo, true);
         chegTela(m.titulo, m.tela, 'pc-teste');
         const ok = cfg.cheg.ntfyTopico ? await chegNtfy({ sid: 'pc-teste', titulo: m.titulo, msg: m.msg, prio: 4, tags: 'test_tube' }) : null;
-        return `Paciente TESTE de ${dia.split('-').reverse().join('/')} · ficha ${p.ficha} · ${p.exames.join(' + ')}<br>Celular: ${ok == null ? 'sem tópico' : ok ? '✅ enviado' : '❌ falhou'}<br><span class="pp-muted">${esc(m.titulo)} — ${esc(m.msg)}</span>`;
+        const okS = cfg.cheg.servidor ? await tgServidor(m.titulo + '\n' + m.srv) : null;
+        return `Paciente TESTE de ${dia.split('-').reverse().join('/')} · ficha ${p.ficha} · ${p.exames.join(' + ')}<br>Celular: ${ok == null ? 'sem tópico' : ok ? '✅ enviado' : '❌ falhou'}<br>Servidor (Telegram + WhatsApp): ${okS == null ? 'desligado' : okS ? '✅ enviado' : '❌ falhou (confira o login da nuvem na Agenda)'}<br><span class="pp-muted">${esc(m.titulo)} — ${esc(m.msg)}</span>`;
     }
 
     // =====================================================================
@@ -6296,6 +6302,7 @@ ${linhaPer('manha')}${linhaPer('tarde')}</div>
 <label class="pp-tog"><input type="checkbox" id="pp-c-lig" ${c.ligado ? 'checked' : ''}><span>Vigiar a chegada do 1º paciente neste computador<small>Pode ligar em DOIS computadores: um principal e um reserva (marque abaixo), com o MESMO tópico do celular.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-res2" ${c.reserva ? 'checked' : ''}><span>Este computador é o RESERVA<small>Só avisa se o principal não avisou em 2 min (confere no ntfy) — sem aviso duplicado. Desmarcado = principal.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-tela" ${c.tela ? 'checked' : ''}><span>Notificação também neste computador<small>Aviso do sistema (Mac/Windows) com o nome completo — o celular recebe só as iniciais.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-serv" ${c.servidor ? 'checked' : ''}><span>Avisar também pelo servidor (Telegram + cópia no WhatsApp)<small>Mesmo canal dos avisos de TC urgente: sem som, sem nome nem iniciais (só exame, convênio, hora da ficha e contagens). Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Ligue só no computador principal.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-nenhum" ${c.avisarNenhum ? 'checked' : ''}><span>Avisar quando a janela terminar sem nenhuma ficha</span></label>
 <div class="pp-h">Dias e janelas de vigilância</div>
 <div class="pp-checks">${DIAS_SEM.map((n, i) => `<label><input type="checkbox" data-cdia="${i}" ${dsel.includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
@@ -6323,7 +6330,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
             const antes = Object.assign({}, cfg.cheg);
             const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
             const n = {
-                ligado: $('#pp-c-lig').checked, reserva: $('#pp-c-res2').checked, tela: $('#pp-c-tela').checked, avisarNenhum: $('#pp-c-nenhum').checked,
+                ligado: $('#pp-c-lig').checked, reserva: $('#pp-c-res2').checked, tela: $('#pp-c-tela').checked, servidor: $('#pp-c-serv').checked, avisarNenhum: $('#pp-c-nenhum').checked,
                 dias: [...body.querySelectorAll('[data-cdia]')].filter(x => x.checked).map(x => x.dataset.cdia).join(','),
                 janelas: $('#pp-c-jan').value.trim() || CHEG_PADRAO.janelas,
                 corteTarde: hora($('#pp-c-corte').value, CHEG_PADRAO.corteTarde),
@@ -6507,6 +6514,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { tgEnviar, tgServidor, flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { tgEnviar, tgServidor, chegMsg, chegProcessar, chegPrimeiro, flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
