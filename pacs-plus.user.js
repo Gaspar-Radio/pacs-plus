@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.58.0
+// @version      1.58.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1960,7 +1960,9 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     }
     const CHEG_TAB = Math.random().toString(36).slice(2, 10);
     const AGENDA_DB_KEY = 'agenda_multidatas_master_db'; // agenda (outro script): só leitura, para "agendado HH:MM"
-    const chegNtfyBase = () => String(cfg.cheg.ntfyServidor || 'https://ntfy.sh').trim().replace(/\/+$/, '');
+    // v1.58.1 — a 1.58.0 gravava "on" aqui (dois campos com o mesmo id); endereço inválido volta ao padrão
+    const chegNtfyUrl = v => { v = String(v || '').trim(); return /^https?:\/\//i.test(v) ? v : 'https://ntfy.sh'; };
+    const chegNtfyBase = () => chegNtfyUrl(cfg.cheg.ntfyServidor).replace(/\/+$/, '');
     const chegPausado = () => !!cfg.cheg.pausaAte && chaveDia(new Date()) <= cfg.cheg.pausaAte;
     const chegDias = () => String(cfg.cheg.dias || '').split(/[^\d]+/).filter(x => x !== '').map(Number).filter(n => n >= 0 && n <= 6);
     const STOP_NOME = new Set(['DA', 'DE', 'DO', 'DAS', 'DOS', 'E', "D'", 'DI', 'DU']);
@@ -6302,14 +6304,14 @@ ${linhaPer('manha')}${linhaPer('tarde')}</div>
 <label class="pp-tog"><input type="checkbox" id="pp-c-lig" ${c.ligado ? 'checked' : ''}><span>Vigiar a chegada do 1º paciente neste computador<small>Pode ligar em DOIS computadores: um principal e um reserva (marque abaixo), com o MESMO tópico do celular.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-res2" ${c.reserva ? 'checked' : ''}><span>Este computador é o RESERVA<small>Só avisa se o principal não avisou em 2 min (confere no ntfy) — sem aviso duplicado. Desmarcado = principal.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-tela" ${c.tela ? 'checked' : ''}><span>Notificação também neste computador<small>Aviso do sistema (Mac/Windows) com o nome completo — o celular recebe só as iniciais.</small></span></label>
-<label class="pp-tog"><input type="checkbox" id="pp-c-serv" ${c.servidor ? 'checked' : ''}><span>Avisar também pelo servidor (Telegram + cópia no WhatsApp)<small>Mesmo canal dos avisos de TC urgente: sem som, sem nome nem iniciais (só exame, convênio, hora da ficha e contagens). Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Ligue só no computador principal.</small></span></label>
+<label class="pp-tog"><input type="checkbox" id="pp-c-srvon" ${c.servidor ? 'checked' : ''}><span>Avisar também pelo servidor (Telegram + cópia no WhatsApp)<small>Mesmo canal dos avisos de TC urgente: sem som, sem nome nem iniciais (só exame, convênio, hora da ficha e contagens). Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Ligue só no computador principal.</small></span></label>
 <label class="pp-tog"><input type="checkbox" id="pp-c-nenhum" ${c.avisarNenhum ? 'checked' : ''}><span>Avisar quando a janela terminar sem nenhuma ficha</span></label>
 <div class="pp-h">Dias e janelas de vigilância</div>
 <div class="pp-checks">${DIAS_SEM.map((n, i) => `<label><input type="checkbox" data-cdia="${i}" ${dsel.includes(i) ? 'checked' : ''}>${n}</label>`).join('')}</div>
 <div class="pp-grid3"><label>Janelas (uma por linha)<textarea id="pp-c-jan" rows="2">${esc(c.janelas)}</textarea></label><label>Corte manhã/tarde<input id="pp-c-corte" value="${esc(c.corteTarde)}"><small class="pp-muted">ficha antes = manhã</small></label><label>Modalidades<input id="pp-c-mods" value="${esc(c.modalidades)}"></label></div>
 <div class="pp-grid2"><label>Pausar até (férias/folga)<input type="date" id="pp-c-pausa" value="${esc(c.pausaAte)}"></label><span></span></div>
 <div class="pp-h">Celular — app ntfy (tópico próprio, separado do de TC urgente)</div>
-<div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-c-topico" value="${esc(c.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-c-serv" value="${esc(c.ntfyServidor)}"></label></div>
+<div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-c-topico" value="${esc(c.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-c-serv" value="${esc(chegNtfyUrl(c.ntfyServidor))}"></label></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-gerar">Gerar</button> <button class="pp-btn sec" id="pp-c-copiar">Copiar</button></span></div>
 <div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-c-testar">Enviar teste</button> <button class="pp-btn sec" id="pp-c-tpac">Testar com paciente TESTE</button></span><button class="pp-btn" id="pp-c-salvar">Salvar</button></div>
 <div class="pp-res" id="pp-c-res" style="display:none;"></div>
@@ -6330,13 +6332,13 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
             const antes = Object.assign({}, cfg.cheg);
             const hora = (v, padrao) => /^\d{1,2}:\d{2}$/.test(String(v).trim()) ? String(v).trim().padStart(5, '0') : padrao;
             const n = {
-                ligado: $('#pp-c-lig').checked, reserva: $('#pp-c-res2').checked, tela: $('#pp-c-tela').checked, servidor: $('#pp-c-serv').checked, avisarNenhum: $('#pp-c-nenhum').checked,
+                ligado: $('#pp-c-lig').checked, reserva: $('#pp-c-res2').checked, tela: $('#pp-c-tela').checked, servidor: $('#pp-c-srvon').checked, avisarNenhum: $('#pp-c-nenhum').checked,
                 dias: [...body.querySelectorAll('[data-cdia]')].filter(x => x.checked).map(x => x.dataset.cdia).join(','),
                 janelas: $('#pp-c-jan').value.trim() || CHEG_PADRAO.janelas,
                 corteTarde: hora($('#pp-c-corte').value, CHEG_PADRAO.corteTarde),
                 modalidades: $('#pp-c-mods').value.trim() || 'US',
                 pausaAte: $('#pp-c-pausa').value || '',
-                ntfyTopico: $('#pp-c-topico').value.trim(), ntfyServidor: $('#pp-c-serv').value.trim() || CHEG_PADRAO.ntfyServidor
+                ntfyTopico: $('#pp-c-topico').value.trim(), ntfyServidor: chegNtfyUrl($('#pp-c-serv').value)
             };
             if (n.ligado && !n.ntfyTopico) n.ntfyTopico = chegGerarTopico();
             // regras mudaram: cancela o vigia agendado (é reagendado pelo ciclo)
