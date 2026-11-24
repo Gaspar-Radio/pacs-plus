@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.9.0
+// @version      9.10.0
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -2182,6 +2182,42 @@
         return diff < 0 ? 0 : Math.floor(diff / 60000);
     }
 
+    // [PONT-INI] v9.10.0 — pontualidade e espera do serviço (minutos exatos; as faixas só dão nome)
+    // Pontualidade = ficha − horário marcado (negativo: chegou antes). Espera do serviço = do que for mais tarde
+    // (ficha ou horário marcado) até a imagem/atendimento; mínimo zero. Encaixe não tem horário marcado.
+    const PONT_CORTES = { adiantado: 30, atrasado: 15 }; // min — um lugar só (Agenda, painel; relatório e app nas etapas 2 e 3)
+    function marcadoMs(dia, hora) {
+        const h = /^(\d{2}):(\d{2})$/.exec(hora ? normalizeTime(hora) : ''), d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dia || ''));
+        if (!h || !d || (h[1] === '00' && h[2] === '00')) return null; // 00:00 = horário não informado
+        return new Date(+d[1], +d[2] - 1, +d[3], +h[1], +h[2], 0, 0).getTime();
+    }
+    function pontualidade(item, dia) {
+        if (!item || !item.chegouEm || ehEncaixe(item)) return null;
+        const m = marcadoMs(dia, item.hora), c = new Date(item.chegouEm).getTime();
+        if (m == null || isNaN(c)) return null;
+        const min = Math.trunc((c - m) / 60000);
+        return { min, faixa: min < -PONT_CORTES.adiantado ? 'adiantado' : min > PONT_CORTES.atrasado ? 'atrasado' : 'horario' };
+    }
+    function esperaServico(item, dia, fim) {
+        if (!item || !item.chegouEm) return null;
+        const c = new Date(item.chegouEm).getTime(); if (isNaN(c)) return null;
+        const m = ehEncaixe(item) ? null : marcadoMs(dia, item.hora);
+        const ini = m == null ? c : Math.max(c, m), f = fim ? new Date(fim).getTime() : Date.now();
+        return f <= ini ? 0 : Math.floor((f - ini) / 60000);
+    }
+    function atrasoSemChegada(item, dia, agoraMs) { // agendado de hoje que já passou do horário e ainda não tem ficha
+        if (!item || (item.status && item.status !== 'pendente') || ehEncaixe(item) || dia !== getTodayIso()) return null;
+        const m = marcadoMs(dia, item.hora), a = agoraMs == null ? Date.now() : agoraMs;
+        return (m == null || a <= m) ? null : Math.floor((a - m) / 60000);
+    }
+    function pontTexto(p, curto) {
+        if (!p) return '';
+        const n = formatMinutes(Math.abs(p.min));
+        if (p.min === 0) return curto ? '' : 'chegou na hora marcada';
+        return curto ? `${n} ${p.min < 0 ? 'antes' : 'depois'}` : `chegou ${n} ${p.min < 0 ? 'antes' : 'depois'} do horário`;
+    }
+    // [PONT-FIM]
+
     function formatMinutes(min) {
         if (min === null || min === undefined || isNaN(min)) return '-';
         if (min < 60) return `${min}m`;
@@ -3157,11 +3193,12 @@
 
         let label = '-', sla = 'sla-normal';
         if (item.status === 'esperando') {
-            const w = calcWaitTime(item.chegouEm, null);
+            const w = urgEfetivo(item) ? calcWaitTime(item.chegouEm, null) : esperaServico(item, selectedDate, null); // v9.10: eletivo conta do horário marcado
             label = `⏳ ${formatMinutes(w)}`;
             sla = urgEfetivo(item) ? 'sla-normal' : getSLAClass(w); // urgência: sem SLA (feita quando o quadro permite)
         } else if (item.status === 'atendido') {
-            const w = (item.tempoEsperaMin !== undefined && item.tempoEsperaMin !== null) ? item.tempoEsperaMin : (item.chegouEm ? calcWaitTime(item.chegouEm, item.atendidoEm) : null);
+            const wFicha = (item.tempoEsperaMin !== undefined && item.tempoEsperaMin !== null) ? item.tempoEsperaMin : (item.chegouEm ? calcWaitTime(item.chegouEm, item.atendidoEm) : null);
+            const w = (urgEfetivo(item) || !item.atendidoEm) ? wFicha : (esperaServico(item, selectedDate, item.atendidoEm) ?? wFicha); // v9.10
             label = w !== null ? `✓ ${formatMinutes(w)}` : '✓ Atendido';
         } else if (item.status === 'cancelado') {
             label = notasDe(item).some(n => n.tag === 'Saída') ? 'DESMARCADO' : 'CANCELADO';
@@ -3172,10 +3209,21 @@
         } else if (item.status === 'faltou') {
             label = 'FALTOU';
             sla = 'sla-vermelho';
+        } else {
+            const at = atrasoSemChegada(item, selectedDate); // v9.10 — passou do horário e ainda sem ficha
+            if (at != null && at > 0) { label = `⌛ atraso ${formatMinutes(at)}`; sla = at > PONT_CORTES.atrasado ? 'sla-amarelo' : 'sla-normal'; }
         }
+        // v9.10 — pontualidade ao lado do tempo (só fora da faixa "no horário"; o número exato fica na dica)
+        const pont = urgEfetivo(item) ? null : pontualidade(item, selectedDate);
+        if (pont && pont.faixa !== 'horario' && (item.status === 'esperando' || item.status === 'atendido')) label += ` · ${pontTexto(pont, true)}`;
 
         // Linha do tempo (tooltip): ficha / imagem / atendido
         const tl = [];
+        if (pont) {
+            const fim = item.status === 'atendido' ? item.atendidoEm : null;
+            tl.push(`Marcado ${normalizeTime(item.hora)} — ${pontTexto(pont, false)}`);
+            if (item.status === 'atendido' || item.status === 'esperando') tl.push(`Espera do paciente ${formatMinutes(calcWaitTime(item.chegouEm, fim))} · do serviço ${formatMinutes(esperaServico(item, selectedDate, fim))}`);
+        }
         if (item.chegouEm) tl.push(`Chegada ${fmtHM(item.chegouEm)} (${item.chegadaFonte === 'pacs' ? 'ficha PACS' : 'clique'})`);
         if (item.imagemEm) tl.push(`Imagens no PACS ${fmtHM(item.imagemEm)}`);
         if (item.atendidoEm) tl.push(`Atendido ${fmtHM(item.atendidoEm)} (${item.atendidoFonte === 'imagem' ? 'pela imagem' : 'clique'})`);
@@ -3308,7 +3356,12 @@
         const urgAtend = atend.filter(i => urgEfetivo(i) && tempoOk(i)).map(i => i.tempoEsperaMin).sort((x, y) => x - y);
         const urgMed = urgAtend.length ? urgAtend[Math.floor((urgAtend.length - 1) / 2)] : null;
         const urgEspera = list.filter(i => i.status === 'esperando' && urgEfetivo(i)).length;
-        const waits = list.filter(i => i.status === 'esperando' && !urgEfetivo(i)).map(i => calcWaitTime(i.chegouEm, null) || 0);
+        const waits = list.filter(i => i.status === 'esperando' && !urgEfetivo(i)).map(i => esperaServico(i, selectedDate, null) || 0); // v9.10: SLA pela espera do serviço
+        // v9.10 — pontualidade do dia (eletivos; 1× por paciente e horário, para exame combinado não contar em dobro)
+        const vistoP = new Set(), pontDia = { adiantado: 0, horario: 0, atrasado: 0 };
+        list.forEach(i => { if (urgEfetivo(i)) return; const p = pontualidade(i, selectedDate); if (!p) return; const k = patientKeyOf(i) + '|' + normalizeTime(i.hora); if (vistoP.has(k)) return; vistoP.add(k); pontDia[p.faixa]++; });
+        const servs = atend.filter(i => !urgEfetivo(i) && i.atendidoEm && tempoOk(i)).map(i => esperaServico(i, selectedDate, i.atendidoEm)).filter(x => x != null).sort((x, y) => x - y);
+        const servMed = servs.length ? servs[Math.floor((servs.length - 1) / 2)] : null;
         const a = waits.filter(w => w >= 30 && w < 45).length, l = waits.filter(w => w >= 45 && w < 60).length, v = waits.filter(w => w >= 60).length;
         const stDia = dayStats(list), stReal = dayStats(atend);
         const fichaImg = list.filter(i => !urgEfetivo(i) && i.chegadaFonte === 'pacs' && i.chegouEm && i.imagemEm).map(i => calcWaitTime(i.chegouEm, i.imagemEm));
@@ -3328,8 +3381,14 @@
                 ${box(formatMinutes(avgFI), `Ficha → imagem, eletivos (n=${fichaImg.length})`, '#0891b2')}
                 ${box(encPacs, 'Encaixes vindos do PACS', '#7c3aed')}
             </div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px;">
+                ${box(formatMinutes(servMed), `Espera do serviço — mediana (n=${servs.length})`, '#2563eb')}
+                ${box(pontDia.adiantado, `Adiantados (> ${PONT_CORTES.adiantado} min antes)`, '#0891b2')}
+                ${box(pontDia.horario, 'No horário', '#059669')}
+                ${box(pontDia.atrasado, `Atrasados (> ${PONT_CORTES.atrasado} min depois)`, '#d97706')}
+            </div>
             <div class="dash-box" style="background:#fff; border:1px solid #e2e8f0; border-radius:7px; padding:10px;">
-                <div style="font-weight:bold; font-size:11px; margin-bottom:5px;">🚨 SLA de Espera em Tempo Real</div>
+                <div style="font-weight:bold; font-size:11px; margin-bottom:5px;">🚨 SLA de Espera em Tempo Real <span style="font-weight:500; color:#64748b;">— contado do horário marcado (ou da chegada, se atrasou)</span></div>
                 <div style="display:flex; gap:8px; font-size:10.5px;">
                     <div class="sla-amarelo" style="flex:1; padding:5px 8px; border-radius:5px;"><strong>${a}</strong> alerta (≥ 30 min)</div>
                     <div class="sla-laranja" style="flex:1; padding:5px 8px; border-radius:5px;"><strong>${l}</strong> atenção (≥ 45 min)</div>
