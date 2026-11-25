@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.59.0
+// @version      1.60.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1294,6 +1294,28 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     // v1.21.1 — cota diária do ntfy.sh (plano grátis, por endereço de internet; Mac e PC da mesma casa somam).
     // Ao receber 429, para de tentar até a virada do dia em UTC (21h de Brasília) e mostra o aviso.
     const NTFY_COTA_KEY = 'pp_ntfy_cota_v1';
+    // v1.60.0 — token da conta ntfy (opcional, um só por computador, vale para TC urgente e chegada).
+    // Com o token, a cota diária conta na CONTA do usuário, e não no IP (o do hospital é compartilhado).
+    // Fica só neste computador (localStorage), nunca vai para o GitHub nem para a nuvem.
+    const NTFY_TOKEN_KEY = 'pp_ntfy_token_v1';
+    const ntfyTokenOk = t => /^tk_[A-Za-z0-9]{20,}$/.test(String(t || '').trim());
+    const ntfyToken = () => { try { const t = String(localStorage.getItem(NTFY_TOKEN_KEY) || '').trim(); return ntfyTokenOk(t) ? t : ''; } catch (e) { return ''; } };
+    function ntfyTokenSalvar(v) { try { const t = String(v || '').trim(); if (!t) localStorage.removeItem(NTFY_TOKEN_KEY); else if (ntfyTokenOk(t)) localStorage.setItem(NTFY_TOKEN_KEY, t); } catch (e) { /* ok */ } }
+    let ntfyTokenRecusado = false;
+    // fetch para o ntfy com o token (só no servidor oficial ntfy.sh); se o token for recusado (401/403), repete sem ele e avisa uma vez
+    async function ntfyFetch(url, opt) {
+        const tok = ntfyToken();
+        const oficial = /^https:\/\/ntfy\.sh\//.test(url);
+        if (!tok || !oficial || ntfyTokenRecusado) return fetch(url, opt);
+        const r = await fetch(url, Object.assign({}, opt, { headers: Object.assign({}, (opt && opt.headers) || {}, { Authorization: 'Bearer ' + tok }) }));
+        if (r.status === 401 || r.status === 403) {
+            ntfyTokenRecusado = true;
+            console.warn('[PACS Plus] ntfy recusou o token da conta (HTTP ' + r.status + '); enviando sem o token');
+            try { urgTela('⚠ Token do ntfy recusado', 'O ntfy não aceitou o token da conta (vencido ou apagado). Os avisos continuam sem o token. Gere outro em ntfy.sh/account e cole no PACS Plus.', 'aviso', 'pp-ntfytok'); } catch (e) { /* ok */ }
+            return fetch(url, opt);
+        }
+        return r;
+    }
     function ntfyCotaAte() { try { const c = JSON.parse(localStorage.getItem(NTFY_COTA_KEY)); return c && c.ate > Date.now() ? c.ate : 0; } catch (e) { return 0; } }
     function ntfyMarcarCota(r) {
         if (!r || r.status !== 429) return;
@@ -1314,7 +1336,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (o.sid) p.set('sid', o.sid);
         if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
         try {
-            const r = await fetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            const r = await ntfyFetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
             ntfyMarcarCota(r);
             if (r.ok && forcar) { try { localStorage.removeItem(NTFY_COTA_KEY); } catch (e) { /* ok */ } }
             return r.ok;
@@ -1325,7 +1347,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const t = topico || cfg.urg.ntfyTopico;
         if (!t || !sid) return false;
         if (ntfyCotaAte()) return false;
-        try { const r = await fetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); ntfyMarcarCota(r); return r.ok; } catch (e) { return false; }
+        try { const r = await ntfyFetch(`${ntfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/${acao}`); ntfyMarcarCota(r); return r.ok; } catch (e) { return false; }
     }
     const tgTokenOk = t => /^\d{5,}:[\w-]{20,}$/.test(String(t || '').trim());
     // v1.57 — Telegram pelo servidor: a função avisos-telegram (Supabase) guarda a chave do bot e o destino.
@@ -1514,7 +1536,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         Object.values(e.grupos || {}).filter(g => g.aberto).forEach(g => { for (let c = 0; c <= (g.ciclo || 0) + 2; c++) vivos.add('u' + hashCurto(`${g.key}|${g.dia}|${c}`)); });
         let linhas;
         try {
-            const r = await fetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}/json?poll=1&scheduled=1&since=24h`);
+            const r = await ntfyFetch(`${ntfyBase()}/${encodeURIComponent(u.ntfyTopico)}/json?poll=1&scheduled=1&since=24h`);
             ntfyMarcarCota(r); if (!r.ok) return;
             linhas = (await r.text()).split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (x) { return null; } }).filter(Boolean);
         } catch (x) { return; }
@@ -1954,7 +1976,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!cfg.cheg.reserva || !cfg.cheg.ntfyTopico) return false;
         try {
             const desde = Math.floor(inicioJanela(new Date(agora), j) / 1000) - 3600;
-            const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(cfg.cheg.ntfyTopico)}/json?poll=1&since=${desde}`);
+            const r = await ntfyFetch(`${chegNtfyBase()}/${encodeURIComponent(cfg.cheg.ntfyTopico)}/json?poll=1&since=${desde}`);
             if (!r.ok) return false;
             const per = `(${NOME_PER[j.periodo]})`, pre = tipo === 'chegou' ? '🩺 1º paciente' : '⌛ Nenhuma ficha';
             return (await r.text()).split('\n').some(l => { try { const m = JSON.parse(l); return m.event === 'message' && String(m.title || '').startsWith(pre) && String(m.title || '').includes(per); } catch (x) { return false; } });
@@ -2059,7 +2081,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (o.sid) p.set('sid', o.sid);
         if (o.em && o.em - Date.now() > 15000) p.set('delay', String(Math.floor(o.em / 1000)));
         try {
-            const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(t)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
+            const r = await ntfyFetch(`${chegNtfyBase()}/${encodeURIComponent(t)}?${p}`, { method: 'POST', body: o.msg || o.titulo || '' });
             ntfyMarcarCota(r);
             return r.ok;
         } catch (e) { console.warn('[PACS Plus] ntfy (chegada) falhou', e); return false; }
@@ -2067,7 +2089,7 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
     async function chegNtfyApagar(sid, topico) {
         const t = topico || cfg.cheg.ntfyTopico;
         if (!t || !sid) return false;
-        try { const r = await fetch(`${chegNtfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/delete`); return r.ok; } catch (e) { return false; }
+        try { const r = await ntfyFetch(`${chegNtfyBase()}/${encodeURIComponent(t)}/${encodeURIComponent(sid)}/delete`); return r.ok; } catch (e) { return false; }
     }
     function chegTela(titulo, msg, tag) {
         if (!cfg.cheg.tela) return;
@@ -6193,6 +6215,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-checks" style="margin-top:16px;"><span class="pp-muted" title="Pedido do usuário: nunca tocar som (computador e celular)">🔇 Sem som (sempre)</span><input type="checkbox" id="pp-u-som" hidden><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
 <div class="pp-h">Celular — app ntfy (grátis, Android e iPhone)</div>
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-u-topico" value="${esc(u.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-u-serv" value="${esc(u.ntfyServidor)}"></label></div>
+<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-u-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Com o token, a cota diária grátis conta na sua conta, não na internet do hospital. Fica só neste computador.</span></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-gerar">Gerar</button> <button class="pp-btn sec" id="pp-u-copiar">Copiar</button></span></div>
 <div class="pp-h">Telegram (opcional)</div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-tgserv" ${u.tgServidor ? 'checked' : ''}><span>Enviar pelo servidor (bot “PACS LADI Avisos”)<small>Recomendado: a chave do bot fica só na nuvem e nada precisa ser preenchido abaixo. Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Sempre sem som.</small></span></label>
@@ -6243,6 +6266,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
                 tgServidor: $('#pp-u-tgserv').checked,
                 poUser: $('#pp-u-pouser').value.trim(), poToken: $('#pp-u-potok').value.trim(), poEmergencia: $('#pp-u-poemerg').checked
             };
+            { const tk = $('#pp-u-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; } }
             if (n.celular && !n.ntfyTopico) n.ntfyTopico = urgGerarTopico();
             // desligou o envio ou trocou de tópico: cancela os vigias do tópico antigo (senão chegaria "monitor parou")
             if (antes.celular && antes.ntfyTopico && (!n.celular || n.ntfyTopico !== antes.ntfyTopico)) {
@@ -6314,6 +6338,7 @@ ${linhaPer('manha')}${linhaPer('tarde')}</div>
 <div class="pp-grid2"><label>Pausar até (férias/folga)<input type="date" id="pp-c-pausa" value="${esc(c.pausaAte)}"></label><span></span></div>
 <div class="pp-h">Celular — app ntfy (tópico próprio, separado do de TC urgente)</div>
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-c-topico" value="${esc(c.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-c-serv" value="${esc(chegNtfyUrl(c.ntfyServidor))}"></label></div>
+<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-c-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Com o token, a cota diária grátis conta na sua conta, não na internet do hospital. Fica só neste computador.</span></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-gerar">Gerar</button> <button class="pp-btn sec" id="pp-c-copiar">Copiar</button></span></div>
 <div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-c-testar">Enviar teste</button> <button class="pp-btn sec" id="pp-c-tpac">Testar com paciente TESTE</button></span><button class="pp-btn" id="pp-c-salvar">Salvar</button></div>
 <div class="pp-res" id="pp-c-res" style="display:none;"></div>
@@ -6342,6 +6367,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
                 pausaAte: $('#pp-c-pausa').value || '',
                 ntfyTopico: $('#pp-c-topico').value.trim(), ntfyServidor: chegNtfyUrl($('#pp-c-serv').value)
             };
+            { const tk = $('#pp-c-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; } }
             if (n.ligado && !n.ntfyTopico) n.ntfyTopico = chegGerarTopico();
             // regras mudaram: cancela o vigia agendado (é reagendado pelo ciclo)
             const e2 = chegEstado();
