@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.61.1
+// @version      1.61.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1470,7 +1470,10 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (!cfg.urg.tela) return;
         try {
             if (cfg.urg.notifWindows && 'Notification' in window && Notification.permission === 'granted') {
-                const n = new Notification(titulo, { body: msg, tag: tag || undefined, renotify: false, silent: true, requireInteraction: nivel === 'urgente' });
+                // v1.61.2: com a mesma "tag" e renotify:false, o Windows/Chrome SUBSTITUI a notificação anterior sem mostrar o balão
+                // (teste repetido e "confirmado" depois de "marcado" não apareciam). Agora reavisa; o teste usa tag nova a cada vez.
+                const tg = tag === 'pp-teste' ? 'pp-teste-' + Date.now() : (tag || undefined);
+                const n = new Notification(titulo, { body: msg, tag: tg, renotify: !!tg, silent: true, requireInteraction: nivel === 'urgente' });
                 n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
             }
         } catch (e) { /* sem notificação do sistema */ }
@@ -2127,7 +2130,8 @@ html[data-pp-viewer] #pp-urg { bottom: 40px; }`;
         if (!cfg.cheg.tela) return;
         try {
             if ('Notification' in window && Notification.permission === 'granted') {
-                const n = new Notification(titulo, { body: msg, tag: tag || undefined, silent: true });
+                const tg = tag === 'pc-teste' ? 'pc-teste-' + Date.now() : (tag || undefined); // v1.61.2: reavisa (ver urgTela)
+                const n = new Notification(titulo, { body: msg, tag: tg, renotify: !!tg, silent: true });
                 n.onclick = () => { try { window.focus(); } catch (x) { /* ok */ } n.close(); };
             }
         } catch (e) { /* sem notificação do sistema */ }
