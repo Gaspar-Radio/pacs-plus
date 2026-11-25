@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.61.2
+// @version      1.62.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -399,7 +399,7 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 #pp-rev .pr-log { flex-basis: 100%; color: #64748b; font-size: 10.5px; }
 #pp-rev .pr-err { margin: 4px 10px 0; color: #fca5a5; font-size: 11px; }
 #pp-rev .pr-info { margin: 4px 10px 0; color: #c4b5fd; font-size: 11px; }
-#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.argon { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.carbon { background: #3730a3; color: #e0e7ff; } #pp-rev .pr-mst { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 7px; border: 1px solid #a16207; border-radius: 7px; color: #fde68a; font-size: 12px; font-weight: 700; } #pp-rev .pr-mst .pr-b { padding: 3px 7px; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
+#pp-rev .pr-f.jev { background: #134e4a; color: #99f6e4; } #pp-rev .pr-f.luna { background: #1e3a8a; color: #bfdbfe; } #pp-rev .pr-f.sonnet { background: #7c2d12; color: #fdba74; } #pp-rev .pr-f.opus { background: #581c87; color: #f5d0fe; } #pp-rev .pr-f.fable { background: #713f12; color: #fde68a; } #pp-rev .pr-f.argon { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.parecer { background: #1e40af; color: #dbeafe; } #pp-rev .pr-f.carbon { background: #3730a3; color: #e0e7ff; } #pp-rev .pr-mst { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 7px; border: 1px solid #a16207; border-radius: 7px; color: #fde68a; font-size: 12px; font-weight: 700; } #pp-rev .pr-mst .pr-b { padding: 3px 7px; } #pp-rev .pr-f.grok { background: #27272a; color: #e4e4e7; } #pp-rev .pr-fraco { font-size: 11px; color: #a1a1aa; font-style: italic; margin-top: 2px; }`,
         rodapeCompacto: `
 .v-main .v-data-table > .v-data-footer { min-height: 0 !important; height: 30px !important; padding: 0 8px !important; font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important; }
 .v-main .v-data-table > .v-data-footer .v-data-footer__select { height: 30px !important; margin-right: 16px !important; }
@@ -3409,9 +3409,8 @@ ${c.texto}`;
     // O servidor (ia-proxy) só conhece o Hydrogen a partir da v17 dele: enquanto não for atualizado, ele devolveria o 3.6 Flash
     // calado → o Plus percebe (modelo devolvido ≠ pedido e sem lista de falhas) e volta a pedir o 3.8 Flash até recarregar a página.
     const REV_MASTER_TXT = '\nVocê é o REVISOR MASTER (última instância, acima do sênior): leia o laudo inteiro, confira cada número, classificação e conduta, e aponte SÓ o que é erro de verdade — falso alarme custa tempo do médico.';
-    const GEMINI_REVISOR = 'gemini-4-hydrogen', GEMINI_ANTERIOR = 'gemini-3.8-flash';
+    const GEMINI_REVISOR = 'gemini-4-hydrogen'; // v1.62.0: o 3.8 Flash saiu de vez (substituído pelo Hydrogen em 12/11)
     const GEMINI_MASTERS = { argon: 'gemini-4-argon', carbon: 'gemini-4-carbon' }; // v1.51: Carbon entra em teste ao lado do Argon
-    let geminiSrvAntigo = false;
     const geminiNome = m => /carbon/.test(m || '') ? 'Gemini 4 Carbon' : /argon/.test(m || '') ? 'Gemini 4 Argon' : /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : 'Gemini';
     const geminiChamar = (c, modelo, nivel, extra) => iaProxy({ acao: 'gemini', modelo, system: revSistema(c, extra || ''), parts: [{ text: revMensagem(c) }],
         generationConfig: { responseMimeType: 'application/json', responseSchema: REV_SCHEMA_GEMINI, temperature: 0, thinkingConfig: { thinkingLevel: nivel } } }); // v1.32.1: revisor comum em low (padrão medium = lento)
@@ -3423,11 +3422,7 @@ ${c.texto}`;
     }
     async function revGemini(c) {
         const t0 = performance.now();
-        let d = await geminiChamar(c, geminiSrvAntigo ? GEMINI_ANTERIOR : GEMINI_REVISOR, 'low');
-        if (!geminiSrvAntigo && !/hydrogen/.test(d.modelo || '') && !(Array.isArray(d.falhas) && d.falhas.length)) { // servidor ainda sem o Hydrogen
-            geminiSrvAntigo = true;
-            d = await geminiChamar(c, GEMINI_ANTERIOR, 'low');
-        }
+        const d = await geminiChamar(c, GEMINI_REVISOR, 'low');
         return geminiResultado(d, 'gemini', t0);
     }
     // Revisores MASTER do Google (só sob pedido), raciocínio médio: Argon e, em teste desde a v1.51, Carbon (mesmo preço por
@@ -3440,6 +3435,14 @@ ${c.texto}`;
         return geminiResultado(d, fonte, t0);
     }
     const revArgon = c => revGeminiMaster(c, 'argon');
+    // v1.62.0 (25/11/2026) — parecer AUTOMÁTICO da triagem passa do Argon para o Hydrogen em raciocínio médio: qualidade parecida
+    // e ~1/3 do custo (Argon e Carbon dobram de preço em 01/12/2026). Argon e Carbon ficam só como Master manual (botão).
+    async function revParecer(c) {
+        const t0 = performance.now();
+        const d = await geminiChamar(c, GEMINI_REVISOR, 'medium', REV_MASTER_TXT);
+        if (!/hydrogen/.test(d.modelo || '')) throw new Error('o Google não respondeu com o Gemini 4 Hydrogen (veio ' + geminiNome(d.modelo) + ')' + (Array.isArray(d.falhas) && d.falhas.length ? ': ' + d.falhas.join(' | ').slice(0, 160) : ''));
+        return geminiResultado(d, 'parecer', t0);
+    }
     const revCarbon = c => revGeminiMaster(c, 'carbon');
     // v1.22.1 — Grok (xAI, grok-4.7): revisor independente opcional (☑ + Grok no painel). Mesmo prompt; resposta em JSON.
     async function revGrok(c) {
@@ -4981,7 +4984,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             p.querySelector('.pr-mini').onclick = () => { r.min = false; renderRevisao(); };
             return;
         }
-        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon' || m === 'carbon') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
+        const st = m => { const x = r.res[m], erro = r.err[m]; return `<span class="pr-st ${erro ? 'err' : x ? 'ok' : 'wait'}" title="${esc(erro || (x && x.modelo) || '')}">${(m === 'gemini' || m === 'argon' || m === 'carbon' || m === 'parecer') && x ? geminiNome(x.modelo) : MOTORES[m].nome} ${erro ? '⚠ erro' : x ? `✓ ${x.achados.length}` : '⏳'}</span>`; };
         const fonteChip = (f, a) => `<span class="pr-f ${f}">${f === 'regra' ? 'Regra' : MOTORES[f] ? MOTORES[f].nome : f}${CK[f] && a[CK[f].pk] != null ? ' ' + fmt(a[CK[f].pk], 2) : ''}</span>`;
         const erros = Object.entries(r.err).filter(([, e]) => e);
         p.innerHTML = `
@@ -4995,7 +4998,7 @@ ${r.alterado && !r.carregando ? `<div class="pr-alt">✎ O laudo mudou desde est
 <div class="pr-pedb"><label title="Aplica a resposta direto no laudo (Ctrl+Z desfaz)"><input type="checkbox" id="pr-ped-dir" ${rc.pedidoDireto ? 'checked' : ''}> Aplicar direto</label><button class="pr-b cor" id="pr-ped-env" title="Ctrl+Enter">Enviar ao Opus</button><button class="pr-b cor" id="pr-ped-fab" title="Claude Fable 5.2 (esforço médio), acima do Opus — mais lento e ≈ 2× o custo">👑 Enviar ao Fable</button></div>
 ${(r.pedidos || []).slice().reverse().map(k => !r.corr[k] ? '' : mini.has(k) ? `<div class="pr-mini" data-maxi="${k}">▸ 💬 “${esc(String(r.corr[k].pedido).slice(0, 70))}” — ${estadoCorr(r.corr[k])}</div>` : `<div class="pr-pd" data-k="${k}"><div class="pr-pq">“${esc(r.corr[k].pedido)}”</div>${htmlCorrecao(r.corr[k], k)}</div>`).join('')}</div>
 ${erros.length ? `<div class="pr-err">${erros.map(([m, e]) => MOTORES[m].nome + ': ' + esc(e)).join('<br>')}</div>` : ''}
-${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}${r.parecerAuto ? `<div class="pr-info">🔎 A triagem acendeu: parecer do Argon chamado${r.res.argon ? '' : r.err.argon ? ' (falhou)' : '…'}</div>` : ''}
+${r.motivoOpus ? `<div class="pr-info">🎓 Opus chamado: ${esc(r.motivoOpus)}</div>` : ''}${r.parecerAuto ? `<div class="pr-info">🔎 A triagem acendeu: parecer do Gemini 4 Hydrogen chamado${r.res.parecer ? '' : r.err.parecer ? ' (falhou)' : '…'}</div>` : ''}
 ${r.triagem === 'normal' ? `<div class="pr-info">✓ Triagem: laudo normal pelas regras + Jev — IAs não chamadas (sem custo). <button class="pr-b sec" id="pr-tri-full">Revisar com as IAs</button></div>` : ''}
 ${r.depois ? `<div class="pr-lib ${pendTot ? 'g' : ''}">${r.carregando ? '⏳ Revisando antes de liberar…' : confRod ? '⏳ Conferindo o texto corrigido (Jev + Luna)…' : pendTot ? `⚠ ${pendTot} pendência(s)${graves ? ` (${graves} grave(s))` : ''}${nConf ? ` — ${nConf} da conferência rápida` : ''}${nRes ? ` · ${nRes} já corrigida(s)` : ''}. Corrija, ignore ou libere mesmo assim — nada é liberado sem o seu clique.` : nRes ? `✓ Sem pendências — ${nRes} corrigida(s) no laudo${r.conf && r.conf.estado === 'ok' ? ', conferidas' : ''}.` : '✓ Sem pendências.'}
 <div class="pr-libb"><button class="pr-b" id="pr-lib">${r.carregando || confRod ? 'Liberar sem esperar' : pendTot ? 'Liberar mesmo assim' : 'Liberar'}</button><button class="pr-b sec" id="pr-canc">Voltar ao laudo</button></div></div>` : ''}
@@ -5012,11 +5015,11 @@ ${(r.triRecolhida || []).length ? `<div class="pr-tri"><button id="pr-tri-b" tit
 <div class="pr-rod"><label><input type="checkbox" id="pr-auto" ${rc.noLiberar ? 'checked' : ''}> Revisar ao clicar Liberar</label>
 <button class="pr-b sec" id="pr-cfg" title="Opções pouco usadas: revisar ao colar, + Gemini, + Grok">⚙ Opções${[rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).length ? ' <small>· ' + [rc.aoColar !== false ? 'ao colar' : '', rc.gemini ? 'Gemini' : '', rc.grok ? 'Grok' : ''].filter(Boolean).join(', ') + '</small>' : ''} ${revOpcoesAbertas ? '▴' : '▾'}</button>
 ${revOpcoesAbertas ? `<div class="pr-cfgbox"><label title="Revisa sozinho 3 s depois de colar/editar o laudo (laudo normal: só regras + Jev; com achado: IAs em segundo plano)"><input type="checkbox" id="pr-colar" ${rc.aoColar !== false ? 'checked' : ''}> Revisar ao colar</label>
-<label title="Quando 2 dos 3 modelos de triagem (Jev, Luna, Gemini Decision) acendem a mesma pergunta, o Argon é chamado sozinho para dar o parecer: um achado por erro, com explicação. Laudo sem alarme não chama."><input type="checkbox" id="pr-parecer" ${rc.parecerAuto !== false ? 'checked' : ''}> Parecer do Argon se a triagem acender</label>
+<label title="Quando 2 dos 3 modelos de triagem (Jev, Luna, Gemini Decision) acendem a mesma pergunta, o Gemini 4 Hydrogen (raciocínio médio) é chamado sozinho para dar o parecer: um achado por erro, com explicação. Laudo sem alarme não chama."><input type="checkbox" id="pr-parecer" ${rc.parecerAuto !== false ? 'checked' : ''}> Parecer do Argon se a triagem acender</label>
 <label title="Gemini 4 Hydrogen como revisor extra independente (API paga)"><input type="checkbox" id="pr-gemini" ${rc.gemini ? 'checked' : ''}> + Gemini</label>
 <label title="Grok 4.7 (xAI) como revisor extra independente — em teste"><input type="checkbox" id="pr-grok" ${rc.grok ? 'checked' : ''}> + Grok${grokSemChave ? ' <small>(sem chave)</small>' : ''}</label></div>` : ''}
 ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo extenso (> ${REV_EXTENSO} caracteres) ou quando as IAs discordam num item grave"><input type="checkbox" id="pr-opus-auto" ${rc.opusAuto ? 'checked' : ''}> Sênior automático</label>`}
-<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><span class="pr-mst" title="Revisor MASTER (última instância) — só roda quando você clica; os achados entram na lista com o selo do modelo">👑 Master:${[['fable', 'Fable', 'Claude Fable 5.2 (esforço médio), acima do Opus — ≈ 2× o custo do Opus, ~10–30 s'], ['argon', 'Argon', 'Gemini 4 Argon (raciocínio médio) — segunda opinião de outra família de modelo, ~5–20 s'], ['carbon', 'Carbon', 'Gemini 4 Carbon (raciocínio médio) — o mais forte do Google; em teste ao lado do Argon, ~5–20 s']].map(([m, n, t]) => `<button class="pr-b sec" id="pr-${m}" ${r.ativos.includes(m) && (r.res[m] || !r.err[m]) ? 'disabled' : ''} title="${t}">${n}</button>`).join('')}</span><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
+<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;"><button class="pr-b sec" id="pr-opus" ${r.ativos.includes('opus') ? 'disabled' : ''} title="Revisão sênior com Claude Opus 5.5 (mais lento e mais caro)">🎓 Sênior (Opus)</button><span class="pr-mst" title="Revisor MASTER (última instância) — só roda quando você clica; os achados entram na lista com o selo do modelo">👑 Master:${[['fable', 'Fable', 'Claude Fable 5.2 (esforço médio), acima do Opus — ≈ 2× o custo do Opus, ~10–30 s'], ['argon', 'Argon', 'Gemini 4 Argon (raciocínio médio) — segunda opinião de outra família de modelo, ~5–20 s. Só sob pedido: preço dobra em 01/12/2026'], ['carbon', 'Carbon', 'Gemini 4 Carbon (raciocínio médio) — o mais forte e o mais caro do Google; use só em laudo complexo, ~5–20 s']].map(([m, n, t]) => `<button class="pr-b sec" id="pr-${m}" ${r.ativos.includes(m) && (r.res[m] || !r.err[m]) ? 'disabled' : ''} title="${t}">${n}</button>`).join('')}</span><button class="pr-b sec" id="pr-de-novo">🔄 Revisar novamente</button></span>
 <div class="pr-log">Vermelho = grave · borda dupla = mais de uma fonte · Jev = probabilidade de erro (0–1); “provável falso alarme” = só uma IA apontou e o Jev discorda. A IA pode errar: a decisão é sua.</div></div>`;
         p.querySelector('.pr-x:not(.pr-min)').onclick = fecharRevisao;
         p.querySelector('.pr-min').onclick = () => { r.min = true; renderRevisao(); };
@@ -5106,6 +5109,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         opus: { nome: 'Opus', fn: c => revOpus(c) },
         fable: { nome: 'Fable', fn: c => revFable(c) },
         argon: { nome: 'Argon', fn: c => revArgon(c) },
+        parecer: { nome: 'Hydrogen', fn: c => revParecer(c) },
         carbon: { nome: 'Carbon', fn: c => revCarbon(c) },
         grok: { nome: 'Grok', fn: c => revGrok(c) }
     };
@@ -5118,14 +5122,14 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
     const motoresDo = modo => REV_MODOS[modo].motores.filter(m => (m !== 'luna' || lunaLigada()) && (m !== 'gdec' || gdecLigado()));
     const REVISORES = { opus: 'Claude: Opus', sonnet: 'Claude: Sonnet' };
     const revisorDe = rc => rc.revisor === 'sonnet' ? 'sonnet' : 'opus'; // v1.22: Haiku saiu
-    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon', 'carbon'];
+    const REV_LLMS = ['opus', 'sonnet', 'gemini', 'grok', 'haiku', 'fable', 'argon', 'carbon', 'parecer'];
     // v1.23 — limiares do Jev num só lugar (calibrar com o registro de Ignorar/Corrigir): mostrar ≥ 0,5; sozinho ≥ 0,7; grave ≥ 0,85; juiz < 0,3 = provável falso alarme
     const JEV_LIM = Object.assign({ mostrar: 0.5, sozinho: 0.7, grave: 0.85, falso: 0.3 }, (cfg.rev && cfg.rev.jevLim) || {});
     const REV_EXTENSO = 3000; // caracteres: acima disso o sênior entra sozinho (se ligado)
     function achadosAtuais(r) {
         // ordem: regras e LLMs primeiro (têm trecho); Jev por último, junta-se pela categoria
         const listas = [r.regras || []];
-        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'carbon', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
+        ['haiku', 'sonnet', 'gemini', 'opus', 'fable', 'argon', 'carbon', 'parecer', 'grok'].forEach(m => { if (r.res[m]) listas.push(r.res[m].achados); }); // v1.47: faltava o Fable (Master) — os achados dele não entravam na lista
         const base = juntarAchados(listas);
         // Triagem confirma itens da mesma categoria (selo com a probabilidade). v1.55: o que SÓ a triagem acendeu vira alarme por
         // VOTO — 2 modelos de decisão com ≥ mostrar (0,5) na mesma pergunta; com um modelo só respondendo, vale o antigo ≥ 0,7.
@@ -5196,7 +5200,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
         if (!r.ativos.includes(m)) r.ativos.push(m);
         delete r.err[m]; r.res[m] = null;
         // v1.22.1: tempo máximo por motor — um modelo lento (ex.: Gemini na fila do Google) não segura a revisão nem o Liberar
-        const lim = m === 'opus' || m === 'fable' || m === 'argon' || m === 'carbon' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
+        const lim = m === 'opus' || m === 'fable' || m === 'argon' || m === 'carbon' || m === 'parecer' ? 90000 : m === 'grok' ? 60000 : 45000; // v1.28: Grok 60 s (proxy com raciocínio 'low')
         const corrida = Promise.race([MOTORES[m].fn(r.ctx), new Promise((_, rej) => setTimeout(() => rej(new Error(`demorou mais de ${lim / 1000} s — ignorado nesta revisão`)), lim))]);
         return corrida.then(x => { r.res[m] = x; }).catch(e => {
             // v1.22.1: Grok sem chave cadastrada → some em silêncio até recarregar a página (sem caixa de erro a cada revisão)
@@ -5366,7 +5370,7 @@ ${r.revisor === 'opus' ? '' : `<label title="Chama o Opus 5.5 sozinho em laudo e
             const decP = Promise.all(motoresDo(modo).filter(m => DECS.includes(m) && !r.res[m]).map(m => rodarMotor(r, m)));
             const onda = motoresDo(modo).filter(m => !DECS.includes(m)).map(m => rodarMotor(r, m === 'claude' ? r.revisor : m));
             // v1.55: triagem acesa (2 votos) → parecer automático do Argon, em paralelo com o Claude
-            onda.push(decP.then(() => { if (rc.parecerAuto !== false && !r.ativos.includes('argon') && triagemAcesa(r)) { r.parecerAuto = true; return rodarMotor(r, 'argon'); } }));
+            onda.push(decP.then(() => { if (rc.parecerAuto !== false && !r.ativos.includes('parecer') && triagemAcesa(r)) { r.parecerAuto = true; return rodarMotor(r, 'parecer'); } }));
             // v1.45: Grok demora 4–47 s (mediana ~16 s; Opus ~4 s) → corre em paralelo, mas a revisão espera por ele no máximo GROK_ESPERA_MS
             // depois dos outros; se chegar mais tarde, os achados dele entram no painel quando chegarem
             const grokP = rc.grok && !grokSemChave ? rodarMotor(r, 'grok').then(async () => { if (r.grokTarde) { await revJevJuiz(r); if (revAtual === r) renderRevisao(); } }) : null;

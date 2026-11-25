@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.12.0
+// @version      1.12.1
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -85,8 +85,8 @@
   // =====================================================================
   // v1.9 (12/11/2026): Gemini 4 Hydrogen (sucessor do Flash) como padrão; reserva 3.8 → 3.6 Flash.
   // Raciocínio sempre em "low": o padrão do Hydrogen é "high" (lento demais para reescrever/transcrever).
-  const MODEL_MAIN = 'gemini-4-hydrogen', MODEL_ALT = 'gemini-3.8-flash';
-  const MODELS = [MODEL_MAIN, MODEL_ALT, 'gemini-3.6-flash'];
+  const MODEL_MAIN = 'gemini-4-hydrogen', MODEL_ALT = 'gemini-3.6-flash'; // v1.12.1: o 3.8 Flash saiu (custo); a comparação passa a ser com o 3.6 Flash
+  const MODELS = [MODEL_MAIN, MODEL_ALT];
   const modelName = m => /hydrogen/.test(m || '') ? 'Gemini 4 Hydrogen' : /3\.8/.test(m || '') ? 'Gemini 3.8 Flash' : /3\.6/.test(m || '') ? 'Gemini 3.6 Flash' : (m || 'Gemini');
   const N_CONTEXTO = 10;
 
@@ -1664,7 +1664,7 @@ Regras obrigatórias:
 
       sec('Gemini'),
       chk('Usar a IA pela nuvem (chave só no Supabase; exige a sincronização conectada)', () => !GM_getValue('ia_direct', false), v => GM_setValue('ia_direct', !v)),
-      el('div', { cls: 'gz-note', text: `Modelo: ${modelName(MODEL_MAIN)} (reserva automática: 3.8 Flash → 3.6 Flash). ${usaNuvem() ? 'Agora: pela nuvem.' : 'Agora: chave deste navegador.'}` }),
+      el('div', { cls: 'gz-note', text: `Modelo: ${modelName(MODEL_MAIN)} (reserva automática: 3.6 Flash). ${usaNuvem() ? 'Agora: pela nuvem.' : 'Agora: chave deste navegador.'}` }),
       el('div', { cls: 'gz-row' }, btn('Alterar chave da API', () => {
         const k = (prompt('Nova chave da API Gemini:', '') || '').trim();
         if (k) { GM_setValue('gemini_key', k); toast('Chave salva.'); }

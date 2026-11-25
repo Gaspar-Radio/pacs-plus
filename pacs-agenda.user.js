@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Agenda Operacional Master
 // @namespace    http://tampermonkey.net/
-// @version      9.10.0
+// @version      9.10.1
 // @description  Agenda integrada ao PACS (chegada pela hora da ficha, atendimento pela chegada das imagens, encaixe automático, contagem de pacientes/procedimentos), vagas da escala × agenda (com reconstrução do histórico da Prefeitura: planilha × PACS), painel financeiro pela produção, aba de saídas e anotações por paciente, sincronização Supabase blindada (fila offline, URL/chave saneadas, erros visíveis), LOGIN por e-mail/senha (Supabase Auth, sessão renovada sozinha), IA pela nuvem (chaves só no Supabase, com as chaves locais de reserva), TEMPO REAL entre os computadores (Realtime, com polling de reserva), envio forçado de todo o histórico local, Analytics de No-Show e espera pelas views da nuvem, No-Show por convênio e por horário, Dark Mode, Zoom, OCR de prints/PDF com Claude (Gemini reserva), importação automática da planilha da Prefeitura e Consulta de escalas/POPs.
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1906,7 +1906,7 @@
                     }
                 } else {
                     try {
-                        const d = await requestProxyIA({ acao: 'gemini', parts });
+                        const d = await requestProxyIA({ acao: 'gemini', parts, generationConfig: { thinkingConfig: { thinkingLevel: 'low' } } }); // v9.10.1: raciocínio baixo — ler tabela não precisa do padrão (médio), que era ~88% do custo do 3.6 Flash
                         iaNuvem.gemini = true;
                         return { texto: d.texto, ia: nome + ' ☁️' };
                     } catch (e) {
