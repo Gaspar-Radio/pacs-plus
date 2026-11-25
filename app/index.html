@@ -123,7 +123,7 @@ textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid va
 // com login (RLS = authenticated). Grava com PATCH por id (só os campos da
 // ação), para não sobrescrever o que os PCs/integração PACS gravaram.
 // =====================================================================
-const VERSAO = '1.4.4';
+const VERSAO = '1.5.0';
 const K = { cfg: 'agapp_cfg_v1', ses: 'agapp_sessao_v1', cache: 'agapp_cache_v1', fila: 'agapp_fila_v1', tab: 'agapp_tab_v1', gest: 'agapp_gestao_v1' };
 const TABELA = 'agenda_exames';
 const $ = s => document.querySelector(s);
@@ -876,6 +876,8 @@ async function telaLaudos() {
     const tela = $('#tela'); tela.innerHTML = '<main><div class="vazio">Carregando…</div></main>';
     try {
         const rows = await api('laudos_pendentes?select=*');
+        // v1.5.0 — marcações feitas no PACS Plus: 📅 entrega combinada e ⏸ aguardando reconvocação (tabela laudo_marcacoes)
+        let marcas = []; try { marcas = (await api('laudo_marcacoes?resolvido_em=is.null&select=*')) || []; } catch (e) { marcas = []; }
         if (S.tab !== 'laudos') return;
         const dm = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}` : '—'; };
         const sem = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'][new Date(+m[1], m[2] - 1, +m[3]).getDay()] : ''; };
@@ -890,7 +892,13 @@ async function telaLaudos() {
             return `<h2><span>${nome}</span></h2><div class="kpis"><div class="kpi"><b>${r.total}</b><span>pendentes</span></div><div class="kpi"><b style="color:${r.vencidos ? 'var(--er)' : 'inherit'}">${r.vencidos}</b><span>vencidos</span></div><div class="kpi"><b style="color:${r.hoje ? 'var(--wa)' : 'inherit'}">${r.hoje}</b><span>vencem hoje</span></div><div class="kpi"><b style="font-size:15px;color:${idade > 30 ? 'var(--er)' : 'inherit'}">${quando}</b><span>atualizado${r.pc ? ' · ' + esc(r.pc) : ''}</span></div></div>
 ${linhas ? `<table class="tbl"><tr><th>Prazo</th><th class="num">Laudos</th><th class="num">Rev/Dig</th><th>Exames de</th></tr>${linhas}</table>` : '<div class="vazio">Nenhum laudo pendente ✓</div>'}`;
         };
-        tela.innerHTML = `<main>${bloco('US')}${bloco('CT')}<div class="note">Revisar + Digitado, eletivos (sem urgentes). Prazo: US 3 e TC 5 dias úteis desde o exame (feriados fora). Atualiza a cada 10 min enquanto algum computador estiver com o PACS aberto e logado. Puxe para baixo ou toque na aba de novo para reler.</div></main>`;
+        const PER = { manha: 'manhã', tarde: 'tarde' }, MOD = { US: 'US', CT: 'TC' };
+        const ent = marcas.filter(k => k.tipo === 'entrega').sort((a, b) => String(a.entrega_dia + (a.entrega_periodo === 'tarde' ? 'b' : 'a') + (a.entrega_hora || '')).localeCompare(String(b.entrega_dia + (b.entrega_periodo === 'tarde' ? 'b' : 'a') + (b.entrega_hora || ''))));
+        const rec = marcas.filter(k => k.tipo === 'reconvocacao').sort((a, b) => String(a.data_exame).localeCompare(String(b.data_exame)));
+        const quem = k => `<b>${esc(k.paciente || '(sem nome)')}</b><br><small style="color:var(--mut)">${esc(k.exame || '')} · ${MOD[k.modalidade] || ''} · exame ${dm(k.data_exame)}</small>${k.comentario ? `<br><small>${esc(k.comentario)}</small>` : ''}`;
+        const blocoEnt = `<h2><span>📅 Entregas combinadas</span></h2>${ent.length ? `<table class="tbl"><tr><th>Para</th><th>Paciente / exame</th></tr>${ent.map(k => { const venc = k.entrega_dia < hojeK, hj = k.entrega_dia === hojeK; return `<tr style="${venc ? 'background:var(--erbg)' : hj ? 'background:var(--wabg)' : ''}"><td style="white-space:nowrap;font-weight:700">${venc ? '⚠ ' : hj ? 'HOJE ' : ''}${sem(k.entrega_dia)} ${dm(k.entrega_dia)}<br><small>${PER[k.entrega_periodo] || ''}${k.entrega_hora ? ' ' + esc(k.entrega_hora) : ''}</small></td><td>${quem(k)}</td></tr>`; }).join('')}</table>` : '<div class="vazio">Nenhuma entrega combinada.</div>'}`;
+        const blocoRec = `<h2><span>⏸ Aguardando reconvocação</span></h2>${rec.length ? `<table class="tbl"><tr><th>Origem</th><th>Paciente / exame</th></tr>${rec.map(k => `<tr><td style="white-space:nowrap;color:var(--mut)">${k.origem === 'pacs' ? 'PACS' : 'manual'}</td><td>${quem(k)}</td></tr>`).join('')}</table>` : '<div class="vazio">Nenhum exame aguardando reconvocação.</div>'}`;
+        tela.innerHTML = `<main>${bloco('US')}${bloco('CT')}${blocoEnt}${blocoRec}<div class="note">Entregas e reconvocações são marcadas no PACS Plus (📝 Laudos pendentes); quem aguarda reconvocação fica fora da conta de vencidos. </div><div class="note">Revisar + Digitado, eletivos (sem urgentes). Prazo: US 3 e TC 5 dias úteis desde o exame (feriados fora). Atualiza a cada 10 min enquanto algum computador estiver com o PACS aberto e logado. Puxe para baixo ou toque na aba de novo para reler.</div></main>`;
         clearTimeout(S.lpT); S.lpT = setTimeout(() => { if (S.tab === 'laudos' && !document.hidden) telaLaudos(); }, 60000);
     } catch (e) { tela.innerHTML = `<main><div class="vazio">Erro: ${esc(e.message)}</div></main>`; }
 }

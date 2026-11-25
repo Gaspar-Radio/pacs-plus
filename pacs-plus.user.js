@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.62.0
+// @version      1.63.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -44,6 +44,8 @@
         ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
+        ['selosQuem', 'Convênio e quem liberou (Gaspar / Tele)', 'Na lista e nos dois históricos de exames: o convênio (onde a coluna não aparece) e, nos exames liberados, o selo “Gaspar” (liberado por você) ou “Tele” (telelaudo). Sem consultas extras ao PACS'],
+        ['classLaudo', 'Classificações na tela do laudo (FIGO / MUSA)', 'Botão 📐 na barra do editor: FIGO dos miomas e MUSA da adenomiose (sinais diretos e indiretos), com desenho e descrição; clicar num item insere o termo no cursor do laudo'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
         ['temaGrafite', 'Tema grafite no laudo', 'Moldura e barra do editor em cinza-escuro, coerentes com o tema escuro do PACS. O “papel” (normal / suave / escuro) troca no botão ◐ da barra única ou em ⚙️ Ajustes. Só a tela: a impressão não muda'],
         ['laudoBotoes', 'Laudo: linha de botões enxuta', 'Oculta Gravar áudio, Ass. Única/Dupla e os botões Assinar, Analisar e Pré-Laudo; alinha Padrão, Anexos, Visualizar, Imprimir e Resultado crítico numa linha só'],
@@ -893,6 +895,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             histAcoes();
             buscaAltura();
             calcLaudoBtn();
+            clsLaudoBtn();
             revBtn();
             zoomLaudoCtl();
             marcarBotoesLaudo();
@@ -3210,8 +3213,11 @@ Regras: aponte só o que está no texto; NÃO invente achados; NUNCA aponte medi
         { ex: /escrot|testic|bolsa/, txt: `Testículo: volume pelo elipsoide 0,52 (ESUR-SPIWG 2024); hipotrofia no adulto: direito < 12 mL, esquerdo < 11 mL. Varicocele: veias > 2 mm com refluxo > 1 s à Valsalva.` },
         { ex: /obst|gesta|morfol/, txt: `Obstetrícia: ILA 5–24 cm; maior bolsão vertical 2–8 cm; colo ≥ 25 mm; gestação inviável: DMSG ≥ 25 mm sem embrião ou CCN ≥ 7 mm sem BCF.` },
         { ex: /punho|cotovel|nervo|carpo|cubital|membro superior/, txt: `Nervos (área em mm²): mediano ≤ 10 mm² (12 se bífido); ulnar no cotovelo ≤ 9 mm². Área com unidade linear ou de volume é erro.` }
+        ,
+        // v1.63.0 — FIGO (miomas) e MUSA (adenomiose): só entram quando CLS_VALIDADO = true (textos em validação pelo usuário)
+        { ex: /pelv|transvag|endovag|ginec|utero/, tipo: 'US', se: () => CLS_VALIDADO, txt: `FIGO miomas (Munro 2011/2018): 0 pediculado intracavitário · 1 submucoso < 50% intramural · 2 submucoso ≥ 50% intramural · 3 intramural em contato com o endométrio · 4 intramural · 5 subseroso ≥ 50% intramural · 6 subseroso < 50% intramural · 7 subseroso pediculado · 8 outros (cervical, parasitário) · híbrido “2-5” (1º número = relação com o endométrio, 2º = com a serosa). Aponte SÓ incoerência entre o tipo FIGO escrito e a localização descrita no próprio laudo (ex.: “submucoso” com FIGO 4–7; “pediculado” com FIGO 4; “sem contato com o endométrio” com FIGO 3). NÃO cobre FIGO que não foi informado. MUSA adenomiose (Harmsen 2022): sinais diretos = cistos miometriais, ilhas hiperecogênicas, linhas/brotos subendometriais ecogênicos; indiretos = útero globoso, espessamento miometrial assimétrico, sombreamento em leque, vascularização translesional, zona juncional irregular ou interrompida. Sem sinal direto os indiretos não são conclusivos: aponte (atenção) conclusão categórica de adenomiose apoiada só em sinais indiretos, ou sem nenhum sinal descrito no corpo; NÃO cobre sinal que não foi descrito.` }
     ];
-    const refsDoExame = c => { const e = norm(c.exame); return REV_REFS.filter(r => r.ex.test(e) && (!r.tipo || r.tipo === c.tipo)).map(r => r.txt).join('\n'); };
+    const refsDoExame = c => { const e = norm(c.exame); return REV_REFS.filter(r => r.ex.test(e) && (!r.tipo || r.tipo === c.tipo) && (!r.se || r.se())).map(r => r.txt).join('\n'); };
     const ehUro = c => /abdom|rins|renal|vias urin|aparelho urin|bexig|prostat|pelv|retroperit|figado|hepat/.test(norm(c.exame));
     // v1.33 — "falsos conhecidos" (guias de lançamento da recepção HAMC/LADI) + como usar o contexto do atendimento.
     // Validado em 26/10/2026: bateria de 24 laudos fictícios × Opus/Grok/Gemini (hoje × só regras × regras+contexto) e
@@ -3949,8 +3955,9 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     function comBotoesLaudo() {
         const crit = caixaCritico(true);
         let b = document.querySelector('.pp-com-btn');
-        if (!crit || !editorLaudo()) { if (b) b.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); const a0 = document.querySelector('.pp-anam-btn'); if (a0) a0.remove(); const r0 = document.querySelector('.pp-rad-btn'); if (r0) r0.remove(); return; }
+        if (!crit || !editorLaudo()) { if (b) b.remove(); const m0 = document.querySelector('.pp-mk-btn'); if (m0) m0.remove(); const c0 = document.querySelector('.pp-cmt-btn'); if (c0) c0.remove(); const a0 = document.querySelector('.pp-anam-btn'); if (a0) a0.remove(); const r0 = document.querySelector('.pp-rad-btn'); if (r0) r0.remove(); return; }
         setCss('pp-com-ico-css', COM_ICON_CSS);
+        try { lpBotaoLaudo(crit); } catch (e) { /* nunca atrapalha os outros botões */ }
         if (!crit.hasAttribute('data-pp-crit')) { crit.setAttribute('data-pp-crit', ''); crit.title = 'Resultado crítico'; }
         const lab = crit.querySelector('.v-label');
         if (lab) {
@@ -4058,6 +4065,73 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         });
     }
     setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
+    // ---------- v1.63.0: convênio + quem liberou (Gaspar / Tele) na lista e nos dois históricos ----------
+    // Usa só o que o PACS já entrega (usu_codigo_radiologista, usu_radiologista, convenio) — nenhuma consulta extra.
+    // "Gaspar" = o radiologista do exame LIBERADO é o usuário logado (usu_codigo do token); qualquer outro = telelaudo
+    // (conferido em 25/11/2026 com paciente TESTE: lista e GET paciente/{id} trazem os dois campos).
+    // Nas células do PACS o rótulo vem por CSS (::after + data-t): assim o selo não entra no textContent da célula,
+    // que a abreviação de exame/convênio regrava.
+    let meuUsuMemo = { tok: null, cod: null };
+    function meuUsuCodigo() {
+        const tok = localStorage.getItem('lwtoken') || '';
+        if (meuUsuMemo.tok === tok) return meuUsuMemo.cod;
+        let cod = null;
+        try { const p = tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); cod = JSON.parse(atob(p + '==='.slice((p.length + 3) % 4))).usu_codigo; } catch (e) { cod = null; }
+        meuUsuMemo = { tok, cod: cod == null || isNaN(Number(cod)) ? null : Number(cod) };
+        return meuUsuMemo.cod;
+    }
+    function quemLiberou(x) {
+        if (!x || String(x.exa_situacao || '').toUpperCase() !== 'LIBERADO') return null;
+        const rad = x.usu_radiologista || null, nome = String((rad && rad.usu_nome) || '').trim();
+        const cod = x.usu_codigo_radiologista != null ? x.usu_codigo_radiologista : (rad && rad.usu_codigo);
+        const meu = meuUsuCodigo();
+        return { k: cod != null && meu != null && Number(cod) === meu ? 'gaspar' : 'tele', nome };
+    }
+    const QUEM_TXT = { gaspar: 'Gaspar', tele: 'Tele' };
+    const quemTitulo = q => q.k === 'gaspar' ? 'Laudo liberado por você' : 'Laudo liberado pela telelaudo' + (q.nome ? ' (' + q.nome + ')' : '');
+    const convCurto = x => { const c = String((x && x.convenio && x.convenio.conv_descricao) || '').trim(); return c ? transformInsuranceText(c) : ''; };
+    // selos numa célula do PACS (lista principal / histórico do laudo)
+    function selosNo(td, x, comConv, inicio) { // inicio: antes do texto (a célula do exame corta o fim com reticências)
+        if (!td) return;
+        const liga = on('selosQuem');
+        const q = liga ? quemLiberou(x) : null, cv = liga && comConv ? convCurto(x) : '';
+        let box = td.querySelector('.pp-selos');
+        if (!q && !cv) { if (box) box.remove(); return; }
+        const sig = (q ? q.k + '|' + q.nome : '') + '§' + cv;
+        if (box && box.dataset.sig === sig) return;
+        if (!box) { box = document.createElement('span'); box.className = 'pp-selos' + (inicio ? ' ini' : ''); if (inicio) td.insertBefore(box, td.firstChild); else td.appendChild(box); }
+        box.dataset.sig = sig;
+        box.innerHTML = (cv ? `<span class="pp-conv" data-t="${esc(cv)}" title="Convênio: ${esc(String(x.convenio.conv_descricao))}"></span>` : '')
+            + (q ? `<span class="pp-quem ${q.k}" data-t="${QUEM_TXT[q.k]}" title="${esc(quemTitulo(q))}"></span>` : '');
+    }
+    function selosLista() {
+        const f = findListTable(), comp = f && componenteLista();
+        if (!f || !comp) return;
+        const iEx = f.names.indexOf('exame'); if (iEx < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        const temConv = f.names.includes('convenio'); // coluna nativa já mostra o convênio
+        linhas.forEach((tr, i) => selosNo(tr.children[iEx], comp.exames[i], !temConv, true));
+    }
+    // histórico de dentro do laudo: selos na célula da Situação da linha
+    function hiSelos(tr, it) {
+        if (!tr || !it) return;
+        const sit = norm(it.exa_situacao);
+        const tds = [...tr.children];
+        const td = tds.find(c => { const t = norm(c.textContent); return !!sit && (t === sit || t.startsWith(sit)); }) || tds.find(c => c.offsetParent && norm(c.textContent)) || null;
+        selosNo(td, it, true);
+    }
+    setInterval(() => { try { if (cfg.master && !ehViewer()) selosLista(); } catch (e) { /* segue */ } }, 1500);
+    setCss('pp-selos-css', `
+.pp-selos { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
+.pp-selos.ini { margin-left: 0; margin-right: 6px; }
+.pp-selos > span::after { content: attr(data-t); }
+.pp-quem, .pp-conv { display: inline-block; font: 700 10px/15px Roboto, Arial, sans-serif; padding: 0 5px; border-radius: 8px; letter-spacing: 0; }
+.pp-quem.gaspar { background: #166534; color: #dcfce7; } .pp-quem.tele { background: #475569; color: #e2e8f0; }
+.pp-conv { background: rgba(127,127,127,.22); color: inherit; font-weight: 600; max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+#pp-hl .hl-conv { color: #cbd5e1; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pp-hl .pp-quem { text-align: center; }`);
+
     // ---------- v1.34: 🕘 histórico do paciente direto da lista (GET /backend/api/paciente/{pac_codigo} → exames) ----------
     // Mesma fonte do "Histórico de exames" do laudo (buscaHistoricoExamesPaciente). Ações chamam os métodos nativos da lista:
     // abrirVisualizador(item,'HISTORICOPACIENTE') e imprimirLaudo(item); 📄 lê o texto (GET exame/{id}); 💬 diálogo nativo.
@@ -4353,11 +4427,13 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         }
         return rows;
     }
-    function lpResumir(rows, m, agora) {
+    function lpResumir(rows, m, agora, fora) { // fora = exames ⏸ aguardando reconvocação (v1.63.0): contados à parte
         const nd = diasPorModalidade(cfg.sla)[m] || (m === 'US' ? 3 : 5), g = {};
+        let aguardando = 0;
         rows.forEach(x => {
             const sit = String(x && x.exa_situacao || '').toUpperCase();
             if (!x || modDe(x) !== m || x.exa_idnurgente || x.exa_idnnecessitalaudo === false || !LP_SIT.includes(sit)) return;
+            if (fora && fora.has(Number(x.exa_codigo))) { aguardando++; return; }
             const v = prazoDiasUteis(x.exa_data, nd, cfg.sla), k = v ? chaveDia(v) : '';
             const d = String(x.exa_data || '').slice(0, 10);
             const e = g[k] || (g[k] = { prazo: k, n: 0, rev: 0, dig: 0, d0: d, d1: d, venc: !!(v && v.getTime() < agora) });
@@ -4366,19 +4442,25 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         });
         const por_dia = Object.values(g).sort((a, b) => a.prazo.localeCompare(b.prazo)), hojeK = chaveDia(new Date(agora));
         return { total: por_dia.reduce((t, e) => t + e.n, 0), vencidos: por_dia.filter(e => e.venc).reduce((t, e) => t + e.n, 0),
-            hoje: por_dia.filter(e => !e.venc && e.prazo === hojeK).reduce((t, e) => t + e.n, 0), por_dia };
+            hoje: por_dia.filter(e => !e.venc && e.prazo === hojeK).reduce((t, e) => t + e.n, 0), por_dia, aguardando };
     }
     async function lpAtualizar(forcar) {
         if (lpRodando || (!forcar && Date.now() - lpEm < LP_CADA)) return lpDados;
         if (!on('laudosPendentes') || ehViewer() || !localStorage.getItem('lwtoken')) return lpDados;
         lpRodando = true;
         try {
-            const agora = Date.now(), res = { em: agora };
-            for (const [m, cod] of Object.entries(LP_MOD)) res[m] = lpResumir(await lpBuscar(cod), m, agora);
+            const agora = Date.now(), res = { em: agora }, brutos = {};
+            await lpmBaixar();
+            for (const [m, cod] of Object.entries(LP_MOD)) brutos[m] = await lpBuscar(cod);
+            lpRows = brutos;
+            try { await lpPausados(brutos.CT || []); } catch (e) { console.warn('[PACS Plus] pendenciados', e); }
+            for (const m of Object.keys(LP_MOD)) { try { await lpmResolver(m, new Set(brutos[m].map(x => Number(x.exa_codigo)))); } catch (e) { /* segue */ } }
+            const fora = lpFora();
+            for (const m of Object.keys(LP_MOD)) res[m] = lpResumir(brutos[m], m, agora, fora);
             lpDados = res; lpEm = agora; lpErro = '';
             lpNuvem(res);
         } catch (e) { lpErro = e.message; lpEm = Date.now() - LP_CADA + 2 * 60000; } // falhou → tenta em 2 min
-        finally { lpRodando = false; lpDock(); if (document.getElementById('pp-lp')) lpPainel(); }
+        finally { lpRodando = false; lpDock(); if (document.getElementById('pp-lp') && !lpTela) lpPainel(); }
         return lpDados;
     }
     let lpErro = '';
@@ -4392,17 +4474,225 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             .then(r => { if (r.ok) { lpNuvemSig = sig; lpNuvemEm = Date.now(); } else console.warn('[PACS Plus] laudos_pendentes HTTP', r.status); })
             .catch(e => console.warn('[PACS Plus] laudos_pendentes', e));
     }
+    // ---------- v1.63.0: marcações dos laudos pendentes — 📅 entrega combinada e ⏸ aguardando reconvocação ----------
+    // Nuvem: tabela laudo_marcacoes (login da Agenda; nome completo por decisão do usuário em 25/11/2026) — vale nos 3 PCs
+    // e aparece no app do iPhone. Sem login na nuvem a marcação fica só neste computador (localStorage) até logar.
+    // ⏸ automático: TC eletivo pendente cujo SLA está PENDENCIADO no PACS (POST exame/sla) — o último comentário do exame
+    // vira o motivo. US não tem SLA no PACS: marca-se à mão. Exame em ⏸ sai da conta de vencidos/por dia.
+    // Marcação some sozinha quando o exame deixa de estar em Revisar/Digitado (liberado).
+    const LPM_KEY = 'pacsplus_lp_marcas_v1';
+    const LPM_TIPO = { entrega: '📅 Entrega combinada', reconvocacao: '⏸ Aguardando reconvocação' };
+    const LPM_PER = { manha: 'manhã', tarde: 'tarde' };
+    let lpMarcas = (() => { try { const v = JSON.parse(localStorage.getItem(LPM_KEY)); return Array.isArray(v) ? v : []; } catch (e) { return []; } })();
+    let lpRows = { US: [], CT: [] }, lpTela = null, lpmNuvemOk = null;
+    const lpComCache = new Map();
+    const lpmSalvarLocal = () => { try { localStorage.setItem(LPM_KEY, JSON.stringify(lpMarcas.slice(0, 300))); } catch (e) { /* ok */ } };
+    const lpmAtivas = tipo => lpMarcas.filter(k => !k.resolvido_em && (!tipo || k.tipo === tipo));
+    const lpmDe = (exa, tipo) => lpMarcas.find(k => Number(k.exa_codigo) === Number(exa) && k.tipo === tipo && !k.resolvido_em) || null;
+    const lpmHdr = (n, extra) => Object.assign({ 'content-type': 'application/json', apikey: n.key, Authorization: 'Bearer ' + n.tok }, extra || {});
+    const lpLinha = exa => { for (const m of Object.keys(LP_MOD)) { const x = (lpRows[m] || []).find(r => Number(r.exa_codigo) === Number(exa)); if (x) return x; } return null; };
+    const lpNomeDe = x => String((x && x.paciente && x.paciente.pac_nome) || '').trim();
+    const lpExameDe = x => abreviarExame(transformExamText(String((x && x.tipoexame && x.tipoexame.tpe_descricao) || '')));
+    function lpmDeLinha(x, tipo) { // registro novo a partir de uma linha da lista
+        return { exa_codigo: Number(x.exa_codigo), tipo, modalidade: modDe(x) === 'CT' ? 'CT' : 'US', paciente: lpNomeDe(x).slice(0, 160), exame: lpExameDe(x).slice(0, 200),
+            data_exame: String(x.exa_data || '').slice(0, 10) || null, situacao: String(x.exa_situacao || '').toUpperCase().slice(0, 20),
+            entrega_dia: null, entrega_periodo: null, entrega_hora: null, comentario: null, origem: 'manual', resolvido_em: null };
+    }
+    async function lpmBaixar() {
+        const n = sessaoNuvemPlus(); if (!n) { lpmNuvemOk = false; return false; }
+        try {
+            const r = await fetch(n.url + '/rest/v1/laudo_marcacoes?resolvido_em=is.null&select=*', { headers: lpmHdr(n) });
+            if (!r.ok) { lpmNuvemOk = false; return false; }
+            const d = await r.json(); if (!Array.isArray(d)) return false;
+            // o que foi marcado sem nuvem (pendente de envio) sobe agora
+            const pend = lpMarcas.filter(k => k.__local && !k.resolvido_em && !d.some(y => Number(y.exa_codigo) === Number(k.exa_codigo) && y.tipo === k.tipo));
+            lpMarcas = d.concat(pend); lpmSalvarLocal(); lpmNuvemOk = true;
+            for (const k of pend) await lpmGravar(k);
+            return true;
+        } catch (e) { lpmNuvemOk = false; return false; }
+    }
+    async function lpmGravar(k) {
+        const reg = Object.assign({}, k, { updated_at: new Date().toISOString() }); delete reg.__local; delete reg.created_at;
+        const i = lpMarcas.findIndex(y => Number(y.exa_codigo) === Number(reg.exa_codigo) && y.tipo === reg.tipo);
+        const n = sessaoNuvemPlus();
+        let onde = 'local';
+        if (n) {
+            try {
+                const r = await fetch(n.url + '/rest/v1/laudo_marcacoes?on_conflict=exa_codigo,tipo', { method: 'POST', headers: lpmHdr(n, { Prefer: 'resolution=merge-duplicates,return=minimal' }), body: JSON.stringify([reg]) });
+                onde = r.ok ? 'nuvem' : 'erro';
+                if (!r.ok) console.warn('[PACS Plus] laudo_marcacoes HTTP', r.status);
+            } catch (e) { onde = 'erro'; }
+        }
+        const loc = Object.assign({}, reg); if (onde !== 'nuvem') loc.__local = true;
+        if (i >= 0) lpMarcas[i] = loc; else lpMarcas.push(loc);
+        lpmSalvarLocal();
+        return onde;
+    }
+    async function lpmApagar(exa, tipo) {
+        lpMarcas = lpMarcas.filter(k => !(Number(k.exa_codigo) === Number(exa) && k.tipo === tipo)); lpmSalvarLocal();
+        const n = sessaoNuvemPlus(); if (!n) return;
+        try { await fetch(n.url + `/rest/v1/laudo_marcacoes?exa_codigo=eq.${Number(exa)}&tipo=eq.${encodeURIComponent(tipo)}`, { method: 'DELETE', headers: lpmHdr(n) }); } catch (e) { /* tenta de novo na próxima limpeza */ }
+    }
+    // exame que saiu de Revisar/Digitado (liberado) → marcação resolvida. Só depois de 15 min da marcação (evita corrida com a lista).
+    async function lpmResolver(m, vivos) {
+        const idos = lpMarcas.filter(k => k.modalidade === m && !k.resolvido_em && !vivos.has(Number(k.exa_codigo)) && Date.now() - new Date(k.updated_at || 0).getTime() > 15 * 60000);
+        if (!idos.length) return;
+        const cods = [...new Set(idos.map(k => Number(k.exa_codigo)))];
+        lpMarcas = lpMarcas.filter(k => !(k.modalidade === m && cods.includes(Number(k.exa_codigo)))); lpmSalvarLocal();
+        const n = sessaoNuvemPlus(); if (!n) return;
+        try { await fetch(n.url + `/rest/v1/laudo_marcacoes?exa_codigo=in.(${cods.join(',')})&resolvido_em=is.null`, { method: 'PATCH', headers: lpmHdr(n, { Prefer: 'return=minimal' }), body: JSON.stringify({ resolvido_em: new Date().toISOString() }) }); } catch (e) { /* ok */ }
+    }
+    async function lpUltimoComentario(exa, chave) {
+        const c = lpComCache.get(exa); if (c && c.chave === chave) return c.txt;
+        let txt = '';
+        try {
+            const d = await pacsGet('exame/' + exa + '/comentario');
+            const rs = (Array.isArray(d) ? d : (d && d.rows) || []).filter(y => String(y.acao_comentario || '').trim());
+            const pend = rs.filter(y => /PENDENC/i.test(String(y.acao_tipo || '')));
+            const u = (pend.length ? pend : rs).pop();
+            if (u) txt = String(u.acao_comentario).replace(/\s+/g, ' ').trim().slice(0, 300);
+        } catch (e) { /* sem comentário */ }
+        lpComCache.set(exa, { chave, txt });
+        return txt;
+    }
+    // TC eletivo pendente com o SLA PENDENCIADO → marcação automática (origem 'pacs'); saiu da pendência → some
+    async function lpPausados(rows) {
+        const tok = localStorage.getItem('lwtoken');
+        const alvo = rows.filter(x => x && !x.exa_idnurgente && x.exa_idnnecessitalaudo !== false && LP_SIT.includes(String(x.exa_situacao || '').toUpperCase()));
+        const agora = new Set();
+        if (alvo.length && tok) {
+            const rs = await fetch('/backend/api/exame/sla', { method: 'POST', headers: { 'x-access-token': tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ exames: alvo }) });
+            if (!rs.ok) return; // sem resposta do SLA: não mexe nas marcações automáticas
+            const mp = new Map(((await rs.json()) || []).map(y => [Number(y.exa_codigo), y.sla]));
+            for (const x of alvo) {
+                const s = mp.get(Number(x.exa_codigo));
+                if (!s || !Array.isArray(s.slas) || !s.slas.length || s.ultimoacao_tipo !== 'PENDENCIADO') continue;
+                agora.add(Number(x.exa_codigo));
+                const txt = await lpUltimoComentario(Number(x.exa_codigo), String(s.ultimoacao_created || ''));
+                const ja = lpmDe(x.exa_codigo, 'reconvocacao');
+                if (ja && ja.origem === 'manual') continue; // a marcação feita à mão manda
+                const com = txt || 'Pendenciado no PACS (sem comentário no exame)';
+                if (ja && ja.comentario === com) continue;
+                await lpmGravar(Object.assign(lpmDeLinha(x, 'reconvocacao'), { origem: 'pacs', comentario: com }));
+            }
+        }
+        for (const k of lpMarcas.filter(y => y.origem === 'pacs' && y.tipo === 'reconvocacao' && y.modalidade === 'CT' && !y.resolvido_em && !agora.has(Number(y.exa_codigo)))) await lpmApagar(k.exa_codigo, k.tipo);
+    }
+    const lpFora = () => new Set(lpmAtivas('reconvocacao').map(k => Number(k.exa_codigo)));
+    // 📅 de hoje ou atrasadas (para o selo na barra)
+    const lpEntregasHoje = () => { const h = chaveDia(new Date()); return lpmAtivas('entrega').filter(k => k.entrega_dia && k.entrega_dia <= h).length; };
+    function lpSecMarcas() {
+        const hoje = chaveDia(new Date());
+        const quem = k => { const x = lpLinha(k.exa_codigo); return { nome: lpNomeDe(x) || k.paciente || '(sem nome)', ex: (x && lpExameDe(x)) || k.exame || '', sit: String((x && x.exa_situacao) || k.situacao || '').toUpperCase() }; };
+        const acoes = k => `<span class="mk-a"><button class="lp-b" data-mk="ir" data-exa="${k.exa_codigo}" title="Filtrar a lista neste paciente">›</button><button class="lp-b" data-mk="com" data-exa="${k.exa_codigo}" title="Comentários do exame no PACS">💬</button><button class="lp-b" data-mk="edit" data-exa="${k.exa_codigo}" data-tipo="${k.tipo}" title="Editar">✎</button><button class="lp-b" data-mk="del" data-exa="${k.exa_codigo}" data-tipo="${k.tipo}" title="${k.origem === 'pacs' ? 'Vem do PACS (pendenciado): some sozinho quando sair da pendência' : 'Remover a marcação'}"${k.origem === 'pacs' ? ' disabled' : ''}>✕</button></span>`;
+        const sub = (k, q) => `<small>${LP_NOME[k.modalidade] || ''} · exame ${lpDM(k.data_exame)}${q.sit ? ' · ' + esc(q.sit.charAt(0) + q.sit.slice(1).toLowerCase()) : ''}${k.__local ? ' · <span class="a">só neste computador</span>' : ''}</small>`;
+        const ent = lpmAtivas('entrega').slice().sort((a, b) => String(a.entrega_dia + (a.entrega_periodo === 'tarde' ? 'b' : 'a') + (a.entrega_hora || '')).localeCompare(String(b.entrega_dia + (b.entrega_periodo === 'tarde' ? 'b' : 'a') + (b.entrega_hora || ''))));
+        const rec = lpmAtivas('reconvocacao').slice().sort((a, b) => String(a.data_exame).localeCompare(String(b.data_exame)));
+        const lEnt = ent.map(k => { const q = quem(k), venc = k.entrega_dia < hoje, hj = k.entrega_dia === hoje;
+            return `<div class="lp-mk${venc ? ' venc' : hj ? ' hoje' : ''}"><span class="mk-q">${venc ? '⚠ ' : ''}${lpSem(k.entrega_dia)} ${lpDM(k.entrega_dia)} · ${LPM_PER[k.entrega_periodo] || ''}${k.entrega_hora ? ' ' + esc(k.entrega_hora) : ''}</span><span class="mk-p"><b>${esc(q.nome)}</b> — ${esc(q.ex)} ${sub(k, q)}${k.comentario ? `<i>${esc(k.comentario)}</i>` : ''}</span>${acoes(k)}</div>`; }).join('');
+        const lRec = rec.map(k => { const q = quem(k);
+            return `<div class="lp-mk rec"><span class="mk-q">${k.origem === 'pacs' ? '<span class="mk-o" title="Detectado sozinho: o prazo do exame está pendenciado no PACS">PACS</span>' : '<span class="mk-o m" title="Marcado à mão">manual</span>'}</span><span class="mk-p"><b>${esc(q.nome)}</b> — ${esc(q.ex)} ${sub(k, q)}${k.comentario ? `<i>${esc(k.comentario)}</i>` : ''}</span>${acoes(k)}</div>`; }).join('');
+        return `<div class="lp-sec"><h4>📅 Entregas combinadas <span>${ent.length || 'nenhuma'}</span><button class="lp-f" data-mk="novo" title="Escolher um exame pendente e marcar entrega combinada ou aguardando reconvocação">＋ Marcar exame</button></h4>${lEnt || '<div class="lp-msg">Marque aqui o digitado que tem dia e período combinados com o paciente.</div>'}</div>
+<div class="lp-sec"><h4>⏸ Aguardando reconvocação <span>${rec.length || 'nenhum'}${rec.length ? ' · fora da conta de vencidos' : ''}</span></h4>${lRec || '<div class="lp-msg">TC pendenciada no PACS aparece aqui sozinha, com o seu comentário do exame.</div>'}</div>`;
+    }
+    function lpTelaHtml() {
+        if (lpTela.t === 'pick') {
+            return `<div class="lp-sec"><h4>＋ Marcar exame <span>Revisar e Digitado · US e TC</span><button class="lp-b" data-mk="cancelar">Voltar</button></h4><input id="lp-q" class="lp-in" placeholder="Nome do paciente ou exame…" autocomplete="off" value="${esc(lpTela.q || '')}"><div id="lp-pick">${lpPickLista(lpTela.q || '')}</div></div>`;
+        }
+        const k = lpTela.reg, ent = k.tipo === 'entrega';
+        return `<div class="lp-sec lp-form"><h4>${esc(k.paciente || '(sem nome)')} <span>${esc(k.exame || '')} · ${LP_NOME[k.modalidade] || ''} · exame ${lpDM(k.data_exame)}</span></h4>
+<div class="lf-l"><label><input type="radio" name="lf-t" value="entrega"${ent ? ' checked' : ''}> 📅 Entrega combinada</label><label><input type="radio" name="lf-t" value="reconvocacao"${ent ? '' : ' checked'}> ⏸ Aguardando reconvocação</label></div>
+<div class="lf-l lf-ent"${ent ? '' : ' style="display:none"'}>Dia <input type="date" id="lf-dia" class="lp-in" value="${esc(k.entrega_dia || '')}"> Período <select id="lf-per" class="lp-in"><option value="">—</option><option value="manha"${k.entrega_periodo === 'manha' ? ' selected' : ''}>manhã</option><option value="tarde"${k.entrega_periodo === 'tarde' ? ' selected' : ''}>tarde</option></select> Horário <input type="time" id="lf-hora" class="lp-in" value="${esc(k.entrega_hora || '')}"> <small>(opcional)</small></div>
+<textarea id="lf-com" class="lp-in" maxlength="300" rows="2" placeholder="${ent ? 'Comentário (opcional) — ex.: paciente pediu para adiantar' : 'Motivo — ex.: aguardando reconvocação do paciente'}">${esc(k.comentario || '')}</textarea>
+<label class="lf-l"><input type="checkbox" id="lf-pacs"> também registrar nos Comentários do exame no PACS</label>
+<div class="lf-l"><button class="lp-f" data-mk="salvar">Salvar</button><button class="lp-b" data-mk="cancelar">Cancelar</button><span class="lf-msg a"></span></div></div>`;
+    }
+    function lpPickLista(q) {
+        const nq = norm(q), todos = [];
+        Object.keys(LP_MOD).forEach(m => (lpRows[m] || []).forEach(x => { if (x && LP_SIT.includes(String(x.exa_situacao || '').toUpperCase()) && x.exa_idnnecessitalaudo !== false) todos.push(x); }));
+        const ord = todos.filter(x => !nq || norm(lpNomeDe(x) + ' ' + lpExameDe(x)).includes(nq))
+            .sort((a, b) => (String(a.exa_situacao).toUpperCase() === 'DIGITADO' ? 0 : 1) - (String(b.exa_situacao).toUpperCase() === 'DIGITADO' ? 0 : 1) || String(a.exa_data).localeCompare(String(b.exa_data)));
+        if (!todos.length) return '<div class="lp-msg">Lista ainda não carregada — toque em 🔄.</div>';
+        if (!ord.length) return '<div class="lp-msg">Nenhum exame pendente com esse nome.</div>';
+        return ord.slice(0, 14).map(x => { const sit = String(x.exa_situacao || '').toUpperCase(), e = lpmDe(x.exa_codigo, 'entrega'), r = lpmDe(x.exa_codigo, 'reconvocacao');
+            return `<div class="lp-mk pk"><span class="mk-p"><b>${esc(lpNomeDe(x))}</b> — ${esc(lpExameDe(x))} <small>${LP_NOME[modDe(x)] || ''} · exame ${lpDM(x.exa_data)} · ${sit === 'DIGITADO' ? '<span class="a">Digitado</span>' : 'Revisar'}</small></span><span class="mk-a"><button class="lp-f${e ? ' lp-dig' : ''}" data-mk="pick" data-exa="${x.exa_codigo}" data-tipo="entrega" title="Entrega combinada (dia e período)">📅${e ? '✓' : ''}</button><button class="lp-f lp-old" data-mk="pick" data-exa="${x.exa_codigo}" data-tipo="reconvocacao" title="Aguardando reconvocação">⏸${r ? '✓' : ''}</button></span></div>`; }).join('') + (ord.length > 14 ? `<div class="lp-msg">+${ord.length - 14} — digite o nome para achar.</div>` : '');
+    }
+    function lpAbrirForm(exa, tipo, base) {
+        const x = lpLinha(exa), ja = lpmDe(exa, tipo);
+        const reg = ja ? Object.assign({}, ja) : x ? lpmDeLinha(x, tipo) : base ? Object.assign({ entrega_dia: null, entrega_periodo: null, entrega_hora: null, comentario: null, origem: 'manual', resolvido_em: null }, base, { tipo }) : null;
+        if (!reg) { alertaCurto('Exame fora da lista de pendentes — toque em 🔄 e tente de novo.'); return; }
+        lpTela = { t: 'form', reg, novo: !ja };
+        lpPainel();
+    }
+    async function lpSalvarForm(p) {
+        const k = Object.assign({}, lpTela.reg), msg = p.querySelector('.lf-msg');
+        k.tipo = (p.querySelector('input[name="lf-t"]:checked') || {}).value === 'reconvocacao' ? 'reconvocacao' : 'entrega';
+        k.comentario = String(p.querySelector('#lf-com').value || '').replace(/\s+/g, ' ').trim().slice(0, 300) || null;
+        if (k.tipo === 'entrega') {
+            k.entrega_dia = p.querySelector('#lf-dia').value || null; k.entrega_periodo = p.querySelector('#lf-per').value || null;
+            const h = p.querySelector('#lf-hora').value || ''; k.entrega_hora = /^\d{2}:\d{2}/.test(h) ? h.slice(0, 5) : null;
+            if (!k.entrega_dia || !k.entrega_periodo) { msg.textContent = 'Informe o dia e o período (manhã ou tarde).'; return; }
+        } else { k.entrega_dia = null; k.entrega_periodo = null; k.entrega_hora = null; if (!k.comentario) k.comentario = 'Aguardando reconvocação do paciente'; }
+        k.origem = 'manual'; k.resolvido_em = null;
+        const x = lpLinha(k.exa_codigo); if (x) k.situacao = String(x.exa_situacao || '').toUpperCase().slice(0, 20);
+        msg.textContent = 'Salvando…';
+        if (lpTela.reg.tipo !== k.tipo && !lpTela.novo) await lpmApagar(k.exa_codigo, lpTela.reg.tipo); // trocou o tipo ao editar
+        const onde = await lpmGravar(k);
+        if (p.querySelector('#lf-pacs').checked) {
+            const txt = k.tipo === 'entrega' ? `[PACS Plus] Entrega combinada: ${lpSem(k.entrega_dia)} ${lpDM(k.entrega_dia)}, ${LPM_PER[k.entrega_periodo]}${k.entrega_hora ? ' ' + k.entrega_hora : ''}${k.comentario ? ' — ' + k.comentario : ''}` : `[PACS Plus] Aguardando reconvocação: ${k.comentario}`;
+            try {
+                const r = await fetch('/backend/api/exame/comentario', { method: 'POST', headers: { 'x-access-token': localStorage.getItem('lwtoken') || '', 'Content-Type': 'application/json' }, body: JSON.stringify({ exa_codigo: Number(k.exa_codigo), acao_tipo: 'COMENTARIO', acao_comentario: txt }) });
+                if (!r.ok) alertaCurto('Marcação salva, mas o PACS não aceitou o comentário (HTTP ' + r.status + ').');
+            } catch (e) { alertaCurto('Marcação salva, mas o comentário no PACS falhou.'); }
+        }
+        lpTela = null;
+        if (onde !== 'nuvem') alertaCurto(onde === 'local' ? 'Salvo só neste computador — entre na Agenda (⚙️ API → 🔐 Login) para valer nos outros e no app.' : 'Salvo neste computador; a nuvem não respondeu — tento de novo sozinho.');
+        lpRecontar(); lpDock(); if (document.getElementById('pp-lp')) lpPainel();
+    }
+    // refaz os números com as linhas já em memória (depois de marcar/desmarcar ⏸), sem ir ao PACS
+    function lpRecontar() {
+        if (!lpDados) return;
+        const fora = lpFora();
+        Object.keys(LP_MOD).forEach(m => { if (lpRows[m]) lpDados[m] = lpResumir(lpRows[m], m, Date.now(), fora); });
+        lpNuvem(lpDados);
+    }
+    function lpMarcaClique(b, p) {
+        const a = b.dataset.mk, exa = Number(b.dataset.exa), tipo = b.dataset.tipo;
+        if (a === 'novo') { lpTela = { t: 'pick', q: '' }; lpPainel(); const q = p.querySelector('#lp-q'); if (q) q.focus(); }
+        else if (a === 'cancelar') { lpTela = null; lpPainel(); }
+        else if (a === 'pick' || a === 'edit') lpAbrirForm(exa, tipo);
+        else if (a === 'salvar') lpSalvarForm(p);
+        else if (a === 'del') { if (confirm('Remover esta marcação?')) lpmApagar(exa, tipo).then(() => { lpRecontar(); lpDock(); if (document.getElementById('pp-lp')) lpPainel(); }); }
+        else if (a === 'com') { try { document.querySelector('#app').__vue__.$store.dispatch('editarComentarioExame/abrirEditarComentarioExame', { item: { exa_codigo: exa }, callBackClose: () => { lpComCache.delete(exa); } }); } catch (e) { alertaCurto('Abra a página Exames para ver os comentários.'); } }
+        else if (a === 'ir') { const k = lpMarcas.find(y => Number(y.exa_codigo) === exa), x = lpLinha(exa); const d = String((x && x.exa_data) || (k && k.data_exame) || '').slice(0, 10), m = (x && modDe(x)) || (k && k.modalidade); if (d && m) lpFiltrar(m, d, d, '', lpNomeDe(x) || (k && k.paciente) || ''); }
+    }
+    // botão na barra do laudo: marcar o exame aberto
+    function lpBotaoLaudo(crit) {
+        let b = document.querySelector('.pp-mk-btn');
+        if (!crit || !on('laudosPendentes')) { if (b) b.remove(); return; }
+        if (b && b.nextElementSibling === crit) return;
+        if (b) b.remove();
+        b = comIcone('pp-mk-btn', 'mdi-calendar-clock', '#c4b5fd', 'Marcar este exame: 📅 entrega combinada (dia e período) ou ⏸ aguardando reconvocação — aparece em 📝 Laudos pendentes e no app', () => {
+            const v2 = laudoComp(), e = v2 && v2.exame; if (!e) return;
+            const base = lpmDeLinha(e, 'entrega');
+            if (!document.getElementById('pp-lp')) lpPainel();
+            lpAbrirForm(e.exa_codigo, lpmDe(e.exa_codigo, 'reconvocacao') && !lpmDe(e.exa_codigo, 'entrega') ? 'reconvocacao' : 'entrega', base);
+        });
+        crit.before(b);
+    }
+
     function lpDock() {
         const d = document.getElementById('pp-dock');
         let c = document.getElementById('ppd-laudos');
         if (!d || !on('laudosPendentes')) { if (c) c.remove(); const p = document.getElementById('pp-lp'); if (p && !on('laudosPendentes')) p.remove(); return; }
         if (!c) {
             c = document.createElement('button'); c.type = 'button'; c.id = 'ppd-laudos'; c.className = 'ppd-laudos';
-            c.addEventListener('click', e => { e.stopPropagation(); const p = document.getElementById('pp-lp'); if (p) { p.remove(); return; } lpPainel(); if (Date.now() - lpEm > 2 * 60000) lpAtualizar(true); });
+            c.addEventListener('click', e => { e.stopPropagation(); const p = document.getElementById('pp-lp'); if (p) { p.remove(); return; } lpTela = null; lpPainel(); if (Date.now() - lpEm > 2 * 60000) lpAtualizar(true); });
             const z = document.getElementById('ppd-zlista'); if (z && z.parentElement === d) d.insertBefore(c, z); else d.appendChild(c);
         } else if (c.parentElement !== d) d.appendChild(c);
         const parte = m => { const x = lpDados && lpDados[m]; if (!x) return `${LP_NOME[m]} <b>…</b>`; return `<span class="lp-m${x.vencidos ? ' venc' : x.hoje ? ' hoje' : ''}">${LP_NOME[m]} <b>${x.total}</b>${x.vencidos ? `<i>⚠${x.vencidos}</i>` : x.hoje ? `<i class="h">hoje ${x.hoje}</i>` : ''}</span>`; };
-        const html = `📝 ${parte('US')}<span class="lp-s">·</span>${parte('CT')}`;
+        const nEnt = lpEntregasHoje(), nRec = lpmAtivas('reconvocacao').length;
+        const html = `📝 ${parte('US')}<span class="lp-s">·</span>${parte('CT')}${nEnt ? `<i class="h" title="Entregas combinadas para hoje ou atrasadas">📅${nEnt}</i>` : ''}${nRec ? `<i class="p" title="Aguardando reconvocação (fora da conta de vencidos)">⏸${nRec}</i>` : ''}`;
         if (c.innerHTML !== html) c.innerHTML = html;
         const tit = lpErro ? 'Laudos pendentes — ⚠ ' + lpErro : `Laudos pendentes (Revisar + Digitado, eletivos) — atualizado ${lpDados ? hm(lpDados.em) : '…'} · clique para ver por dia e filtrar`;
         if (c.title !== tit) c.title = tit;
@@ -4411,33 +4701,36 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         let p = document.getElementById('pp-lp');
         if (!p) {
             p = document.createElement('div'); p.id = 'pp-lp'; document.body.appendChild(p);
-            const c = document.getElementById('ppd-laudos'); if (c) { const r = c.getBoundingClientRect(); p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 470)) + 'px'; }
+            const c = document.getElementById('ppd-laudos'); if (c) { const r = c.getBoundingClientRect(); p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 550)) + 'px'; }
             p.addEventListener('click', lpClique);
+            p.addEventListener('input', ev => { if (ev.target && ev.target.id === 'lp-q' && lpTela && lpTela.t === 'pick') { lpTela.q = ev.target.value; const d = p.querySelector('#lp-pick'); if (d) d.innerHTML = lpPickLista(lpTela.q); } });
+            p.addEventListener('change', ev => { if (ev.target && ev.target.name === 'lf-t') { const d = p.querySelector('.lf-ent'); if (d) d.style.display = ev.target.value === 'entrega' ? '' : 'none'; const c = p.querySelector('#lf-com'); if (c) c.placeholder = ev.target.value === 'entrega' ? 'Comentário (opcional) — ex.: paciente pediu para adiantar' : 'Motivo — ex.: aguardando reconvocação do paciente'; } });
         }
         const sec = m => {
             const x = lpDados && lpDados[m];
             if (!x) return `<div class="lp-sec"><h4>${LP_NOME[m]}</h4><div class="lp-msg">${lpRodando ? '⏳ contando…' : '—'}</div></div>`;
             const linhas = x.por_dia.map(e => `<div class="lp-l${e.venc ? ' venc' : e.prazo === chaveDia(new Date()) ? ' hoje' : ''}"><span class="lp-p">${e.venc ? '⚠ venceu' : 'vence'} ${lpSem(e.prazo)} ${lpDM(e.prazo)}</span><span class="lp-n"><b>${e.n}</b> ${e.n === 1 ? 'laudo' : 'laudos'}${e.dig ? ` <small>(${e.dig} dig.)</small>` : ''}</span><span class="lp-d">exames ${lpDM(e.d0)}${e.d1 !== e.d0 ? '–' + lpDM(e.d1) : ''}</span><button class="lp-f" data-m="${m}" data-d0="${e.d0}" data-d1="${e.d1}" title="Filtrar a lista: ${LP_NOME[m]}, Revisar/Digitado, exames de ${lpDM(e.d0)}${e.d1 !== e.d0 ? ' a ' + lpDM(e.d1) : ''}">Filtrar ›</button></div>`).join('');
             const cd = x.por_dia.filter(e => e.dig), nd = cd.reduce((t, e) => t + e.dig, 0), dd0 = cd.map(e => e.d0).sort()[0] || '', dd1 = cd.map(e => e.d1).sort().pop() || '';
-            return `<div class="lp-sec"><h4>${LP_NOME[m]} <span>${x.total} pendente(s) <small>(${x.total - nd} revisar · ${nd} digitado${nd === 1 ? '' : 's'})</small>${x.vencidos ? ` · <b class="r">${x.vencidos} vencido(s)</b>` : ''}${x.hoje ? ` · <b class="a">${x.hoje} vence(m) hoje</b>` : ''}</span>${x.por_dia.length ? `<button class="lp-f lp-old" data-m="${m}" data-d0="${x.por_dia[0].d0}" data-d1="${x.por_dia[0].d1}">⏪ Mais atrasados</button>` : ''}${nd ? `<button class="lp-f lp-dig" data-m="${m}" data-sit="DIGITADO" data-d0="${dd0}" data-d1="${dd1}" title="Abre a lista só com os exames em Digitado desta modalidade, de todos os dias">✍ Só digitados (${nd})</button>` : ''}</h4>${linhas || '<div class="lp-msg">Nenhum laudo pendente ✓</div>'}</div>`;
+            return `<div class="lp-sec"><h4>${LP_NOME[m]} <span>${x.total} pendente(s) <small>(${x.total - nd} revisar · ${nd} digitado${nd === 1 ? '' : 's'})</small>${x.vencidos ? ` · <b class="r">${x.vencidos} vencido(s)</b>` : ''}${x.hoje ? ` · <b class="a">${x.hoje} vence(m) hoje</b>` : ''}${x.aguardando ? ` · ⏸ ${x.aguardando} aguardando` : ''}</span>${x.por_dia.length ? `<button class="lp-f lp-old" data-m="${m}" data-d0="${x.por_dia[0].d0}" data-d1="${x.por_dia[0].d1}">⏪ Mais atrasados</button>` : ''}${nd ? `<button class="lp-f lp-dig" data-m="${m}" data-sit="DIGITADO" data-d0="${dd0}" data-d1="${dd1}" title="Abre a lista só com os exames em Digitado desta modalidade, de todos os dias">✍ Só digitados (${nd})</button>` : ''}</h4>${linhas || '<div class="lp-msg">Nenhum laudo pendente ✓</div>'}</div>`;
         };
-        p.innerHTML = `<div class="lp-top"><b>📝 Laudos pendentes</b><span class="lp-at">${lpErro ? '⚠ ' + esc(lpErro) : lpDados ? 'atualizado ' + hm(lpDados.em) : ''}</span><button class="lp-b" data-a="atual" title="Contar de novo agora">🔄</button>${lpFiltroAntes ? '<button class="lp-b" data-a="volta" title="Voltar ao filtro que estava antes">↺ Filtro anterior</button>' : ''}<button class="lp-x" data-a="fechar">✕</button></div>${sec('US')}${sec('CT')}<div class="lp-rod">Revisar + Digitado · eletivos · prazo US ${diasPorModalidade(cfg.sla).US || 3} / TC ${diasPorModalidade(cfg.sla).CT || 5} dias úteis</div>`;
+        p.innerHTML = `<div class="lp-top"><b>📝 Laudos pendentes</b><span class="lp-at">${lpErro ? '⚠ ' + esc(lpErro) : lpDados ? 'atualizado ' + hm(lpDados.em) : ''}</span><button class="lp-b" data-a="atual" title="Contar de novo agora">🔄</button>${lpFiltroAntes ? '<button class="lp-b" data-a="volta" title="Voltar ao filtro que estava antes">↺ Filtro anterior</button>' : ''}<button class="lp-x" data-a="fechar">✕</button></div>${lpTela ? lpTelaHtml() : sec('US') + sec('CT') + lpSecMarcas()}<div class="lp-rod">Revisar + Digitado · eletivos · prazo US ${diasPorModalidade(cfg.sla).US || 3} / TC ${diasPorModalidade(cfg.sla).CT || 5} dias úteis</div>`;
     }
     function lpClique(ev) {
         const b = ev.target.closest('button'); if (!b) return;
         ev.stopPropagation();
-        if (b.dataset.a === 'fechar') { document.getElementById('pp-lp').remove(); return; }
+        if (b.dataset.mk) { lpMarcaClique(b, document.getElementById('pp-lp')); return; }
+        if (b.dataset.a === 'fechar') { lpTela = null; document.getElementById('pp-lp').remove(); return; }
         if (b.dataset.a === 'atual') { lpAtualizar(true); lpPainel(); return; }
         if (b.dataset.a === 'volta') { lpVoltarFiltro(); return; }
         if (b.dataset.m) lpFiltrar(b.dataset.m, b.dataset.d0, b.dataset.d1, b.dataset.sit || '');
     }
-    function lpFiltrar(m, d0, d1, sit) {
+    function lpFiltrar(m, d0, d1, sit, nome) {
         const comp = componenteLista();
         if (!comp || !comp.filtro) { alertaCurto('Abra a página Exames para filtrar.'); return; }
         if (!lpFiltroAntes) lpFiltroAntes = JSON.parse(JSON.stringify(comp.filtro));
         const f = comp.filtro, set = (k, v) => (comp.$set ? comp.$set(f, k, v) : (f[k] = v));
         set('exa_situacao', sit ? [sit] : LP_SIT.slice()); set('mod_codigo', [LP_MOD[m]]); flSit = new Set(); flEx = new Set(); set('data_codigo', 1); set('data_inicial', d0); set('data_final', d1);
-        set('exa_idnurgente', []); set('pac_nome', ''); set('pac_pacs_codigo', '');
+        set('exa_idnurgente', []); set('pac_nome', nome || ''); set('pac_pacs_codigo', '');
         if ('page' in comp) comp.page = 1;
         // se a modalidade estiver oculta pelo 👁 da barra, mostra de novo (senão a lista filtrada ficaria vazia)
         try { const o = cfg.ocultarLista; if (o && ((o.mods && o.mods.includes(m)) || o.rev)) { o.mods = (o.mods || []).filter(x => x !== m); o.rev = false; saveCfg(); ocultarLinhasLista(); } } catch (e) { /* ok */ }
@@ -4459,8 +4752,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     setCss('pp-lp-css', `
 #pp-dock .ppd-laudos { height: 28px; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 6px; background: #2c3036; color: #e3e6ea; border: 1px solid #3a3f46; border-bottom: 2px solid #f59e0b; cursor: pointer; font: 600 12px -apple-system,"Segoe UI",Roboto,sans-serif; white-space: nowrap; }
 #pp-dock .ppd-laudos:hover { background: #363b42; } #pp-dock .ppd-laudos b { color: #fff; } #pp-dock .ppd-laudos .lp-s { color: #6b7280; }
-#pp-dock .ppd-laudos i { font-style: normal; margin-left: 3px; padding: 0 4px; border-radius: 8px; background: #dc2626; color: #fff; font-size: 11px; } #pp-dock .ppd-laudos i.h { background: #d97706; }
-#pp-lp { position: fixed; top: 38px; left: 300px; z-index: 2147483000; width: 460px; max-height: calc(100vh - 60px); overflow: auto; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
+#pp-dock .ppd-laudos i { font-style: normal; margin-left: 3px; padding: 0 4px; border-radius: 8px; background: #dc2626; color: #fff; font-size: 11px; } #pp-dock .ppd-laudos i.h { background: #d97706; } #pp-dock .ppd-laudos i.p { background: #475569; }
+#pp-lp { position: fixed; top: 38px; left: 300px; z-index: 2147483000; width: 540px; max-height: calc(100vh - 60px); overflow: auto; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
 #pp-lp .lp-top { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #3f3f46; position: sticky; top: 0; background: #1e1e1e; }
 #pp-lp .lp-at { flex: 1; color: #9ca3af; font-size: 11.5px; } #pp-lp .lp-b { background: #2c3036; border: 1px solid #3a3f46; color: #e5e7eb; border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
 #pp-lp .lp-x { background: none; border: 0; color: #9ca3af; font-size: 17px; cursor: pointer; }
@@ -4471,7 +4764,134 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 #pp-lp .lp-d { color: #9ca3af; font-size: 11.5px; } #pp-lp .lp-n small { color: #9ca3af; }
 #pp-lp .lp-f { background: #1d4ed8; color: #fff; border: 0; border-radius: 12px; padding: 2px 9px; cursor: pointer; font-size: 11.5px; font-weight: 700; } #pp-lp .lp-f:hover { background: #2563eb; }
 #pp-lp .lp-old { background: #b45309; } #pp-lp .lp-dig { background: #6d28d9; margin-left: 4px; } #pp-lp .lp-msg { color: #9ca3af; padding: 4px 6px; } #pp-lp .lp-rod { color: #6b7280; font-size: 11px; padding: 6px 10px; }
+#pp-lp .lp-mk { display: grid; grid-template-columns: 118px 1fr auto; align-items: start; gap: 6px; padding: 4px 6px; border-radius: 6px; } #pp-lp .lp-mk:nth-child(odd) { background: #242424; }
+#pp-lp .lp-mk.rec { grid-template-columns: 52px 1fr auto; } #pp-lp .lp-mk.pk { grid-template-columns: 1fr auto; }
+#pp-lp .lp-mk.venc { background: rgba(220,38,38,.18); } #pp-lp .lp-mk.venc .mk-q { color: #fca5a5; font-weight: 700; } #pp-lp .lp-mk.hoje .mk-q { color: #fbbf24; font-weight: 700; }
+#pp-lp .mk-p small { color: #9ca3af; } #pp-lp .mk-p i { display: block; font-style: normal; color: #c4b5fd; font-size: 12px; } #pp-lp .mk-a { display: flex; gap: 3px; } #pp-lp .mk-a .lp-b { padding: 1px 6px; } #pp-lp .mk-a .lp-b[disabled] { opacity: .35; cursor: default; }
+#pp-lp .mk-o { font: 700 10px/15px Roboto, Arial, sans-serif; padding: 0 5px; border-radius: 8px; background: #1e40af; color: #dbeafe; } #pp-lp .mk-o.m { background: #475569; color: #e2e8f0; }
+#pp-lp .lp-in { background: #111827; color: #e5e7eb; border: 1px solid #3a3f46; border-radius: 6px; padding: 3px 6px; font: 13px Roboto, Arial, sans-serif; color-scheme: dark; } #pp-lp #lp-q, #pp-lp #lf-com { width: 100%; box-sizing: border-box; margin: 2px 0 6px; }
+#pp-lp .lf-l { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 5px 0; } #pp-lp .lf-l label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; } #pp-lp .lp-form .lp-f { padding: 4px 14px; font-size: 12.5px; }
 .pp-lp-aviso { position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 2147483001; background: #1f2937; color: #fff; padding: 8px 14px; border-radius: 8px; font: 13px Roboto, Arial, sans-serif; }`);
+    // ---------- v1.63.0: 📐 Classificações na tela do laudo — FIGO (miomas) e MUSA (adenomiose) ----------
+    // Botão 📐 na barra do editor (em destaque nos transvaginais/pélvicos). Painel com desenho esquemático próprio + texto;
+    // clicar num item insere o termo no cursor do laudo. Fontes: FIGO — Munro et al., Int J Gynaecol Obstet 2011 e revisão 2018
+    // (doi:10.1002/ijgo.12666); MUSA — Harmsen et al., Ultrasound Obstet Gynecol 2022;60:118 (doi:10.1002/uog.24786), definições
+    // revisadas e separação em sinais diretos/indiretos (conferido no texto integral em 25/11/2026).
+    // CLS_VALIDADO: os textos estão em validação pelo usuário; só com true eles entram nas referências do revisor (REV_REFS).
+    const CLS_VALIDADO = false;
+    const FIGO_TIPOS = [
+        ['0', 'Pediculado intracavitário'],
+        ['1', 'Submucoso, < 50% intramural'],
+        ['2', 'Submucoso, ≥ 50% intramural'],
+        ['3', 'Intramural em contato com o endométrio (100% intramural)'],
+        ['4', 'Intramural'],
+        ['5', 'Subseroso, ≥ 50% intramural'],
+        ['6', 'Subseroso, < 50% intramural'],
+        ['7', 'Subseroso pediculado'],
+        ['8', 'Outros (especificar: cervical, parasitário)'],
+        ['2-5', 'Híbrido: submucoso e subseroso, cada parte com menos da metade do diâmetro nas cavidades endometrial e peritoneal']
+    ];
+    const MUSA_SINAIS = [
+        ['d', 'cistos', 'Cistos miometriais', 'Espaços císticos arredondados ou ovais, de qualquer tamanho, no miométrio.'],
+        ['d', 'ilhas', 'Ilhas hiperecogênicas', 'Áreas hiperecogênicas no miométrio, sem conexão com o endométrio (sem distância nem número mínimos); regulares, irregulares ou mal definidas.'],
+        ['d', 'linhas', 'Linhas e brotos subendometriais ecogênicos', 'Linhas hiperecogênicas (quase) perpendiculares à cavidade, em continuidade com o endométrio, ou brotos, interrompendo a zona juncional.'],
+        ['i', 'globoso', 'Útero globoso', 'A serosa diverge do colo em pelo menos duas direções, em vez de seguir paralela ao endométrio; diâmetros do corpo aproximadamente iguais (forma esférica).'],
+        ['i', 'assim', 'Espessamento miometrial assimétrico', 'Regra prática: diferença > 5 mm entre as paredes anterior e posterior, ou razão entre elas bem acima ou bem abaixo de 1.'],
+        ['i', 'leque', 'Sombreamento em leque', 'Estrias hipoecogênicas atrás da lesão miometrial, às vezes alternadas com estrias hiperecogênicas (leve, moderado ou acentuado); avaliar em escala de cinza, sem Doppler.'],
+        ['i', 'vasc', 'Vascularização translesional', 'Vasos perpendiculares à cavidade/serosa atravessando a lesão (ao Doppler); nos miomas o padrão habitual é circunferencial.'],
+        ['i', 'zjirr', 'Zona juncional irregular', 'Irregular por áreas císticas, pontos hiperecogênicos, brotos e linhas. A medida da espessura da zona juncional não tem papel na prática clínica.'],
+        ['i', 'zjint', 'Zona juncional interrompida', 'Parte da zona juncional não é visualizada em nenhum plano (2D ou 3D).']
+    ];
+    const clsMio = (n, cx, cy, r, extra) => `${extra || ''}<circle cx="${cx}" cy="${cy}" r="${r}" fill="#2563eb" stroke="#fff" stroke-width="1.5"/><text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="${n.length > 1 ? 12 : 11}" font-weight="700" fill="#fff">${n}</text>`;
+    const FIGO_SVG = `<svg viewBox="0 -40 320 335" xmlns="http://www.w3.org/2000/svg" class="cls-svg" role="img" aria-label="Esquema do útero em corte coronal com a posição de cada tipo FIGO de mioma">
+<path d="M160 25C230 25 270 70 270 120C270 170 215 205 190 235L190 285L130 285L130 235C105 205 50 170 50 120C50 70 90 25 160 25Z" fill="#c98793" stroke="#8a4b57" stroke-width="2"/>
+<path d="M95 95Q160 84 225 95L166 215L166 285L154 285L154 215Z" fill="#4a1d29" stroke="#f0cfd5" stroke-width="2"/>
+${clsMio('2-5', 77, 108, 30)}${clsMio('5', 86, 60, 13)}${clsMio('6', 250, 54, 13)}
+${clsMio('7', 205, -12, 12, '<path d="M201 -1L192 28" stroke="#2563eb" stroke-width="4"/>')}
+${clsMio('0', 160, 126, 13, '<path d="M160 92L160 114" stroke="#2563eb" stroke-width="4"/>')}
+${clsMio('1', 127, 146, 12)}${clsMio('2', 213, 135, 13)}${clsMio('3', 198, 174, 11)}${clsMio('4', 98, 170, 11)}${clsMio('8', 178, 262, 9)}
+<text x="160" y="-28" text-anchor="middle" font-size="10" fill="#9ca3af">serosa (fora) · miométrio (rosa) · cavidade (escuro)</text></svg>`;
+    function clsMini(k) {
+        const corpo = 'M40 12C60 12 72 22 76 30L96 31L96 39L76 40C72 50 60 58 40 58C20 58 8 48 8 35C8 22 20 12 40 12Z';
+        const glob = 'M40 5C62 5 78 19 78 35C78 51 62 65 40 65C20 65 6 51 6 35C6 19 20 5 40 5ZM77 30L96 31L96 39L77 40Z';
+        const sy = k === 'assim' ? 24 : 35;
+        const faixa = `<path d="M22 ${sy}Q45 ${sy - 6} 92 35Q45 ${sy + 6} 22 ${sy}Z" fill="#dbe7f5" stroke="#2b3340" stroke-width="1"/>`;
+        const X = {
+            cistos: '<circle cx="34" cy="23" r="2.8" fill="#111"/><circle cx="43" cy="19" r="1.9" fill="#111"/><circle cx="49" cy="24" r="2.3" fill="#111"/><circle cx="40" cy="26" r="1.6" fill="#111"/>',
+            ilhas: '<ellipse cx="35" cy="48" rx="4.2" ry="2.6" fill="#fff"/><circle cx="46" cy="50" r="2.3" fill="#fff"/><path d="M52 45q5-2 6 2q-4 3-6-2z" fill="#fff"/>',
+            linhas: '<path d="M33 31L32 23M40 30L40 21M47 30L48 22" stroke="#fff" stroke-width="1.7"/><circle cx="40" cy="20" r="1.9" fill="#fff"/><circle cx="32" cy="22" r="1.5" fill="#fff"/>',
+            globoso: '',
+            assim: '<path d="M44 13L44 19M41 13L47 13M41 19L47 19" stroke="#16a34a" stroke-width="2"/><path d="M44 30L44 57M41 30L47 30M41 57L47 57" stroke="#16a34a" stroke-width="2"/>',
+            leque: '<path d="M32 40L26 55M38 41L35 57M44 41L44 57M50 41L53 57M56 40L62 54" stroke="#2a2d33" stroke-width="2.2"/>',
+            vasc: '<path d="M34 39q3 4 0 8t0 8M41 40q3 4 0 8t0 9M48 39q3 4 0 8t0 8" stroke="#dc2626" fill="none" stroke-width="1.8"/>',
+            zjirr: '<path d="M20 35l5-6 4 3 5-6 4 4 6-5 5 4 6-3 6 3 8-1 10 2 9 5-9 4-10 1-8 0-6 4-6-3-5 4-6-4-4 4-5-4-4 3z" fill="none" stroke="#111" stroke-width="1.7"/>',
+            zjint: '<path d="M20 35Q36 26 50 27" fill="none" stroke="#111" stroke-width="2.2"/><path d="M68 30Q82 31 94 35" fill="none" stroke="#111" stroke-width="2.2"/><path d="M20 35Q45 45 94 35" fill="none" stroke="#111" stroke-width="2.2"/><path d="M53 22L53 30M65 23L65 31" stroke="#dc2626" stroke-width="1.4"/>'
+        };
+        return `<svg viewBox="0 0 100 70" xmlns="http://www.w3.org/2000/svg" class="cls-mini" aria-hidden="true"><path d="${k === 'globoso' ? glob : corpo}" fill="#8b8f98" stroke="#5b5f68" stroke-width="1.5"/>${faixa}${X[k] || ''}</svg>`;
+    }
+    let clsAba = 'figo';
+    function clsPainel(abrir) {
+        let p = document.getElementById('pp-cls');
+        if (abrir === false) { if (p) p.remove(); return; }
+        if (!p) {
+            p = document.createElement('div'); p.id = 'pp-cls'; document.body.appendChild(p);
+            p.addEventListener('mousedown', e => { if (!e.target.closest('.cls-corpo')) e.preventDefault(); }); // não tira o cursor do laudo
+            p.addEventListener('click', e => {
+                e.stopPropagation();
+                const b = e.target.closest('[data-cls]'); if (!b) return;
+                const a = b.dataset.cls;
+                if (a === 'x') { p.remove(); return; }
+                if (a === 'aba') { clsAba = b.dataset.v; clsPainel(true); return; }
+                if (a === 'ins') { if (!inserirNoLaudo(b.dataset.t)) alertaCurto('Clique no texto do laudo (onde quer inserir) e tente de novo.'); }
+            });
+        }
+        const tb = document.querySelector('.document-editor__toolbar');
+        if (tb) p.style.top = Math.round(Math.max(48, Math.min(tb.getBoundingClientRect().bottom + 8, window.innerHeight - 360))) + 'px';
+        const figo = `<div class="cls-fig">${FIGO_SVG}</div><div class="cls-lst">${FIGO_TIPOS.map(([n, d]) => `<div class="cls-it"><button class="cls-n" data-cls="ins" data-t="FIGO ${n}" title="Inserir “FIGO ${n}” no cursor do laudo">${n}</button><span>${esc(d)}</span><button class="cls-mais" data-cls="ins" data-t="FIGO ${n} (${esc(d.replace(/^Híbrido: /, 'híbrido: ').replace(/^[A-ZÍ]/, c => c.toLowerCase()))})" title="Inserir com a descrição">＋ descrição</button></div>`).join('')}</div>
+<div class="cls-nota">Híbrido: o 1º número é a relação com o endométrio e o 2º com a serosa. Na revisão de 2018 o tipo 3 passou a ser agrupado com os submucosos (em contato com o endométrio).<br>Fonte: FIGO — Munro et al., 2011; revisão 2018.</div>`;
+        const grupo = (g, tit, sub) => `<div class="cls-g ${g}"><b>${tit}</b><small>${sub}</small></div>` + MUSA_SINAIS.filter(s => s[0] === g).map(([, k, n, d]) => `<div class="cls-it musa"><button class="cls-ico" data-cls="ins" data-t="${esc(n.charAt(0).toLowerCase() + n.slice(1))}" title="Inserir “${esc(n.toLowerCase())}” no cursor do laudo">${clsMini(k)}</button><span><b>${esc(n)}</b><i>${esc(d)}</i></span></div>`).join('');
+        const musa = `${grupo('d', 'Sinais diretos', 'típicos de adenomiose')}${grupo('i', 'Sinais indiretos', 'consequência do endométrio ectópico no miométrio')}
+<div class="cls-nota">Sem nenhum sinal direto, os indiretos não são conclusivos para adenomiose.<br>Fonte: MUSA — Van den Bosch et al., 2015; definições revisadas por Harmsen et al., 2022.</div>`;
+        p.innerHTML = `<div class="cls-top"><b>📐 Classificações</b><button data-cls="aba" data-v="figo" class="${clsAba === 'figo' ? 'on' : ''}">FIGO · miomas</button><button data-cls="aba" data-v="musa" class="${clsAba === 'musa' ? 'on' : ''}">MUSA · adenomiose</button><span></span><button class="cls-x" data-cls="x" title="Fechar (Esc)">✕</button></div>
+${CLS_VALIDADO ? '' : '<div class="cls-val">Textos em validação — confira com a fonte antes de adotar como padrão.</div>'}<div class="cls-corpo">${clsAba === 'figo' ? figo : musa}</div>`;
+    }
+    function clsLaudoBtn() {
+        const tb = document.querySelector('.document-editor__toolbar');
+        let b = document.querySelector('.document-editor__toolbar > .pp-cls-laudo');
+        if (!tb || !on('classLaudo')) { if (b) b.remove(); if (!tb) clsPainel(false); return; }
+        let gine = false;
+        try { const v = laudoComp(), e = v && v.exame; gine = /transvag|endovag|pelv|utero|ginec/.test(norm((e && e.tipoexame && e.tipoexame.tpe_descricao) || '')); } catch (e) { gine = false; }
+        if (b) { if (b.classList.contains('dest') !== gine) b.classList.toggle('dest', gine); return; }
+        b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'v-btn v-btn--text theme--dark v-size--small pp-cls-laudo' + (gine ? ' dest' : '');
+        b.innerHTML = '<span class="v-btn__content">📐</span>';
+        b.title = 'Classificações: FIGO (miomas) e MUSA (adenomiose) — clique num item para inserir no cursor do laudo';
+        b.addEventListener('mousedown', e => e.preventDefault());
+        b.onclick = e => { e.stopPropagation(); if (document.getElementById('pp-cls')) clsPainel(false); else clsPainel(true); };
+        const calc = tb.querySelector(':scope > .pp-calc-laudo');
+        const ref = [...tb.querySelectorAll(':scope > .v-btn')].filter(x => /^(frase|matriz|formatacao)/.test(norm(x.innerText)));
+        const ancora = calc || ref[ref.length - 1];
+        if (ancora && ancora.nextSibling) tb.insertBefore(b, ancora.nextSibling); else if (ancora) tb.appendChild(b); else tb.insertBefore(b, tb.firstChild);
+    }
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && document.getElementById('pp-cls')) clsPainel(false); });
+    setCss('pp-cls-css', `
+.document-editor__toolbar > .pp-cls-laudo.dest { box-shadow: inset 0 -2px 0 #a78bfa; }
+#pp-cls { position: fixed; right: 16px; top: 96px; z-index: 2147483000; width: 440px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
+#pp-cls .cls-top { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid #3f3f46; } #pp-cls .cls-top span { flex: 1; }
+#pp-cls .cls-top button { background: #2c3036; border: 1px solid #3a3f46; color: #e5e7eb; border-radius: 12px; padding: 2px 10px; cursor: pointer; font: 600 12px Roboto, Arial, sans-serif; }
+#pp-cls .cls-top button.on { background: #6d28d9; border-color: #a78bfa; color: #fff; } #pp-cls .cls-top .cls-x { background: none; border: 0; color: #9ca3af; font-size: 17px; padding: 0 4px; }
+#pp-cls .cls-val { background: #422006; color: #fde68a; font-size: 11.5px; padding: 3px 10px; }
+#pp-cls .cls-corpo { overflow: auto; padding: 8px 10px 10px; }
+#pp-cls .cls-fig { display: flex; justify-content: center; } #pp-cls .cls-svg { width: 250px; height: auto; }
+#pp-cls .cls-it { display: grid; grid-template-columns: 38px 1fr auto; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 6px; } #pp-cls .cls-it:nth-child(odd) { background: #242424; }
+#pp-cls .cls-n { background: #2563eb; color: #fff; border: 0; border-radius: 12px; font: 700 12.5px Roboto, Arial, sans-serif; padding: 3px 0; cursor: pointer; } #pp-cls .cls-n:hover { background: #1d4ed8; }
+#pp-cls .cls-mais { background: none; border: 1px solid #3a3f46; color: #9ca3af; border-radius: 10px; font-size: 11px; padding: 1px 7px; cursor: pointer; white-space: nowrap; } #pp-cls .cls-mais:hover { color: #fff; border-color: #a78bfa; }
+#pp-cls .cls-it.musa { grid-template-columns: 78px 1fr; align-items: start; } #pp-cls .cls-it.musa span b { display: block; } #pp-cls .cls-it.musa span i { display: block; font-style: normal; color: #b6bcc6; font-size: 12px; }
+#pp-cls .cls-ico { background: #2c3036; border: 1px solid #3a3f46; border-radius: 8px; padding: 2px; cursor: pointer; line-height: 0; } #pp-cls .cls-ico:hover { border-color: #a78bfa; } #pp-cls .cls-mini { width: 70px; height: 49px; }
+#pp-cls .cls-g { margin: 8px 0 3px; padding: 2px 6px; border-left: 3px solid #22c55e; } #pp-cls .cls-g.i { border-color: #f59e0b; } #pp-cls .cls-g small { color: #9ca3af; margin-left: 8px; }
+#pp-cls .cls-nota { color: #9ca3af; font-size: 11.5px; margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }`);
+
     async function sitTrocar(comp, exa, sit) {
         if (!SIT_TROCA.includes(sit)) throw new Error('situação inválida');
         if (comp.dialogLaudo && comp.exame && comp.exame.exa_codigo === exa) throw new Error('o laudo deste exame está aberto');
@@ -4499,12 +4919,12 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 .pp-hl-ico { position: relative; overflow: visible !important; }
 .pp-hl-ico .pp-hl-n { position: absolute; top: -8px; right: -9px; z-index: 2; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #4caf50; color: #fff; font: 700 11px/18px Roboto,-apple-system,"Segoe UI",sans-serif; font-style: normal; text-align: center; pointer-events: none; box-shadow: 0 0 0 1.5px rgba(0,0,0,.25); }
 .pp-hl-ico .pp-hl-n.muitos { background: #2e7d32; }
-#pp-hl { position: fixed; z-index: 2147483000; top: 90px; right: 24px; width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 110px); display: flex; flex-direction: column; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
+#pp-hl { position: fixed; z-index: 2147483000; top: 90px; right: 24px; width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 110px); display: flex; flex-direction: column; background: #1e1e1e; color: #e5e7eb; border: 1px solid #3f3f46; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.55); font: 13px/1.35 Roboto, Arial, sans-serif; }
 #pp-hl .hl-top { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #3f3f46; }
 #pp-hl .hl-top b { font-size: 14px; } #pp-hl .hl-top .hl-sub { color: #9ca3af; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #pp-hl .hl-x { background: none; border: 0; color: #9ca3af; font-size: 18px; cursor: pointer; }
 #pp-hl .hl-lista { overflow: auto; padding: 4px 0; }
-#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 128px 84px 200px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
+#pp-hl .hl-l { display: grid; grid-template-columns: 1fr 34px 88px 122px 80px 50px 200px; align-items: center; gap: 6px; padding: 4px 12px; border-bottom: 1px solid #2a2a2a; }
 #pp-hl .hl-l.atual { background: rgba(167,139,250,.10); }
 #pp-hl .hl-ex { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } #pp-hl .hl-mod { color: #9ca3af; font-weight: 700; font-size: 12px; }
 #pp-hl .hl-sit { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; text-align: center; background: #3f3f46; } #pp-hl .hl-sit.LIBERADO { background: #2e7d32; color: #fff; }
@@ -4613,6 +5033,7 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             if (esconder) { if (!p.tr.hasAttribute('data-pp-hf')) p.tr.setAttribute('data-pp-hf', ''); } else { vis++; if (p.tr.hasAttribute('data-pp-hf')) p.tr.removeAttribute('data-pp-hf'); }
             const eye = p.tr.querySelector('.mdi-eye'), olho = eye && (eye.closest('button') || eye);
             if (olho && p.i >= 0) serSelo(olho, exs, p.i);
+            if (p.it) hiSelos(p.tr, p.it);
         });
         // barra de filtros logo acima da tabela
         const tipos = HL_MODS.filter(([g]) => cont[g]);
@@ -4663,8 +5084,10 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
             return `<div class="hl-l${x.exa_codigo === exaAtual ? ' atual' : ''}" data-i="${i}">
 <span class="hl-ex" title="${esc((x.tipoexame && x.tipoexame.tpe_descricao) || '')}">${esc(abreviarExame(transformExamText((x.tipoexame && x.tipoexame.tpe_descricao) || '—')))}${x.exa_codigo === exaAtual ? ' <small style="color:#a78bfa">(este)</small>' : ''}</span>
 <span class="hl-mod">${esc((x.tipoexame && x.tipoexame.modalidade && x.tipoexame.modalidade.mod_sigla) || '')}</span>
+<span class="hl-conv" title="${esc(String((x.convenio && x.convenio.conv_descricao) || ''))}">${on('selosQuem') ? esc(convCurto(x)) : ''}</span>
 <span>${dataBR(x.exa_data)} ${esc(String(x.exa_hora || '').slice(0, 5))}</span>
 <span class="hl-sit ${sit}">${esc(sit.charAt(0) + sit.slice(1).toLowerCase())}</span>
+${(() => { const q = on('selosQuem') ? quemLiberou(x) : null; return q ? `<span class="pp-quem ${q.k}" title="${esc(quemTitulo(q))}">${QUEM_TXT[q.k]}</span>` : '<span></span>'; })()}
 <span class="hl-ac"><i class="v-icon notranslate mdi mdi-eye ${img ? '' : 'off'}" data-a="img" title="${img ? 'Abrir imagens (visualizador)' : 'Exame ainda sem imagens'}" style="color:${img ? 'orange' : 'gray'}"></i>${rad ? `<i class="v-icon notranslate mdi mdi-open-in-new ${img ? '' : 'off'}" data-a="rad" title="${img ? 'Abrir este exame no RadiAnt' : 'Exame ainda sem imagens'}" style="color:${img ? '#64b5f6' : 'gray'}"></i>` : ''}${lib ? '<i class="v-icon notranslate mdi mdi-printer" data-a="imp" title="Imprimir / ver o PDF do laudo" style="color:#22c55e"></i><i class="v-icon notranslate mdi mdi-text-box-outline" data-a="ler" title="Ler o texto do laudo aqui" style="color:#60a5fa"></i>' : ''}<i class="v-icon notranslate mdi mdi-file-document" data-a="anam" title="Anamnese" style="color:#808080"></i><i class="v-icon notranslate mdi mdi-paperclip" data-a="anx" title="Anexos (só leitura)" style="color:#9ca3af"></i><i class="v-icon notranslate mdi mdi-chat" data-a="com" title="Comentários" style="color:#9ca3af"></i></span></div>`;
         }).join('');
         lista.onclick = async ev => {
@@ -6584,6 +7007,6 @@ ${BLOCKS.map(([k, n, d]) => `<label class="pp-tog"><input type="checkbox" data-b
         setInterval(checar, 6 * 3600000);
     })('PACS Plus', 'https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/pacs-plus.user.js');
 
-    if (window.__PP_TEST__) window.__PP_TEST__.api = { tgEnviar, tgServidor, chegMsg, chegProcessar, chegPrimeiro, flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
+    if (window.__PP_TEST__) window.__PP_TEST__.api = { quemLiberou, selosLista, clsPainel, lpSecMarcas, lpPickLista, lpmDeLinha, lpAbrirForm, lpTelaHtml, refsDoExame, meuUsuCodigo, lpTesteSet: (r, k, t) => { if (r) lpRows = r; if (k) lpMarcas = k; if (t !== undefined) lpTela = t; }, tgEnviar, tgServidor, chegMsg, chegProcessar, chegPrimeiro, flClassificar, flCabecalho, flMenu, flLimpar, flPagina, ocultarLinhasLista, lpPainel, lpResumir, flGet: () => ({ ex: flEx, sit: flSit, stat: flStat, pac: flPac }), flSet: (e, t) => { flEx = new Set(e || []); flSit = new Set(t || []); }, revJev, triagemAcesa, revisar, hiAtualizar, hiPares, hiSerPedir, hlSerPedir, hlPintarSeries, hlAplicarFiltro, refsServico, MOT_CAT, serIconesLista, serBuscar, serPedirGrupo, hlAbrir, histAcoes, pintarHistAcoes, hlPintarContagens, ppBalaoNum, radiantPronto, regrasLaudo, juntarAchados, chegCiclo, chegEstado, chegHist, chegJanelas, proximaJanela, iniciais, usCurto, chegTestePaciente, urgCiclo, urgProcessar, urgTick, urgEstado, urgSalvar, urgBanner, urgMsg, aplicarPrazosLista, naEscalaData, tcEhMeu, urgLer, get cfg() { return cfg; }, saveCfg, loadCfg: () => recarregarCfg(),
         comBotoesLaudo, revCarbon, serLer, serVelho, serVis, serMem, revGemini, revArgon, rodarMaster, geminiNome, renderRevisao, hashTxt, revVigiar, conferenciaRapida, agendarConferencia, aplicarTrocas, achadoResolvido, conferirAplicadas, pendencias, achadosAtuais, chaveAchado, pedidoOpus, corrigirIA, enviarPedido, pedirCorrecao, revFable, cronometroLeve, slaFaixa, get revAtual() { return revAtual; }, set revAtual(v) { revAtual = v; } };
 })();
