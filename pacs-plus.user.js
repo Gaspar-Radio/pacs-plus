@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.60.0
+// @version      1.61.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1302,6 +1302,32 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const ntfyToken = () => { try { const t = String(localStorage.getItem(NTFY_TOKEN_KEY) || '').trim(); return ntfyTokenOk(t) ? t : ''; } catch (e) { return ''; } };
     function ntfyTokenSalvar(v) { try { const t = String(v || '').trim(); if (!t) localStorage.removeItem(NTFY_TOKEN_KEY); else if (ntfyTokenOk(t)) localStorage.setItem(NTFY_TOKEN_KEY, t); } catch (e) { /* ok */ } }
     let ntfyTokenRecusado = false;
+    // v1.61.0 — o token também fica na nuvem (Supabase, tabela plus_config, só com login): cola uma vez em um computador
+    // e os outros pegam sozinhos (ao abrir o PACS e a cada 30 min). Sem login na nuvem, vale só o deste computador.
+    async function ntfyTokenNuvemSalvar(tk) {
+        const n = sessaoNuvemPlus();
+        if (!n) return 'sem login';
+        const h = { apikey: n.key, Authorization: 'Bearer ' + n.tok, 'content-type': 'application/json' };
+        try {
+            const r = tk
+                ? await fetch(n.url + '/rest/v1/plus_config?on_conflict=chave', { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates,return=minimal' }, h), body: JSON.stringify({ chave: 'ntfy_token', valor: tk, updated_at: new Date().toISOString() }) })
+                : await fetch(n.url + '/rest/v1/plus_config?chave=eq.ntfy_token', { method: 'DELETE', headers: h });
+            return r.ok ? 'ok' : 'HTTP ' + r.status;
+        } catch (e) { return 'falha de rede'; }
+    }
+    async function ntfyTokenNuvemBaixar() {
+        const n = sessaoNuvemPlus();
+        if (!n) return;
+        try {
+            const r = await fetch(n.url + '/rest/v1/plus_config?chave=eq.ntfy_token&select=valor', { headers: { apikey: n.key, Authorization: 'Bearer ' + n.tok } });
+            if (!r.ok) return;
+            const d = await r.json().catch(() => []);
+            const v = Array.isArray(d) && d[0] ? String(d[0].valor || '').trim() : '';
+            if (v && ntfyTokenOk(v) && v !== ntfyToken()) { ntfyTokenSalvar(v); ntfyTokenRecusado = false; console.info('[PACS Plus] token do ntfy atualizado pela nuvem'); }
+        } catch (e) { /* sem rede: fica o local */ }
+    }
+    setTimeout(() => { ntfyTokenNuvemBaixar(); }, 8000);
+    setInterval(() => { ntfyTokenNuvemBaixar(); }, 30 * 60000);
     // fetch para o ntfy com o token (só no servidor oficial ntfy.sh); se o token for recusado (401/403), repete sem ele e avisa uma vez
     async function ntfyFetch(url, opt) {
         const tok = ntfyToken();
@@ -6215,7 +6241,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
 <div class="pp-checks" style="margin-top:16px;"><span class="pp-muted" title="Pedido do usuário: nunca tocar som (computador e celular)">🔇 Sem som (sempre)</span><input type="checkbox" id="pp-u-som" hidden><label><input type="checkbox" id="pp-u-notif" ${u.notifWindows ? 'checked' : ''}>Notificação do sistema</label></div></div>
 <div class="pp-h">Celular — app ntfy (grátis, Android e iPhone)</div>
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-u-topico" value="${esc(u.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-u-serv" value="${esc(u.ntfyServidor)}"></label></div>
-<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-u-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Com o token, a cota diária grátis conta na sua conta, não na internet do hospital. Fica só neste computador.</span></div>
+<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-u-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Cole uma vez em qualquer computador: fica guardado na nuvem (com login) e os outros pegam sozinhos. A cota grátis passa a contar na sua conta, não na internet do hospital.</span></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-u-gerar">Gerar</button> <button class="pp-btn sec" id="pp-u-copiar">Copiar</button></span></div>
 <div class="pp-h">Telegram (opcional)</div>
 <label class="pp-tog"><input type="checkbox" id="pp-u-tgserv" ${u.tgServidor ? 'checked' : ''}><span>Enviar pelo servidor (bot “PACS LADI Avisos”)<small>Recomendado: a chave do bot fica só na nuvem e nada precisa ser preenchido abaixo. Exige o login da nuvem (📅 Agenda → ⚙️ API → 🔐 Login). Sempre sem som.</small></span></label>
@@ -6266,7 +6292,7 @@ ${u.celular ? `<div class="pp-res" style="margin-top:0;">${urgPapel === 'lider' 
                 tgServidor: $('#pp-u-tgserv').checked,
                 poUser: $('#pp-u-pouser').value.trim(), poToken: $('#pp-u-potok').value.trim(), poEmergencia: $('#pp-u-poemerg').checked
             };
-            { const tk = $('#pp-u-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; } }
+            { const tk = $('#pp-u-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else if (tk !== ntfyToken() || tk) { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; ntfyTokenNuvemSalvar(tk).then(x => { if (x !== 'ok') alert('Token do ntfy salvo SÓ neste computador (nuvem: ' + x + '). Para valer nos outros, entre na nuvem: 📅 Agenda → ⚙️ API → 🔐 Login, e salve de novo.'); }); } }
             if (n.celular && !n.ntfyTopico) n.ntfyTopico = urgGerarTopico();
             // desligou o envio ou trocou de tópico: cancela os vigias do tópico antigo (senão chegaria "monitor parou")
             if (antes.celular && antes.ntfyTopico && (!n.celular || n.ntfyTopico !== antes.ntfyTopico)) {
@@ -6338,7 +6364,7 @@ ${linhaPer('manha')}${linhaPer('tarde')}</div>
 <div class="pp-grid2"><label>Pausar até (férias/folga)<input type="date" id="pp-c-pausa" value="${esc(c.pausaAte)}"></label><span></span></div>
 <div class="pp-h">Celular — app ntfy (tópico próprio, separado do de TC urgente)</div>
 <div class="pp-grid2"><label>Tópico (funciona como senha)<input id="pp-c-topico" value="${esc(c.ntfyTopico)}" placeholder="clique em Gerar"></label><label>Servidor<input id="pp-c-serv" value="${esc(chegNtfyUrl(c.ntfyServidor))}"></label></div>
-<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-c-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Com o token, a cota diária grátis conta na sua conta, não na internet do hospital. Fica só neste computador.</span></div>
+<div class="pp-grid2"><label>Token da conta ntfy (opcional — o mesmo nas abas 🚨 e 🩺)<input id="pp-c-ntfytok" type="password" autocomplete="off" value="${esc(ntfyToken())}" placeholder="tk_… (ntfy.sh/account → Access tokens)"></label><span class="pp-muted" style="align-self:end;">Cole uma vez em qualquer computador: fica guardado na nuvem (com login) e os outros pegam sozinhos. A cota grátis passa a contar na sua conta, não na internet do hospital.</span></div>
 <div class="pp-row"><span class="pp-muted">No celular: app <b>ntfy</b> → <b>+</b> → cole o tópico → Inscrever.</span><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-gerar">Gerar</button> <button class="pp-btn sec" id="pp-c-copiar">Copiar</button></span></div>
 <div class="pp-row" style="margin-top:8px;"><span style="white-space:nowrap;"><button class="pp-btn sec" id="pp-c-perm">Permitir notificações</button> <button class="pp-btn sec" id="pp-c-testar">Enviar teste</button> <button class="pp-btn sec" id="pp-c-tpac">Testar com paciente TESTE</button></span><button class="pp-btn" id="pp-c-salvar">Salvar</button></div>
 <div class="pp-res" id="pp-c-res" style="display:none;"></div>
@@ -6367,7 +6393,7 @@ ${dias.length ? `<div class="pp-muted" style="margin-top:4px;">${dias.slice(0, 2
                 pausaAte: $('#pp-c-pausa').value || '',
                 ntfyTopico: $('#pp-c-topico').value.trim(), ntfyServidor: chegNtfyUrl($('#pp-c-serv').value)
             };
-            { const tk = $('#pp-c-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; } }
+            { const tk = $('#pp-c-ntfytok').value.trim(); if (tk && !ntfyTokenOk(tk)) { alert('Token do ntfy inválido: ele começa com tk_ (copie de ntfy.sh/account → Access tokens). O resto foi salvo; o token não.'); } else if (tk !== ntfyToken() || tk) { ntfyTokenSalvar(tk); ntfyTokenRecusado = false; ntfyTokenNuvemSalvar(tk).then(x => { if (x !== 'ok') alert('Token do ntfy salvo SÓ neste computador (nuvem: ' + x + '). Para valer nos outros, entre na nuvem: 📅 Agenda → ⚙️ API → 🔐 Login, e salve de novo.'); }); } }
             if (n.ligado && !n.ntfyTopico) n.ntfyTopico = chegGerarTopico();
             // regras mudaram: cancela o vigia agendado (é reagendado pelo ciclo)
             const e2 = chegEstado();
