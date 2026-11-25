@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.61.0
+// @version      1.61.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1330,10 +1330,16 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     setInterval(() => { ntfyTokenNuvemBaixar(); }, 30 * 60000);
     // fetch para o ntfy com o token (só no servidor oficial ntfy.sh); se o token for recusado (401/403), repete sem ele e avisa uma vez
     async function ntfyFetch(url, opt) {
+        // v1.61.1: o token vai no parâmetro "auth" da URL (formato aceito pelo ntfy), e NÃO no cabeçalho Authorization:
+        // o ntfy responde "Access-Control-Allow-Headers: *", e o Chrome não aceita o curinga para Authorization —
+        // com o cabeçalho, a pré-checagem de CORS falhava e NENHUM aviso saía (teste de 25/11, 12:16).
         const tok = ntfyToken();
         const oficial = /^https:\/\/ntfy\.sh\//.test(url);
         if (!tok || !oficial || ntfyTokenRecusado) return fetch(url, opt);
-        const r = await fetch(url, Object.assign({}, opt, { headers: Object.assign({}, (opt && opt.headers) || {}, { Authorization: 'Bearer ' + tok }) }));
+        const auth = btoa('Bearer ' + tok).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        let r;
+        try { r = await fetch(url + (url.includes('?') ? '&' : '?') + 'auth=' + auth, opt); }
+        catch (e) { console.warn('[PACS Plus] ntfy com token falhou; enviando sem o token', e); return fetch(url, opt); }
         if (r.status === 401 || r.status === 403) {
             ntfyTokenRecusado = true;
             console.warn('[PACS Plus] ntfy recusou o token da conta (HTTP ' + r.status + '); enviando sem o token');
