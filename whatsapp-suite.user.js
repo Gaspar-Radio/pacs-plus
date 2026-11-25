@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.11.2
+// @version      1.12.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -1550,6 +1550,15 @@ Regras obrigatórias:
             const n = currentChatName(); if (!n) { toast('Abra o grupo antes de clicar.', 3000); return; }
             i.value = n; grpSet({ [chave]: n }); grpRender(); toast('Grupo definido.', 2000); } })));
     };
+    const grpCampoPacs = (rotulo, chave, dica) => {
+      const i = el('input', { cls: 'gz-in', placeholder: dica }); i.value = pacsCfg()[chave] || '';
+      i.addEventListener('change', () => pacsSet({ [chave]: i.value.trim() || dica }));
+      return el('div', { style: 'margin-top:8px' }, el('div', { cls: 'gz-note', text: rotulo }),
+        el('div', { style: 'display:flex;gap:6px;align-items:center' }, i,
+          el('button', { cls: 'gz-b', text: 'Usar a conversa aberta', style: 'white-space:nowrap', onclick: () => {
+            const n = currentChatName(); if (!n) { toast('Abra a conversa do bot antes de clicar.', 3000); return; }
+            i.value = n; pacsSet({ [chave]: n }); toast('Contato definido.', 2000); } })));
+    };
     const preset = (w, z, h, rz) => {
       Object.assign(ui, { sideW: w, sideZoom: z, headZoom: h, railZoom: rz, layoutOn: true, sideHidden: false });
       saveUi(); renderUiCss(); setTimeout(zoomChecks, 50); openSettings();
@@ -1625,6 +1634,8 @@ Regras obrigatórias:
       sec('Avisos do PACS (mensagens "PACS:" no seu chat)'),
       chk('Avisar quando chegar uma mensagem "PACS:" (notificação sem som + cartão na tela)', () => pacsCfg().on, v => { pacsSet({ on: v }); if (v) pacsPedirPermissao(); }),
       chk('Marcar a conversa como não lida (a bolinha aparece também no celular)', () => pacsCfg().naoLida, v => pacsSet({ naoLida: v })),
+      chk('Avisar também o 1º paciente que chega pelo contato do bot (RRG) — um aviso só por período, mesmo que venha pelos dois caminhos', () => pacsCfg().rrg, v => { pacsSet({ rrg: v }); if (v) pacsPedirPermissao(); }),
+      grpCampoPacs('Nome do contato do bot (como aparece na lista)', 'rrgNome', 'RRG'),
       el('div', { cls: 'gz-row' }, btn('Testar o aviso', () => pacsAvisar('PACS: 🧪 Teste da Suíte — aviso funcionando.', true)), btn('📋 Copiar diagnóstico dos avisos', pacsCopiarDiag)),
       el('div', { cls: 'gz-note', text: 'Vale só neste computador e só com o WhatsApp Web aberto. As mensagens "PACS:" são os avisos do hospital que o OpenBot publica no seu chat "Mensagem para você mesmo". Nunca envia nada.' }),
 
@@ -2461,7 +2472,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     const cod = t => [...String(t).slice(0, 5)].map(c => c.codePointAt(0).toString(16)).join(' ');
     const d = { versao: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '?', cfg: pacsCfg(), base: pacsBase,
       notif: ('Notification' in window) ? Notification.permission : 'sem', foco: document.hasFocus(), ult: pacsUlt, naoLida: pacsNL, menuFalhou: pacsMenuFalhou,
-      vistos: Object.keys(pacsVistos).length, linhas: [] };
+      vistos: Object.keys(pacsVistos).length, copiaDuplicada: gzDup, copiasNaPagina: gzCopias, dono: gzSouDono(), rrg: rrgUlt, linhas: [] };
     for (const row of document.querySelectorAll(ROWS)) {
       if (!/PACS/.test(row.textContent || '')) continue;
       const tit = [...row.querySelectorAll('span[title]')].map(sp => sp.getAttribute('title') || '').filter(t => /PACS/.test(t)).map(t => ({ t: t.slice(0, 50), cod: cod(t) }));
@@ -2475,7 +2486,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     try { await navigator.clipboard.writeText(JSON.stringify(pacsDiag())); toast('Diagnóstico dos avisos copiado. Cole na conversa com o Claude.', 6000); }
     catch (_) { toast('Não consegui copiar. Tente de novo.', 3000); }
   }
-  const pacsCfg = () => Object.assign({ on: false, naoLida: true }, GM_getValue('pacs_alert', {}) || {});
+  const pacsCfg = () => Object.assign({ on: false, naoLida: true, rrg: true, rrgNome: 'RRG' }, GM_getValue('pacs_alert', {}) || {});
   const pacsSet = o => GM_setValue('pacs_alert', Object.assign(pacsCfg(), o));
   let pacsBase = false, pacsVistos = Object.assign({}, GM_getValue('pacs_alert_seen2', {}) || {}), pacsMenuFalhou = false; // texto → hora da última vez
 
@@ -2498,11 +2509,17 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     if (ks.length > 60) ks.slice(0, ks.length - 40).forEach(k => delete pacsVistos[k]);
     GM_setValue('pacs_alert_seen2', pacsVistos);
   }
-  function pacsAvisar(texto, teste) {
+  function pacsAvisar(texto, teste, rotulo, chaveExtra) {
     const corpo = (pacsLimpo(texto) || 'Novo aviso do PACS — abra a conversa "Mensagem para você mesmo".').slice(0, 400);
+    // v1.12.0: um aviso só por texto (15 min) e um só por período para o 1º paciente (OpenBot ou RRG, o que chegar antes)
+    const kCheg = chaveExtra || gzChaveChegada(corpo);
+    if (!teste) {
+      if (kCheg && gzJaAvisou(kCheg, 12 * 3600e3)) return;
+      if (!kCheg && gzJaAvisou('txt|' + gzHash(corpo), 15 * 60e3)) return;
+    }
     try {
       if ('Notification' in window && Notification.permission === 'granted') {
-        const n = new Notification('PACS — aviso', { body: corpo, silent: true, tag: 'gz-pacs-' + Date.now() });
+        const n = new Notification(rotulo ? rotulo.replace(' · ', ' — ') : 'PACS — aviso', { body: corpo, silent: true, tag: 'gz-pacs-' + gzHash(kCheg || corpo) });
         n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
       }
     } catch (_) {}
@@ -2510,7 +2527,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     let box = document.getElementById('gz-pacs');
     if (!box) { box = el('div', { id: 'gz-pacs' }); document.body.append(box); }
     const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-    const c = el('div', { cls: 'gz-pacs-c', title: 'Clique para fechar' }, el('b', { text: teste ? 'PACS · TESTE' : 'PACS · AVISO' }), document.createTextNode(corpo), el('small', { text: hora + ' · clique para fechar' }));
+    const c = el('div', { cls: 'gz-pacs-c', title: 'Clique para fechar' }, el('b', { text: teste ? 'PACS · TESTE' : (rotulo || 'PACS · AVISO') }), document.createTextNode(corpo), el('small', { text: hora + ' · clique para fechar' }));
     c.onclick = () => c.remove();
     box.prepend(c);
     { const cs = box.querySelectorAll('.gz-pacs-c'); for (let i = 5; i < cs.length; i++) cs[i].remove(); }
@@ -2543,8 +2560,86 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     pacsNLset('clicou na opção', { rotulo, tag, menuAindaAberto: menuAinda, linhaAindaNaLista: row.isConnected });
     return true;
   }
+  // v1.12.0 (25/11/2026) — avisos duplicados: (a) se a Suíte estiver instalada DUAS vezes no Tampermonkey, só a 1ª cópia
+  // que carregou na página avisa (marca no <html>); (b) o mesmo texto não vira 2 cartões/notificações em 15 min, venha de onde vier.
+  const GZ_EU = Math.random().toString(36).slice(2, 10);
+  let gzDup = false;
+  (function gzMarcarInstancia() {
+    try {
+      const h = document.documentElement;
+      if (!h) return;
+      if (h.dataset.gzSuite && h.dataset.gzSuite !== GZ_EU) { gzDup = true; return; }
+      h.dataset.gzSuite = GZ_EU;
+    } catch (_) {}
+  })();
+  const gzSouDono = () => { try { const v = document.documentElement.dataset.gzSuite; if (!v) { document.documentElement.dataset.gzSuite = GZ_EU; return true; } return v === GZ_EU; } catch (_) { return true; } };
+  let gzAvisouDup = false;
+  function gzDupAviso() {
+    if (gzAvisouDup) return; gzAvisouDup = true;
+    try { toast('A Suíte do WhatsApp está instalada DUAS vezes no Tampermonkey. Esta cópia não vai avisar (para não duplicar). Desative a cópia antiga no painel do Tampermonkey.', 9000); } catch (_) {}
+  }
+  // cópias da Suíte na página = quantos <style> com o CSS do cartão de aviso existem (cada cópia injeta o seu).
+  // Pega também uma cópia ANTIGA, que não conhece a marca no <html>: aí só dá para avisar o usuário.
+  let gzCopias = 1;
+  setTimeout(function gzContarCopias() {
+    try {
+      gzCopias = [...document.querySelectorAll('style')].filter(st => (st.textContent || '').includes('#gz-pacs{position:fixed')).length || 1;
+      if (gzCopias > 1 && gzSouDono()) { gzAvisouDup = true; toast('A Suíte do WhatsApp está instalada ' + gzCopias + ' vezes no Tampermonkey — por isso os avisos chegam repetidos. Abra o painel do Tampermonkey e desative/apague a cópia antiga (deixe só a "WhatsApp Web - Reescrever (Gaspar)" ' + ((typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '') + ').', 15000); }
+    } catch (_) {}
+  }, 8000);
+  const gzHash = t => { let h = 5381; const s = String(t || ''); for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+  // registro de avisos mostrados (texto → quando), na página (vale entre cópias da Suíte) e no GM (vale entre recargas)
+  function gzJaAvisou(chave, janelaMs) {
+    const agora = Date.now();
+    try {
+      const h = document.documentElement, mapa = JSON.parse(h.dataset.gzAvisos || '{}');
+      for (const k of Object.keys(mapa)) if (agora - mapa[k] > 6 * 3600e3) delete mapa[k];
+      if (mapa[chave] && agora - mapa[chave] < janelaMs) return true;
+      mapa[chave] = agora; h.dataset.gzAvisos = JSON.stringify(mapa);
+    } catch (_) {}
+    const g = Object.assign({}, GM_getValue('gz_avisos', {}) || {});
+    for (const k of Object.keys(g)) if (agora - g[k] > 6 * 3600e3) delete g[k];
+    if (g[chave] && agora - g[chave] < janelaMs) return true;
+    g[chave] = agora; GM_setValue('gz_avisos', g);
+    return false;
+  }
+  // 1º paciente: o mesmo aviso pode vir pelo OpenBot ("PACS: 🩺 1º paciente US (manhã) …") e pelo RRG ("🩺 1º paciente de US (manhã) …").
+  // A chave é dia + período: o 1º que chegar avisa, o outro é ignorado.
+  function gzChaveChegada(t) {
+    const m = pacsNorm(t).match(/1\s*[ºo°]\s*paciente[^()\n]*\((manh[ãa]|tarde)\)/i);
+    if (!m) return '';
+    return 'cheg|' + new Date().toLocaleDateString('sv-SE') + '|' + (/tarde/i.test(m[1]) ? 'tarde' : 'manha');
+  }
+  // contato do bot (RRG): só a prévia que fala do 1º paciente; o resto das conversas com o bot não vira aviso
+  const rrgVistos = Object.assign({}, GM_getValue('rrg_seen', {}) || {});
+  let rrgBase = false, rrgUlt = { quando: '', achou: false, hora: '', ehChegada: false };
+  function rrgVarrer() {
+    const c = pacsCfg();
+    if (!c.on || !c.rrg) return;
+    const alvo = grpChave(c.rrgNome || 'RRG');
+    const row = [...document.querySelectorAll(ROWS)].find(r => !r.closest('#gz-pinsec') && r.querySelector('span[title]') && grpChave(r.querySelector('span[title]').getAttribute('title')) === alvo);
+    rrgUlt = { quando: new Date().toLocaleTimeString('pt-BR'), achou: !!row, hora: '', ehChegada: false };
+    if (!row) return;
+    const info = grpLer(row);
+    const texto = [info.texto, ...info.tits.slice(1), info.previa].join(' \n ');
+    const chave = gzChaveChegada(texto);
+    rrgUlt.hora = info.hora; rrgUlt.ehChegada = !!chave;
+    if (!chave || !/^\d{1,2}:\d{2}$/.test(info.hora)) return;
+    const sig = chave + '|' + info.hora;
+    if (rrgVistos[sig]) return;
+    rrgVistos[sig] = Date.now();
+    const ks = Object.keys(rrgVistos); if (ks.length > 40) ks.slice(0, ks.length - 30).forEach(k => delete rrgVistos[k]);
+    GM_setValue('rrg_seen', rrgVistos);
+    if (!rrgBase) return; // 1ª varredura: só registra o que já estava na lista
+    const corpo = (info.tits[1] || info.texto || info.previa || '').replace(/\s*\n\s*/g, '\n').trim();
+    pacsAvisar(corpo || '🩺 1º paciente chegou — abra a conversa com o bot.', false, 'RRG · 1º PACIENTE', chave);
+    row.classList.add('gz-pacs-row'); // a mensagem vem de outro número: o WhatsApp já deixa como não lida e notifica o celular
+  }
+  setInterval(() => { try { if (gzDup || !gzSouDono()) { if (gzDup) gzDupAviso(); return; } rrgVarrer(); rrgBase = true; } catch (_) {} }, 3000);
+
   function pacsVarrer() {
     if (!pacsCfg().on) return;
+    if (gzDup || !gzSouDono()) { if (gzDup) gzDupAviso(); return; }
     const rows = [...document.querySelectorAll(ROWS)];
     if (!rows.length) return;
     const novos = []; let comPacs = 0;
@@ -2709,6 +2804,8 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   }
   function grpNovo(g, info, motivo, row, c, teste) {
     const d = new Date();
+    // v1.12.0: a mesma mensagem do mesmo grupo não vira 2 pendentes/notificações (2 cópias da Suíte, ou a linha relida)
+    if (!teste && gzJaAvisou('grp|' + g.id + '|' + (info.hora || '') + '|' + gzHash(grpChave(info.texto || info.previa || '')), 30 * 60e3)) return;
     grpPend.push({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 6), g: g.id, chave: g.chave, grupo: g.nome, rot: motivo,
       hora: info.hora || d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), dia: d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }),
       quem: String(info.quem || '').slice(0, 40), txt: String(info.texto || '').slice(0, 220), ts: Date.now() });
@@ -2718,7 +2815,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
     if (teste || !c.horario || grpNoHorario(d)) {
       try {
         if ('Notification' in window && Notification.permission === 'granted') {
-          const n = new Notification('WhatsApp — ' + motivo, { body: g.nome + ' · ' + (info.hora || ''), silent: true, tag: 'gz-grp-' + Date.now() });
+          const n = new Notification('WhatsApp — ' + motivo, { body: g.nome + ' · ' + (info.hora || ''), silent: true, tag: 'gz-grp-' + gzHash(g.id + '|' + (info.hora || '') + '|' + (info.texto || '')) });
           n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
         }
       } catch (_) {}
@@ -2736,6 +2833,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
   function grpVarrer() {
     const c = grpCfg();
     if (!c.on) return;
+    if (gzDup || !gzSouDono()) { if (gzDup) gzDupAviso(); return; }
     const alvos = grpAlvos(c);
     if (!alvos.length) return;
     const feito = {};
