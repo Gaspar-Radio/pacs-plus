@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.58.1
+// @version      1.59.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -1431,7 +1431,9 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         const agora = quando || Date.now();
         const exs = Object.values(g.exames || {}).map(y => y.d);
         const exTxt = exs.slice(0, 3).join(' + ') + (exs.length > 3 ? ` +${exs.length - 3}` : '');
-        const info = [exTxt, g.idade != null ? g.idade + ' a' : '', g.conv, g.ficha ? 'ficha ' + g.ficha : ''].filter(Boolean).join(' · ');
+        // v1.59.0: o que sai deste computador (ntfy) vai SEM a idade — minimização de dados; a tela deste PC continua com a idade
+        const info = [exTxt, g.conv, g.ficha ? 'ficha ' + g.ficha : ''].filter(Boolean).join(' · ');
+        const infoTela = [exTxt, g.idade != null ? g.idade + ' a' : '', g.conv, g.ficha ? 'ficha ' + g.ficha : ''].filter(Boolean).join(' · ');
         const v = g.vence ? hm(g.vence) : '—', falta = (g.vence || agora) - agora;
         const prov = g.provisorio ? ' · prazo provisório (sem confirmação)' : '';
         const ign = '\n(se já liberou, ignore)';
@@ -1451,7 +1453,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
             const d = g.vence - (g.encerradoEm || agora);
             r = [d >= 0 ? `✅ TC urgente liberado — ${faltaTxt(d)} antes do prazo` : `✅ TC urgente liberado — ${faltaTxt(-d)} após o prazo`, `${info}\nPrazo ${v} · liberado ${hm(g.encerradoEm || agora)}`, 2, 'white_check_mark', 'info', 0];
         } else r = ['ℹ Urgência retirada ou exame cancelado', `${info}\nLembretes cancelados.`, 2, 'information_source', 'info', -1];
-        return { titulo: r[0], msg: r[1], prio: r[2], tags: r[3], nivel: r[4], poPrio: r[5], tela: (g.nome ? g.nome + ' · ' : '') + r[1] };
+        return { titulo: r[0], msg: r[1], prio: r[2], tags: r[3], nivel: r[4], poPrio: r[5], tela: (g.nome ? g.nome + ' · ' : '') + String(r[1]).replace(info, infoTela) };
     }
 
     // ---- eventos ----
