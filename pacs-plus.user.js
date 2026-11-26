@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.2
+// @version      1.63.3
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -507,6 +507,11 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 .v-dialog__content .v-input--checkbox .v-input--selection-controls__input { transform: scale(0.9); margin-right: 5px !important; }`,
         filtros: `
 .v-main .row.row--dense .v-label, .v-main .row.row--dense .v-select__selection, .v-main .row.row--dense input, .v-main .row.row--dense .v-text-field input { font-size: 13px !important; }
+/* v1.63.3: o resumo “2 filtro(s)” dos filtros com seleção múltipla é um <span> sem classe (16 px), fora da regra acima; em campo estreito
+   (Urgente, Situação) quebrava em duas linhas e a faixa de filtros crescia de 58 para 92 px. Mesma letra dos outros campos, numa linha só. */
+.v-main .row.row--dense .v-input .v-select__selections > span:not([class]) { font-size: 13px !important; line-height: 18px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; flex: 0 1 auto !important; min-width: 0 !important; }
+.v-main .row.row--dense .v-input .v-select__selections:has(> span:not([class])) { flex-wrap: nowrap !important; }
+.v-main .row.row--dense .v-input .v-select__selections:has(> span:not([class])) > input { min-width: 0 !important; flex: 1 1 0 !important; width: 0 !important; }
 .v-main button[title="Pesquisar"], .v-main button[title="Limpar Filtros"] { height: 34px !important; width: 34px !important; }
 .v-main button[title="Pesquisar"] .v-icon, .v-main button[title="Limpar Filtros"] .v-icon { font-size: 22px !important; }
 .v-main button[title="Relatórios"] { display: inline-flex !important; height: 34px !important; width: 34px !important; min-width: 34px !important; }
@@ -610,6 +615,7 @@ ${C} .v-dialog__content .v-btn { font-size: 11px !important; padding: 0 8px !imp
 ${C} .v-dialog__content .row.align-center.justify-center.align-content-center { font-size: 12px !important; }
 ${C} .v-dialog__content .row.align-center.justify-center.align-content-center .v-btn { padding: 0 6px !important; font-size: 11px !important; }
 ${C} .v-main .row.row--dense .v-label, ${C} .v-main .row.row--dense .v-select__selection, ${C} .v-main .row.row--dense input, ${C} .v-main .row.row--dense .v-text-field input { font-size: 12px !important; }
+${C} .v-main .row.row--dense .v-input .v-select__selections > span:not([class]) { font-size: 12px !important; }
 ${C} .v-main button[title="Pesquisar"], ${C} .v-main button[title="Limpar Filtros"], ${C} .v-main button[title="Salvar Filtro"], ${C} .v-main button[title="Mostrar/Ocultar Filtros"] { height: 30px !important; width: 30px !important; }
 ${C} .v-main button[title="Pesquisar"] .v-icon, ${C} .v-main button[title="Limpar Filtros"] .v-icon, ${C} .v-main button[title="Salvar Filtro"] .v-icon, ${C} .v-main button[title="Mostrar/Ocultar Filtros"] .v-icon { font-size: 20px !important; }
 ${C} .v-main .v-card__title.pa-2.mb-2 { font-size: 15px !important; padding: 4px 8px !important; }
