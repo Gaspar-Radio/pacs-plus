@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.0
+// @version      1.63.1
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -638,8 +638,10 @@ ${C} #pp-btn { top: 6px; }`;
     // Larguras em PIXELS para colunas de conteúdo curto (não “comem” espaço em meia tela).
     // Paciente e Exame ficam sem largura fixa e dividem igualmente o que sobrar.
     const COL_PX = {
-        normal:   { idade: 48, data: 92, hora: 70, mod: 46, convenio: 110, prazo: 122, situacao: 100 },
-        compacta: { idade: 40, data: 80, hora: 60, mod: 40, convenio: 92, prazo: 104, situacao: 86 }
+        // v1.63.1 (pedido 25/11/2026): Idade, Data, Hora (agora HH:MM), Mod. e Convênio tinham folga; o espaço foi todo para o Exame
+        // (medido no Mac a 1022 px, densidade compacta: Exame tinha 90 px para nomes de até 194 px; passou a ~190 px).
+        normal:   { idade: 36, data: 80, hora: 42, mod: 30, convenio: 82, prazo: 122, situacao: 96 },
+        compacta: { idade: 30, data: 64, hora: 34, mod: 26, convenio: 66, prazo: 98, situacao: 82 }
     };
     const COL_EXTRAS = ['id paciente', 'unidade', 'tipo', 'valor', 'repasse'];
     const FILTROS_MOSTRAR = ['paciente', 'data exame', 'data inicial', 'data final', 'modalidades', 'situacao', 'urgente'];
@@ -682,8 +684,17 @@ ${C} #pp-btn { top: 6px; }`;
             if (names[0] === '') css += on('ocultarSelecao')
                 ? hideCol(1)
                 : `${cell(1)} { display: table-cell !important; width: 34px !important; min-width: 34px !important; max-width: 34px !important; padding: 0 2px !important; text-align: center !important; overflow: visible !important; }\n`;
-            ['data', 'hora', 'mod'].forEach(n => { const i = idx(n); if (i) css += `${cell(i)} { padding-left: 2px !important; padding-right: 2px !important; }\n`; });
-            Object.entries(COL_PX[densidadeAtual()]).forEach(([n, w]) => { const i = idx(n); if (i) css += `${cell(i)} { width: ${w}px !important; min-width: ${w}px !important; max-width: ${w}px !important; box-sizing: border-box !important; }\n`; });
+            // v1.63.1: seletor reforçado — na densidade compacta a regra geral (padding 0 6px) vencia e cortava Idade/Data/Hora
+            const SF = S + '[data-pp-lista][data-pp-lista]', cellF = i => `${SF} th:nth-child(${i}), ${SF} td:nth-child(${i})`;
+            ['data', 'hora', 'mod', 'idade'].forEach(n => { const i = idx(n); if (i) css += `${cellF(i)} { padding-left: 2px !important; padding-right: 2px !important; }\n`; });
+            { const i = idx('convenio'); if (i) css += `${cellF(i)} { padding-left: 4px !important; padding-right: 4px !important; }\n`; }
+            // v1.63.1: o título de cada coluna é um botão do PACS com 16 px de respiro de cada lado e letras espaçadas — era ele que
+            // estourava as colunas estreitas (Hora pedia 62 px numa coluna de 34). Sem o respiro, todos os títulos cabem inteiros.
+            css += `${SF} thead th > .v-btn { padding: 0 !important; min-width: 0 !important; letter-spacing: 0 !important; }
+${SF} thead th > .v-btn--block { display: inline-flex !important; width: auto !important; max-width: 100% !important; flex: 0 1 auto !important; }\n`;
+            const colPx = Object.assign({}, COL_PX[densidadeAtual()]);
+            if (!on('abreviar')) colPx.hora += densidadeAtual() === 'compacta' ? 18 : 24; // sem a abreviação a hora continua HH:MM:SS
+            Object.entries(colPx).forEach(([n, w]) => { const i = idx(n); if (i) css += `${cell(i)} { width: ${w}px !important; min-width: ${w}px !important; max-width: ${w}px !important; box-sizing: border-box !important; }\n`; });
             { const i = idx('paciente'); if (i) css += `${cell(i)} { width: 17% !important; max-width: none !important; min-width: 0 !important; }\n`; }
             { const i = idx('exame'); if (i) css += `${cell(i)} { width: auto !important; max-width: none !important; min-width: 0 !important; }\n`; }
             const iConv = idx('convenio');
@@ -828,6 +839,7 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
     const siglaModalidade = v => { const t = String(v || '').trim(); const i = t.indexOf(' - '); return i > 0 ? t.slice(0, i).trim() : t; };
 
     // Troca o texto visível mantendo o original no “title” (passar o mouse)
+    const horaCurta = v => String(v).replace(/^(\d{2}:\d{2}):\d{2}$/, '$1');
     function transformCell(el, fn) {
         if (!(el instanceof HTMLElement)) return;
         const atual = (el.textContent || '').trim();
@@ -848,11 +860,12 @@ ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; ve
         if (on('abreviar')) {
             const f = findListTable();
             if (f) {
-                const iE = f.names.indexOf('exame'), iC = f.names.indexOf('convenio');
+                const iE = f.names.indexOf('exame'), iC = f.names.indexOf('convenio'), iH = f.names.indexOf('hora');
                 f.t.querySelectorAll('tbody > tr').forEach(tr => {
                     const c = tr.children;
                     if (iE >= 0 && c[iE]) transformCell(c[iE], transformExamText);
                     if (iC >= 0 && c[iC]) transformCell(c[iC], transformInsuranceText);
+                    if (iH >= 0 && c[iH]) transformCell(c[iH], horaCurta); // v1.63.1: 14:55:00 → 14:55 (a hora cheia fica na dica)
                 });
             }
             document.querySelectorAll('#datatableExamesHistorico tbody td:first-child .v-list-item__title').forEach(el => transformCell(el, v => abreviarExame(transformExamText(v))));
@@ -3945,6 +3958,26 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
 .v-dialog__content .pp-ico-btn{min-width:0 !important;width:40px !important;height:40px !important;padding:0 !important;margin:0 2px !important;background:transparent !important;box-shadow:none !important;}
 .v-dialog__content .pp-ico-btn .v-icon{font-size:27px !important;}
 .v-dialog__content [data-pp-crit]{margin-left:10px !important;}`;
+    // v1.63.1 — barra de botões do laudo (ícones + Aberto/Digitado/Revisar/Liberar/Cancelar) sempre inteira na tela.
+    // O PACS divide a linha em duas metades fixas (col-6): a metade dos botões não cabia e o Cancelar ficava cortado a 100%
+    // de zoom (~1000 px de largura). Agora cada metade ocupa só o que precisa e, abaixo de 1280 px, os ícones e botões
+    // ficam mais justos. Conferido no Mac (1022 px, paciente TESTE): ícones 11–424 px, botões 526–997 px.
+    const BARRA_LAUDO = '.v-dialog__content .row:has(> [class*="col"] > .row.pp-rodape)';
+    setCss('pp-barra-laudo-css', `
+${BARRA_LAUDO} { flex-wrap: nowrap !important; justify-content: space-between !important; margin-left: 0 !important; margin-right: 0 !important; }
+${BARRA_LAUDO} > [class*="col"] { flex: 0 1 auto !important; width: auto !important; max-width: none !important; min-width: 0 !important; padding-left: 4px !important; padding-right: 4px !important; }
+${BARRA_LAUDO} > [class*="col"] > .row { flex-wrap: nowrap !important; margin-left: 0 !important; margin-right: 0 !important; justify-content: flex-start !important; }
+${BARRA_LAUDO} > [class*="col"] > .row.pp-rodape { justify-content: flex-end !important; }
+@media (max-width: 1280px) {
+${BARRA_LAUDO} > [class*="col"] > .row > .v-btn.v-btn--icon, ${BARRA_LAUDO} .pp-ico-btn { width: 32px !important; height: 34px !important; min-width: 0 !important; margin: 0 !important; padding: 0 !important; }
+${BARRA_LAUDO} > [class*="col"] > .row > .v-btn.v-btn--icon .v-icon, ${BARRA_LAUDO} .pp-ico-btn .v-icon { font-size: 24px !important; }
+${BARRA_LAUDO} > [class*="col"] > .row > .v-input { margin-left: 2px !important; margin-right: 2px !important; }
+${BARRA_LAUDO} [data-pp-crit] { margin-left: 4px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn { padding: 0 7px !important; margin: 0 1px !important; font-size: 12.5px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-rod-conf { width: 34px !important; padding: 0 !important; margin-left: 6px !important; }
+html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.pp-canc-sep { min-width: 86px !important; padding: 0 10px !important; margin-left: 10px !important; font-size: 13px !important; }
+}
+@media (max-width: 900px) { ${BARRA_LAUDO} { flex-wrap: wrap !important; } }`);
     function comIcone(cls, mdi, cor, titulo, onClick) {
         const b = document.createElement('button'); b.type = 'button'; b.className = 'v-btn v-btn--icon v-btn--round theme--dark pp-ico-btn ' + cls; b.title = titulo;
         b.innerHTML = `<span class="v-btn__content"><i aria-hidden="true" class="v-icon notranslate mdi ${mdi} theme--dark" style="color:${cor};"></i></span>`;
@@ -4091,18 +4124,20 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
     const quemTitulo = q => q.k === 'gaspar' ? 'Laudo liberado por você' : 'Laudo liberado pela telelaudo' + (q.nome ? ' (' + q.nome + ')' : '');
     const convCurto = x => { const c = String((x && x.convenio && x.convenio.conv_descricao) || '').trim(); return c ? transformInsuranceText(c) : ''; };
     // selos numa célula do PACS (lista principal / histórico do laudo)
-    function selosNo(td, x, comConv, inicio) { // inicio: antes do texto (a célula do exame corta o fim com reticências)
+    // inicio: antes do texto (a célula do exame corta o fim com reticências) · semQuem: só o convênio · fixo: duas casas de
+    // largura fixa (convênio + quem), para as Ações do histórico ficarem alinhadas em todas as linhas
+    function selosNo(td, x, comConv, inicio, semQuem, fixo) {
         if (!td) return;
         const liga = on('selosQuem');
-        const q = liga ? quemLiberou(x) : null, cv = liga && comConv ? convCurto(x) : '';
+        const q = liga && !semQuem ? quemLiberou(x) : null, cv = liga && comConv ? convCurto(x) : '';
         let box = td.querySelector('.pp-selos');
-        if (!q && !cv) { if (box) box.remove(); return; }
-        const sig = (q ? q.k + '|' + q.nome : '') + '§' + cv;
+        if (!liga || (!q && !cv && !fixo)) { if (box) box.remove(); return; }
+        const sig = (q ? q.k + '|' + q.nome : '') + '§' + cv + (fixo ? '§f' : '');
         if (box && box.dataset.sig === sig) return;
-        if (!box) { box = document.createElement('span'); box.className = 'pp-selos' + (inicio ? ' ini' : ''); if (inicio) td.insertBefore(box, td.firstChild); else td.appendChild(box); }
+        if (!box) { box = document.createElement('span'); box.className = 'pp-selos' + (inicio ? ' ini' : '') + (fixo ? ' fixo' : ''); if (inicio) td.insertBefore(box, td.firstChild); else td.appendChild(box); }
         box.dataset.sig = sig;
-        box.innerHTML = (cv ? `<span class="pp-conv" data-t="${esc(cv)}" title="Convênio: ${esc(String(x.convenio.conv_descricao))}"></span>` : '')
-            + (q ? `<span class="pp-quem ${q.k}" data-t="${QUEM_TXT[q.k]}" title="${esc(quemTitulo(q))}"></span>` : '');
+        box.innerHTML = (cv ? `<span class="pp-conv" data-t="${esc(cv)}" title="Convênio: ${esc(String(x.convenio.conv_descricao))}"></span>` : fixo ? '<span class="pp-conv vazio"></span>' : '')
+            + (q ? `<span class="pp-quem ${q.k}" data-t="${QUEM_TXT[q.k]}" title="${esc(quemTitulo(q))}"></span>` : fixo ? '<span class="pp-quem vazio"></span>' : '');
     }
     function selosLista() {
         const f = findListTable(), comp = f && componenteLista();
@@ -4111,7 +4146,8 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
         if (linhas.length !== comp.exames.length) return;
         const temConv = f.names.includes('convenio'); // coluna nativa já mostra o convênio
-        linhas.forEach((tr, i) => selosNo(tr.children[iEx], comp.exames[i], !temConv, true));
+        // v1.63.1: na lista principal NÃO vai o selo de quem liberou (pedido do usuário: tirava espaço do nome do exame) — só nos históricos
+        linhas.forEach((tr, i) => selosNo(tr.children[iEx], comp.exames[i], !temConv, true, true));
     }
     // histórico de dentro do laudo: selos na célula da Situação da linha
     function hiSelos(tr, it) {
@@ -4119,12 +4155,16 @@ ${cr.obs ? `<div class="pr-obs">${cr.hist ? 'IA: ' : ''}${esc(cr.obs)}</div>` : 
         const sit = norm(it.exa_situacao);
         const tds = [...tr.children];
         const td = tds.find(c => { const t = norm(c.textContent); return !!sit && (t === sit || t.startsWith(sit)); }) || tds.find(c => c.offsetParent && norm(c.textContent)) || null;
-        selosNo(td, it, true);
+        selosNo(td, it, true, false, false, true);
     }
     setInterval(() => { try { if (cfg.master && !ehViewer()) selosLista(); } catch (e) { /* segue */ } }, 1500);
     setCss('pp-selos-css', `
 .pp-selos { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; white-space: nowrap; }
 .pp-selos.ini { margin-left: 0; margin-right: 6px; }
+.pp-selos.fixo > span { box-sizing: border-box; text-align: center; overflow: hidden; text-overflow: ellipsis; }
+.pp-selos.fixo > .pp-conv { width: 62px; max-width: 62px; } .pp-selos.fixo > .pp-quem { width: 46px; } .pp-selos.fixo > .vazio { background: none; }
+#datatableExamesHistorico td:has(> .pp-selos.fixo) { white-space: nowrap !important; text-align: left !important; }
+#datatableExamesHistorico td:has(> .pp-selos.fixo) .v-chip { min-width: 70px !important; justify-content: center !important; }
 .pp-selos > span::after { content: attr(data-t); }
 .pp-quem, .pp-conv { display: inline-block; font: 700 10px/15px Roboto, Arial, sans-serif; padding: 0 5px; border-radius: 8px; letter-spacing: 0; }
 .pp-quem.gaspar { background: #166534; color: #dcfce7; } .pp-quem.tele { background: #475569; color: #e2e8f0; }
