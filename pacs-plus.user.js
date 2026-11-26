@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.1
+// @version      1.63.2
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -74,6 +74,7 @@
         ['barraSuperior', 'Barra superior baixa (40 px)', ''],
         ['editor', 'Editor de laudo em uma linha', 'Oculta Link, Pesquisar/substituir, Citação e Indentação; fonte 15 px'],
         ['editorBotao6', 'Editor: ocultar botão “Formatação”', 'Localizado pelo nome do botão'],
+        ['ocultarDitado', 'Editor: ocultar o microfone de ditado do PACS', 'O botão “Iniciar/parar transcrição” da barra do editor (o ditado usado é o do ChatGPT)'],
         ['esticar', 'Lista ocupando a tela toda', ''],
         ['viewerRecolherSerieUnica', 'Visualizador: recolher painel quando o exame tem UMA série', 'Regra do antigo “AM2 - Recolher painel de série única” (qualquer modalidade)'],
         ['viewerRecolherUS', 'Visualizador: recolher painel sempre no ultrassom', 'Mesmo que o US tenha mais de uma série'],
@@ -85,7 +86,7 @@
     ];
 
     // v1.18 — botões da barra do CKEditor ocultados (início do nome que aparece ao passar o mouse; um por linha)
-    const CK_OCULTAR_PADRAO = 'Titulo\nSelecionar tudo\nLinha horizontal'; // 1.18.1: Quebra de página voltou (o usuário usa)
+    const CK_OCULTAR_PADRAO = 'Titulo\nSelecionar tudo\nLinha horizontal\nTachado'; // 1.18.1: Quebra de página voltou (o usuário usa)
     const DEFAULT_OFF = ['ocultarRelatorios', 'ocultarSelecao', 'viewerRecolherTodos']; // começam desligados
     const LARGURA_COMPACTA = 1400; // modo automático: janela mais estreita que isto => compacto (ex.: meia tela)
 
@@ -158,6 +159,8 @@
         c.plantao = Object.assign({ on: false, ontem: false }, c.plantao || {});
         if (typeof c.ckOcultar !== 'string') c.ckOcultar = CK_OCULTAR_PADRAO;
         if (!c.ckMig1181) { c.ckOcultar = c.ckOcultar.split('\n').filter(x => x.trim() !== 'Quebra de página').join('\n'); c.ckMig1181 = true; }
+        // v1.63.2 (pedido 25/11/2026): Tachado sai da barra — uma vez só; se o usuário apagar a linha em ⚙️ Ajustes, o botão volta
+        if (!c.ckMig1632) { if (!c.ckOcultar.split('\n').some(x => x.trim() === 'Tachado')) c.ckOcultar = (c.ckOcultar.trim() ? c.ckOcultar.replace(/\s+$/, '') + '\n' : '') + 'Tachado'; c.ckMig1632 = true; }
         c.sla = Object.assign({}, SLA_PADRAO, c.sla || {});
         c.urg = Object.assign({}, URG_PADRAO, c.urg || {});
         c.cheg = Object.assign({}, CHEG_PADRAO, c.cheg || {});
@@ -226,10 +229,13 @@
 #datatableExamesHistorico td:nth-child(7), #datatableExamesHistorico th:nth-child(7),
 #datatableExamesHistorico td:nth-child(8), #datatableExamesHistorico th:nth-child(8),
 #datatableExamesHistorico td:nth-child(11), #datatableExamesHistorico th:nth-child(11) { display: none !important; }
-#datatableExamesHistorico th:nth-child(1),  #datatableExamesHistorico td:nth-child(1)  { width: 44% !important; max-width: 44% !important; }
-#datatableExamesHistorico th:nth-child(6),  #datatableExamesHistorico td:nth-child(6)  { width: 18% !important; max-width: 18% !important; }
-#datatableExamesHistorico th:nth-child(9),  #datatableExamesHistorico td:nth-child(9)  { width: 16% !important; max-width: 16% !important; }
-#datatableExamesHistorico th:nth-child(10), #datatableExamesHistorico td:nth-child(10) { width: 22% !important; max-width: 22% !important; }
+/* v1.63.2: larguras em px. Em % a Situação ficava com 16% (161 px numa janela de 1023) e os selos de convênio / quem liberou (193 px)
+   vazavam por cima dos ícones de Ações. O <colgroup> do PACS (11 colunas, 7 ocultas) reservava espaço e some, como na lista principal. */
+#datatableExamesHistorico table > colgroup { display: none !important; }
+#datatableExamesHistorico th:nth-child(1),  #datatableExamesHistorico td:nth-child(1)  { width: auto !important; max-width: none !important; }
+#datatableExamesHistorico th:nth-child(6),  #datatableExamesHistorico td:nth-child(6)  { width: 132px !important; max-width: 132px !important; }
+#datatableExamesHistorico th:nth-child(9),  #datatableExamesHistorico td:nth-child(9)  { width: 200px !important; max-width: 200px !important; }
+#datatableExamesHistorico th:nth-child(10), #datatableExamesHistorico td:nth-child(10) { width: 196px !important; max-width: 196px !important; }
 #datatableExamesHistorico td:nth-child(10) { white-space: nowrap !important; overflow: visible !important; }
 #datatableExamesHistorico td:nth-child(10) > *, #datatableExamesHistorico td:nth-child(10) .row { display: inline-flex !important; flex-wrap: nowrap !important; align-items: center !important; width: auto !important; margin: 0 4px 0 0 !important; vertical-align: middle !important; }
 #datatableExamesHistorico td:nth-child(10) .v-btn { height: 20px !important; min-height: 20px !important; }
@@ -545,9 +551,16 @@ header.v-app-bar.v-toolbar--dense .v-toolbar__content .v-btn { height: 40px !imp
 .document-editor__toolbar > .v-btn { height: 28px !important; font-size: 13px !important; padding: 0 8px !important; min-width: 0 !important; }
 .document-editor__toolbar > .v-btn .v-btn__content { font-size: 13px !important; }
 .document-editor__toolbar > .ck.ck-toolbar { flex: 1 1 0 !important; width: auto !important; min-width: 0 !important; max-width: none !important; border: none !important; background: transparent !important; }
+/* v1.63.2: 🧮 e 📐 tinham 50 px (largura mínima do PACS) para um ícone só; botões do editor 2 px mais estreitos e seta dos menus mais perto —
+   com o microfone e o Tachado fora, a barra do editor volta a caber em UMA linha (medido: 658 px de botões em 685 disponíveis a 1023 px). */
+html body .document-editor__toolbar > .v-btn:is(.pp-calc-laudo, .pp-cls-laudo) { min-width: 0 !important; width: 34px !important; padding: 0 !important; }
+html body .document-editor__toolbar .ck.ck-toolbar .ck-button { min-width: 28px !important; }
+html body .document-editor__toolbar .ck.ck-toolbar .ck-dropdown__arrow { margin-left: 3px !important; }
 .ck.ck-content, .ck.ck-editor__editable { font-size: 15px !important; line-height: 1.5 !important; }`,
         editorBotao6: `
 .document-editor__toolbar > .v-btn[data-pp-oculto] { display: none !important; }`,
+        ocultarDitado: `
+.document-editor__toolbar > .v-btn:has(.mdi-microphone-message) { display: none !important; }`,
         ocultarRelatorios: `
 .v-main button[title="Relatórios"] { display: none !important; }`,
         preFiltros: `
@@ -3968,6 +3981,13 @@ ${BARRA_LAUDO} { flex-wrap: nowrap !important; justify-content: space-between !i
 ${BARRA_LAUDO} > [class*="col"] { flex: 0 1 auto !important; width: auto !important; max-width: none !important; min-width: 0 !important; padding-left: 4px !important; padding-right: 4px !important; }
 ${BARRA_LAUDO} > [class*="col"] > .row { flex-wrap: nowrap !important; margin-left: 0 !important; margin-right: 0 !important; justify-content: flex-start !important; }
 ${BARRA_LAUDO} > [class*="col"] > .row.pp-rodape { justify-content: flex-end !important; }
+/* v1.63.2: a barra tinha margem negativa (-12 px) em cima e embaixo e os botões (34 px) passavam da caixa dela: o topo dos botões
+   entrava 2 px no histórico de exames. Agora a barra tem a altura dos botões, com 6 px de respiro acima (histórico) e abaixo (editor). */
+html body ${BARRA_LAUDO} { margin-top: 0 !important; margin-bottom: 0 !important; }
+html body ${BARRA_LAUDO} > [class*="col"] { padding-top: 0 !important; padding-bottom: 0 !important; }
+html body ${BARRA_LAUDO} > [class*="col"] > .row { margin-top: 0 !important; margin-bottom: 0 !important; }
+html body .v-dialog__content .v-expansion-panels:has(+ .row > [class*="col"] > .row.pp-rodape) { padding-bottom: 6px !important; }
+html body ${BARRA_LAUDO} + div { margin-top: 6px !important; }
 @media (max-width: 1280px) {
 ${BARRA_LAUDO} > [class*="col"] > .row > .v-btn.v-btn--icon, ${BARRA_LAUDO} .pp-ico-btn { width: 32px !important; height: 34px !important; min-width: 0 !important; margin: 0 !important; padding: 0 !important; }
 ${BARRA_LAUDO} > [class*="col"] > .row > .v-btn.v-btn--icon .v-icon, ${BARRA_LAUDO} .pp-ico-btn .v-icon { font-size: 24px !important; }
