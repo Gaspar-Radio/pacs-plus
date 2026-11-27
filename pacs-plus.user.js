@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.3
+// @version      1.63.4
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -743,9 +743,12 @@ ${S} td:nth-child(${iP}) .v-chip { font-size: 11px !important; padding: 0 5px !i
 ${S} td:nth-child(${iP}) .v-chip .v-chip__content { padding: 0 !important; }
 ${S} td:nth-child(${iP}) .v-icon { font-size: 14px !important; margin-left: 2px !important; }\n`;
             const iS = idx('situacao');
+            // v1.63.4: o “C” de crítico ocupava 19 px DENTRO da célula e empurrava “Liberado” 13 px para cima das Ações.
+            // Agora fica pendurado à esquerda, no vão entre Prazo e Situação (medido: o relógio do prazo termina 14 px antes), e a Situação não sai do lugar.
             if (iS) css += `${S} td:nth-child(${iS}) { overflow: visible !important; white-space: nowrap !important; padding: 0 4px !important; }
 ${S} td:nth-child(${iS}) .v-tooltip { display: none !important; }
-${S} td:nth-child(${iS}) .v-chip.red { display: inline-flex !important; vertical-align: middle !important; min-width: 16px !important; width: 16px !important; height: 16px !important; padding: 0 !important; font-size: 9px !important; border-radius: 50% !important; margin-right: 3px !important; }
+${S} td:nth-child(${iS}) { position: relative !important; }
+${S} td:nth-child(${iS}) .v-chip.red { display: inline-flex !important; vertical-align: middle !important; min-width: 16px !important; width: 16px !important; height: 16px !important; padding: 0 !important; font-size: 9px !important; border-radius: 50% !important; margin: -8px 0 0 0 !important; position: absolute !important; left: -14px !important; top: 50% !important; z-index: 1 !important; }
 ${S} td:nth-child(${iS}) .v-chip.red .v-chip__content { padding: 0 !important; justify-content: center !important; }
 ${S} td:nth-child(${iS}) .v-chip:not(.red) { display: inline-flex !important; vertical-align: middle !important; font-size: 11px !important; padding: 0 5px !important; height: 20px !important; letter-spacing: 0 !important; }\n`;
         }
@@ -4100,18 +4103,21 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
     function comIconesLista() {
         const f = findListTable(), comp = f && componenteLista();
         if (!f || !comp) return;
-        const iAc = f.names.indexOf('acoes'); if (iAc < 0) return;
+        // v1.63.4: o 📣 saiu das Ações (ficava embaixo do menu ⋮ e não dava para clicar) e foi para a coluna Prazo,
+        // que está sempre vazia em exame LIBERADO. Sem coluna Prazo na tela, continua nas Ações.
+        const iPz = f.names.indexOf('prazo'), iAc = iPz >= 0 ? iPz : f.names.indexOf('acoes'); if (iAc < 0) return;
         const linhas = [...f.t.querySelectorAll('tbody > tr')];
         if (linhas.length !== comp.exames.length) return;
         linhas.forEach((tr, i) => {
             const ex = comp.exames[i], td = tr.children[iAc]; if (!td) return;
+            tr.querySelectorAll('[data-pp-com]').forEach(x => { if (x.parentElement !== td) x.remove(); }); // sobra de versão/coluna anterior
             let b = td.querySelector(':scope [data-pp-com]');
             const crit = ex && ex.laudo && ex.laudo.lau_idncritico && String(ex.exa_situacao || '').toUpperCase() === 'LIBERADO';
             if (!crit) { if (b) b.remove(); return; }
             const exa = ex.exa_codigo, ok = comOk.get(exa) === true;
             if (!b) {
                 b = document.createElement('button'); b.type = 'button'; b.setAttribute('data-pp-com', 'true');
-                b.className = 'v-btn v-btn--icon theme--dark v-size--small';
+                b.className = 'v-btn v-btn--icon theme--dark v-size--small' + (iPz >= 0 ? ' pp-com-pz' : '');
                 b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); abrirComunicacao(Number(b.dataset.exa), 'lista'); });
                 td.appendChild(b);
                 comJaRegistrado(exa);
@@ -4123,6 +4129,10 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
             b.style.cssText = ok ? 'color:#4ade80 !important;filter:none' : 'color:#94a3b8 !important';
         });
     }
+    setCss('pp-com-pz-css', `
+.v-data-table[data-pp-lista] td:has(> .pp-com-pz) { position: relative !important; overflow: visible !important; }
+.v-data-table[data-pp-lista] td > .pp-com-pz.pp-com-pz { position: absolute !important; right: 18px !important; top: 50% !important; margin: -11px 0 0 0 !important; width: auto !important; min-width: 22px !important; height: 22px !important; padding: 0 2px !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; background: none !important; border: 0 !important; cursor: pointer !important; white-space: nowrap !important; }
+.v-data-table[data-pp-lista] td > .pp-com-pz:hover { background: rgba(127,127,127,.22) !important; border-radius: 4px !important; }`);
     setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
     // ---------- v1.63.0: convênio + quem liberou (Gaspar / Tele) na lista e nos dois históricos ----------
     // Usa só o que o PACS já entrega (usu_codigo_radiologista, usu_radiologista, convenio) — nenhuma consulta extra.
