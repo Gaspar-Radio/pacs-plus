@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.5
+// @version      1.64.0
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -44,6 +44,7 @@
         ['listaLeve', 'Lista leve (desempenho)', 'Evita travamento na lista: o prazo só é regravado quando o minuto ou a cor mudam (em vez de a cada segundo), a página volta a 50 exames ao sair do Plantão e o contador do 🕘 só roda em listas de até 100 linhas. O que aparece na coluna Prazo não muda'],
         ['historicoLista', 'Lista: 🕘 histórico do paciente', 'Ícone 🕘 em cada exame da lista principal: abre o histórico do paciente (imagens, imprimir, ler o laudo e comentários) sem abrir o laudo'],
         ['historicoAcoes', 'Histórico: anexos, comentários e anamnese', 'Em cada exame anterior aparecem 📎 Anexos (só leitura), 💬 Comentários e 📄 Anamnese, com as mesmas cores da lista principal'],
+        ['esperaAgenda', 'Lista: tempo de espera da Agenda na coluna Prazo', 'Nos exames de hoje sem prazo (ultrassom): ⏳ e os minutos de espera vindos da Agenda, com a cor do SLA; ✓ quando já foi atendido. Passe o mouse para ver chegada, horário marcado e pontualidade. Precisa da Agenda logada na nuvem.'],
         ['selosQuem', 'Convênio e quem liberou (Gaspar / Tele)', 'Na lista e nos dois históricos de exames: o convênio (onde a coluna não aparece) e, nos exames liberados, o selo “Gaspar” (liberado por você) ou “Tele” (telelaudo). Sem consultas extras ao PACS'],
         ['classLaudo', 'Classificações na tela do laudo (FIGO / MUSA)', 'Botão 📐 na barra do editor: FIGO dos miomas e MUSA da adenomiose (sinais diretos e indiretos), com desenho e descrição; clicar num item insere o termo no cursor do laudo'],
         ['barraUnica', 'Barra única no topo', 'Agenda, Plus e Anamnese TC lado a lado na barra do PACS (sem cobrir o logo nem uns aos outros) + avisos: nuvem da Agenda e TC urgente'],
@@ -234,7 +235,7 @@
 #datatableExamesHistorico table > colgroup { display: none !important; }
 #datatableExamesHistorico th:nth-child(1),  #datatableExamesHistorico td:nth-child(1)  { width: auto !important; max-width: none !important; }
 #datatableExamesHistorico th:nth-child(6),  #datatableExamesHistorico td:nth-child(6)  { width: 132px !important; max-width: 132px !important; }
-#datatableExamesHistorico th:nth-child(9),  #datatableExamesHistorico td:nth-child(9)  { width: 200px !important; max-width: 200px !important; }
+#datatableExamesHistorico th:nth-child(9),  #datatableExamesHistorico td:nth-child(9)  { width: 220px !important; max-width: 220px !important; } /* v1.64.0: +20 px para o “C” de crítico */
 #datatableExamesHistorico th:nth-child(10), #datatableExamesHistorico td:nth-child(10) { width: 196px !important; max-width: 196px !important; }
 #datatableExamesHistorico td:nth-child(10) { white-space: nowrap !important; overflow: visible !important; }
 #datatableExamesHistorico td:nth-child(10) > *, #datatableExamesHistorico td:nth-child(10) .row { display: inline-flex !important; flex-wrap: nowrap !important; align-items: center !important; width: auto !important; margin: 0 4px 0 0 !important; vertical-align: middle !important; }
@@ -4134,6 +4135,92 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 .v-data-table[data-pp-lista] td > .pp-com-pz.pp-com-pz { position: absolute !important; right: 18px !important; top: 50% !important; margin: -11px 0 0 0 !important; width: auto !important; min-width: 22px !important; height: 22px !important; padding: 0 2px !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; background: none !important; border: 0 !important; cursor: pointer !important; white-space: nowrap !important; }
 .v-data-table[data-pp-lista] td > .pp-com-pz:hover { background: rgba(127,127,127,.22) !important; border-radius: 4px !important; }`);
     setInterval(() => { try { if (cfg.master && on('revisaoIA')) { comBotoesLaudo(); comIconesLista(); } } catch (e) { /* segue */ } }, 1500);
+    // ---------- v1.64.0: tempo de espera da Agenda na coluna Prazo (exames de hoje sem prazo, ex.: ultrassom) ----------
+    // Lê a tabela da Agenda na nuvem (mesma sessão da Agenda, só leitura) e casa pelo código do exame (pacs_exame_ids) ou do paciente.
+    // Mesmas regras da Agenda: eletivo conta do que for mais tarde (ficha ou horário marcado); urgência e encaixe contam da ficha.
+    const EA_ENCAIXE = ['encaixe', 'encaixe_pacs', 'encaixe_manual', 'encaixe_rapido'];
+    let eaLinhas = [], eaDia = '', eaEm = 0, eaOk = false;
+    const eaHoje = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+    const eaFmt = min => min == null || isNaN(min) ? '-' : min < 60 ? min + 'm' : Math.floor(min / 60) + 'h' + String(min % 60).padStart(2, '0') + 'm';
+    const eaHora = iso => { const d = new Date(iso); return isNaN(d) ? '' : String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+    function eaMarcadoMs(dia, hora) {
+        const h = /^(\d{2}):(\d{2})/.exec(String(hora || '')), d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dia || ''));
+        if (!h || !d || (h[1] === '00' && h[2] === '00')) return null;
+        return new Date(+d[1], +d[2] - 1, +d[3], +h[1], +h[2], 0, 0).getTime();
+    }
+    // devolve { k: 'esp'|'ok', min, sla, dica } ou null
+    function eaCalc(r, agora) {
+        if (!r || !r.chegou_em) return null;
+        const c = new Date(r.chegou_em).getTime(); if (isNaN(c)) return null;
+        const enc = EA_ENCAIXE.includes(r.origem) || /^encaixe/i.test(String(r.origem || '')), urg = r.urgente != null ? !!r.urgente : (r.tipo === 'SUS Hospitalar' || /^SUS\b/i.test(String(r.convenio || ''))); // mesma regra da Agenda (urgEfetivo)
+        const m = enc ? null : eaMarcadoMs(r.data_agenda, r.hora);
+        const ini = (urg || m == null) ? c : Math.max(c, m);
+        const dica = ['Chegou ' + eaHora(r.chegou_em) + (m != null ? ' · marcado ' + String(r.hora).slice(0, 5) : enc ? ' · encaixe' : '')];
+        if (m != null) { const p = Math.trunc((c - m) / 60000); if (p !== 0) dica.push('chegou ' + eaFmt(Math.abs(p)) + (p < 0 ? ' antes' : ' depois') + ' do horário'); }
+        if (urg) dica.push('urgência');
+        if (r.status === 'atendido') {
+            const f = r.atendido_em ? new Date(r.atendido_em).getTime() : NaN;
+            const min = !isNaN(f) ? Math.max(0, Math.floor((f - ini) / 60000)) : (r.tempo_espera_min != null ? Number(r.tempo_espera_min) : null);
+            if (min == null) return null;
+            dica.push('atendido ' + (r.atendido_em ? eaHora(r.atendido_em) : '') + ' · esperou ' + eaFmt(min) + (!isNaN(f) && ini !== c ? ' (desde a chegada: ' + eaFmt(Math.max(0, Math.floor((f - c) / 60000))) + ')' : ''));
+            return { k: 'ok', min, sla: '', dica: dica.join(' · ') };
+        }
+        if (r.status !== 'esperando') return null;
+        const min = agora <= ini ? 0 : Math.floor((agora - ini) / 60000);
+        if (ini !== c) dica.push('na casa há ' + eaFmt(Math.max(0, Math.floor((agora - c) / 60000))));
+        dica.push('espera ' + eaFmt(min) + (urg ? '' : ' (conta do horário marcado)'));
+        return { k: 'esp', min, sla: urg ? '' : min >= 60 ? 'v' : min >= 45 ? 'l' : min >= 30 ? 'a' : '', dica: dica.join(' · ') };
+    }
+    function eaAchar(ex) {
+        const cod = Number(ex && ex.exa_codigo), pac = Number(ex && ex.pac_codigo);
+        const porExame = eaLinhas.find(r => Array.isArray(r.pacs_exame_ids) && r.pacs_exame_ids.map(Number).includes(cod));
+        if (porExame || String(ex && ex.exa_data || '').slice(0, 10) !== eaDia) return porExame || null; // pelo paciente só vale para exame de hoje
+        return eaLinhas.filter(r => pac > 0 && Number(r.pacs_paciente_id) === pac).sort((a, b) => String(a.hora).localeCompare(String(b.hora)))[0] || null;
+    }
+    async function eaBaixar() {
+        const n = sessaoNuvemPlus(); if (!n) { eaOk = false; return; }
+        const dia = eaHoje();
+        try {
+            const r = await fetch(n.url + '/rest/v1/agenda_exames?data_agenda=eq.' + dia + '&chegou_em=not.is.null&select=data_agenda,hora,tipo,convenio,status,origem,urgente,chegou_em,atendido_em,tempo_espera_min,pacs_paciente_id,pacs_exame_ids', { headers: lpmHdr(n) });
+            if (!r.ok) { eaOk = false; return; }
+            const d = await r.json(); if (!Array.isArray(d)) return;
+            eaLinhas = d; eaDia = dia; eaEm = Date.now(); eaOk = true;
+        } catch (e) { eaOk = false; }
+    }
+    function eaPintar() {
+        const f = findListTable(), comp = f && componenteLista();
+        if (!f || !comp) return;
+        const iPz = f.names.indexOf('prazo'); if (iPz < 0) return;
+        const linhas = [...f.t.querySelectorAll('tbody > tr')];
+        if (linhas.length !== comp.exames.length) return;
+        const liga = cfg.master && on('esperaAgenda') && eaOk && eaDia === eaHoje(), agora = Date.now();
+        linhas.forEach((tr, i) => {
+            const td = tr.children[iPz]; if (!td) return;
+            let b = td.querySelector(':scope > .pp-esp');
+            const ex = comp.exames[i];
+            // só onde o PACS não mostra prazo (sem chip nativo) e sem o 📣 da comunicação; o casamento com a Agenda de hoje já limita ao dia
+            const livre = liga && ex && !td.querySelector('.v-chip, .pp-com-pz');
+            const info = livre ? eaCalc(eaAchar(ex), agora) : null;
+            if (!info) { if (b) b.remove(); return; }
+            const txt = (info.k === 'ok' ? '✓ ' : '⏳ ') + eaFmt(info.min), cls = 'pp-esp ' + info.k + (info.sla ? ' s-' + info.sla : '');
+            if (!b) { b = document.createElement('span'); td.appendChild(b); }
+            if (b.className !== cls) b.className = cls;
+            if (b.dataset.t !== txt) b.dataset.t = txt;
+            if (b.title !== info.dica) b.title = info.dica;
+        });
+    }
+    setCss('pp-esp-css', `
+.v-data-table[data-pp-lista] td > .pp-esp { display: inline-block; font: 700 11px/18px Roboto, Arial, sans-serif; padding: 0 7px; border-radius: 9px; white-space: nowrap; background: rgba(127,127,127,.22); color: inherit; cursor: default; }
+.v-data-table[data-pp-lista] td > .pp-esp::after { content: attr(data-t); }
+.v-data-table[data-pp-lista] td > .pp-esp.esp { background: #1e3a8a; color: #dbeafe; }
+.v-data-table[data-pp-lista] td > .pp-esp.esp.s-a { background: #a16207; color: #fef9c3; }
+.v-data-table[data-pp-lista] td > .pp-esp.esp.s-l { background: #c2410c; color: #ffedd5; }
+.v-data-table[data-pp-lista] td > .pp-esp.esp.s-v { background: #b91c1c; color: #fee2e2; }
+.v-data-table[data-pp-lista] td > .pp-esp.ok { opacity: .75; font-weight: 600; }`);
+    setInterval(() => { try { if (cfg.master && on('esperaAgenda') && !ehViewer() && !document.hidden && Date.now() - eaEm > 55000) eaBaixar().then(eaPintar); } catch (e) { /* segue */ } }, 15000);
+    setInterval(() => { try { if (!ehViewer()) eaPintar(); } catch (e) { /* segue */ } }, 5000);
+    setTimeout(() => { try { if (cfg.master && on('esperaAgenda') && !ehViewer()) eaBaixar().then(eaPintar); } catch (e) { /* segue */ } }, 4000);
+
     // ---------- v1.63.0: convênio + quem liberou (Gaspar / Tele) na lista e nos dois históricos ----------
     // Usa só o que o PACS já entrega (usu_codigo_radiologista, usu_radiologista, convenio) — nenhuma consulta extra.
     // "Gaspar" = o radiologista do exame LIBERADO é o usuário logado (usu_codigo do token); qualquer outro = telelaudo
@@ -4190,7 +4277,11 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
         if (!tr || !it) return;
         const sit = norm(it.exa_situacao);
         const tds = [...tr.children];
-        const td = tds.find(c => { const t = norm(c.textContent); return !!sit && (t === sit || t.startsWith(sit)); }) || tds.find(c => c.offsetParent && norm(c.textContent)) || null;
+        // v1.64.0: com achado crítico a célula traz dois chips (“C” + “Liberado”) e o texto vira “C Liberado”: a busca pelo texto
+        // falhava e os selos caíam na 1ª coluna (embaixo do nome do exame). Agora acha a célula pelo CHIP da situação.
+        const td = (sit && tds.find(c => [...c.querySelectorAll('.v-chip')].some(ch => norm(ch.textContent) === sit)))
+            || tds.find(c => { const t = norm(c.textContent); return !!sit && (t === sit || t.startsWith(sit) || t.endsWith(' ' + sit)); }) || null;
+        tr.querySelectorAll('.pp-selos').forEach(b => { if (b.parentElement !== td) b.remove(); }); // selo que ficou em outra coluna
         selosNo(td, it, true, false, false, true);
     }
     setInterval(() => { try { if (cfg.master && !ehViewer()) selosLista(); } catch (e) { /* segue */ } }, 1500);
@@ -4200,7 +4291,10 @@ html body .v-dialog__content .row.pp-rodape.pp-rodape.pp-rodape > .v-btn.v-btn.p
 .pp-selos.fixo > span { box-sizing: border-box; text-align: center; overflow: hidden; text-overflow: ellipsis; }
 .pp-selos.fixo > .pp-conv { width: 62px; max-width: 62px; } .pp-selos.fixo > .pp-quem { width: 46px; } .pp-selos.fixo > .vazio { background: none; }
 #datatableExamesHistorico td:has(> .pp-selos.fixo) { white-space: nowrap !important; text-align: left !important; }
-#datatableExamesHistorico td:has(> .pp-selos.fixo) .v-chip { min-width: 70px !important; justify-content: center !important; }
+#datatableExamesHistorico td:has(> .pp-selos.fixo) .v-chip:not(.red) { min-width: 70px !important; justify-content: center !important; }
+#datatableExamesHistorico td .v-chip.red { display: inline-flex !important; vertical-align: middle !important; min-width: 16px !important; width: 16px !important; height: 16px !important; padding: 0 !important; font-size: 9px !important; border-radius: 50% !important; margin: 0 3px 0 0 !important; }
+#datatableExamesHistorico td .v-chip.red .v-chip__content { padding: 0 !important; justify-content: center !important; }
+#datatableExamesHistorico td:has(.v-chip.red) .v-tooltip { display: none !important; }
 .pp-selos > span::after { content: attr(data-t); }
 .pp-quem, .pp-conv { display: inline-block; font: 700 10px/15px Roboto, Arial, sans-serif; padding: 0 5px; border-radius: 8px; letter-spacing: 0; }
 .pp-quem.gaspar { background: #166534; color: #dcfce7; } .pp-quem.tele { background: #475569; color: #e2e8f0; }
