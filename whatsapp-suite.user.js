@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web - Reescrever (Gaspar)
 // @namespace    gaspar.rad
-// @version      1.12.1
+// @version      1.13.0
 // @description  Reescreve o rascunho com Gemini usando o contexto da conversa (Alt+R) e transcreve áudios com botão em cada mensagem (Alt+T = último tocado). Também: barra de conversas ajustável (largura/zoom/ocultar), limpeza de botões, fixados ilimitados, esconder elementos (ex.: Blueticks) e modo privacidade (Alt+S). Nunca envia sozinho.
 // @match        https://web.whatsapp.com/*
 // @updateURL    https://raw.githubusercontent.com/Gaspar-Radio/pacs-plus/main/whatsapp-suite.user.js
@@ -50,6 +50,8 @@
     const id = recent ? lastClick.id : 'audio_' + Date.now();
     const prev = audios.get(id);
     if (prev && prev.blob === blob) { lastAudioId = id; return; }
+    // v1.13: balão que já mostra uma transcrição salva só ganha o áudio (para o “Refazer”); não perde o texto
+    if (prev && !prev.blob && prev.transcript) { prev.blob = blob; lastAudioId = id; setTimeout(() => { bump(id); showAudioChip(); }, 0); return; }
     audios.set(id, { blob, at: Date.now(), transcript: null });
     lastAudioId = id;
     setTimeout(() => { decorateAll(); showAudioChip(); }, 0);
@@ -453,6 +455,85 @@ Regras obrigatórias:
   }
 
   // =====================================================================
+  // 7B. TRANSCRIÇÕES SALVAS (v1.13) — neste computador (Tampermonkey) + nuvem (tabela wa_transcricoes), 90 dias
+  // =====================================================================
+  // Chave = id da mensagem do WhatsApp (data-id), igual em qualquer computador. Cada áudio é pago uma vez só:
+  // ao abrir a conversa, o texto salvo aparece embaixo do balão sem dar play. “Refazer” é o único que gasta de novo.
+  const TR_KEY = 'tr_store', TR_DIAS = 90, TR_MAX = 4000;
+  let trStore = null, trOcupado = false, trTimer = null;
+  const trLigado = () => GM_getValue('tr_guardar', true) !== false;
+  const trIdOk = id => typeof id === 'string' && /^(true|false)_[^_]+@[^_]+_.+/.test(id); // só mensagem real (não o id provisório “audio_…”)
+  function trAll() {
+    if (!trStore) {
+      trStore = GM_getValue(TR_KEY, {}) || {};
+      const lim = Date.now() - TR_DIAS * 864e5; let mud = false;
+      for (const k of Object.keys(trStore)) if (!(trStore[k] && trStore[k].t && trStore[k].at > lim)) { delete trStore[k]; mud = true; }
+      if (mud) GM_setValue(TR_KEY, trStore);
+    }
+    return trStore;
+  }
+  function trGravarLocal() {
+    const ks = Object.keys(trStore);
+    if (ks.length > TR_MAX) ks.sort((a, b) => trStore[a].at - trStore[b].at).slice(0, ks.length - TR_MAX).forEach(k => delete trStore[k]);
+    GM_setValue(TR_KEY, trStore);
+  }
+  function trSalvar(id, a) {
+    if (!trLigado() || !trIdOk(id) || !a || !a.transcript) return;
+    const bm = Object.assign({}, a.byModel || {}); if (a.model) delete bm[a.model];
+    trAll()[id] = { t: a.transcript, m: a.model || '', s: a.summary || '', bm, at: Date.now(), up: 0 };
+    trGravarLocal();
+    clearTimeout(trTimer); trTimer = setTimeout(trSincronizar, 1500);
+  }
+  // mostra as transcrições salvas nos balões visíveis, sem precisar dar play
+  function trAplicar() {
+    if (!trLigado()) return;
+    const s = trAll();
+    document.querySelectorAll('#main [data-id]').forEach(r => {
+      const id = r.getAttribute('data-id'), reg = id && s[id];
+      if (!reg) return;
+      const a = audios.get(id);
+      if (a && (a.transcript || a.busy)) return;
+      const n = a || { blob: null, at: reg.at };
+      n.transcript = reg.t; n.model = reg.m || null; n.summary = reg.s || null; n.byModel = Object.assign({}, reg.bm || {}); n.salva = true;
+      audios.set(id, n);
+    });
+  }
+  // nuvem: sobe o que está pendente e baixa o que mudou desde a última vez. Falha não atrapalha: tenta de novo no próximo ciclo.
+  async function trSincronizar() {
+    const sb = getSb();
+    if (!trLigado() || !sb || !sb.refresh || trOcupado) return;
+    trOcupado = true;
+    try {
+      const tok = await sbToken(), s = trAll(), uid = getSb().uid;
+      const pend = Object.keys(s).filter(k => !s[k].up).slice(0, 50);
+      if (pend.length && uid) {
+        const corpo = pend.map(k => ({ user_id: uid, msg_id: k, texto: s[k].t, modelo: s[k].m || null, resumo: s[k].s || null, outros: s[k].bm || {}, updated_at: 'now' })); // 'now' = relógio do servidor
+        const marcas = pend.map(k => s[k].at);
+        const w = await sbReq('POST', '/rest/v1/wa_transcricoes?on_conflict=user_id,msg_id', corpo, tok);
+        if (w.status >= 200 && w.status < 300) { pend.forEach((k, i) => { if (s[k] && s[k].at === marcas[i]) s[k].up = 1; }); trGravarLocal(); }
+      }
+      const lim = new Date(Date.now() - TR_DIAS * 864e5).toISOString();
+      const desde = GM_getValue('tr_pull', '') || lim;
+      const r = await sbReq('GET', '/rest/v1/wa_transcricoes?select=msg_id,texto,modelo,resumo,outros,updated_at&updated_at=gt.' + encodeURIComponent(desde) + '&order=updated_at.asc&limit=1000', null, tok);
+      if (r.status === 200 && Array.isArray(r.json) && r.json.length) {
+        let mud = false;
+        r.json.forEach(x => {
+          const cur = s[x.msg_id];
+          if (cur && !cur.up) return; // o deste computador ainda não subiu: ele vale
+          if (cur && cur.t === x.texto && (cur.s || '') === (x.resumo || '')) return;
+          s[x.msg_id] = { t: x.texto, m: x.modelo || '', s: x.resumo || '', bm: x.outros || {}, at: Date.parse(x.updated_at) || Date.now(), up: 1 };
+          const a = audios.get(x.msg_id); if (a && !a.busy) { a.transcript = null; a.v = (a.v || 0) + 1; } // reaplica o texto novo
+          mud = true;
+        });
+        if (mud) trGravarLocal();
+        GM_setValue('tr_pull', r.json[r.json.length - 1].updated_at);
+      }
+    } catch (_) { /* próxima rodada */ } finally { trOcupado = false; }
+  }
+  setTimeout(trSincronizar, 9000);
+  setInterval(trSincronizar, 5 * 60e3);
+
+  // =====================================================================
   // 8. TRANSCRIÇÃO — botão e texto dentro do próprio balão do áudio
   // =====================================================================
   function rowOf(id) {
@@ -484,7 +565,7 @@ Regras obrigatórias:
         el('div', { text: a.transcript }),
         a.blob ? el('div', { cls: 'gz-tr-h', style: 'margin:4px 0 0' }, el('button', {
           text: '↻ Refazer com ' + modelName(/hydrogen/.test(a.model || '') ? MODEL_ALT : MODEL_MAIN) + ' (comparar)',
-          onclick: e => { e.stopPropagation(); retranscribe(id); } })) : null,
+          onclick: e => { e.stopPropagation(); retranscribe(id); } })) : el('div', { cls: 'gz-tr-h', style: 'margin:4px 0 0;opacity:.7', text: '💾 Transcrição salva — para refazer, dê play no áudio.' }),
         a.summary && a.showSum ? el('div', { cls: 'gz-tr-sum', text: a.summary }) : null);
       box.dataset.kind = 'tr'; box.dataset.v = String(a.v || 0);
     }
@@ -503,7 +584,7 @@ Regras obrigatórias:
     const alvo = /hydrogen/.test(a.model || '') ? MODEL_ALT : MODEL_MAIN;
     const pronto = Object.keys(a.byModel).find(m => m !== a.model && (alvo === MODEL_MAIN ? /hydrogen/.test(m) : !/hydrogen/.test(m)));
     a.summary = null;
-    if (pronto) { a.transcript = a.byModel[pronto]; a.model = pronto; return bump(id); }
+    if (pronto) { a.transcript = a.byModel[pronto]; a.model = pronto; trSalvar(id, a); return bump(id); }
     a.transcript = null;
     transcribe(id, alvo);
   }
@@ -527,7 +608,8 @@ Regras obrigatórias:
         if (a.byModel && a.model && a.byModel[a.model]) a.transcript = a.byModel[a.model]; // volta à anterior
         bump(id); return toast(err, 7000);
       }
-      a.transcript = out; a.model = model;
+      a.transcript = out; a.model = model; a.salva = false;
+      trSalvar(id, a);
       if (modelo && model !== modelo) toast(`${modelName(modelo)} indisponível agora; veio ${modelName(model)}.`, 5000);
       bump(id);
       if (!rowOf(id)) showTranscriptPanel(a); // áudio sem balão identificado
@@ -544,7 +626,7 @@ Regras obrigatórias:
       false, (err, out) => {
         a.busy = false;
         if (err) { bump(id); return toast(err, 7000); }
-        a.summary = out; a.showSum = true; bump(id);
+        a.summary = out; a.showSum = true; trSalvar(id, a); bump(id);
       });
   }
 
@@ -799,6 +881,7 @@ Regras obrigatórias:
     ensureFab();
     const fab = document.getElementById('gz-fab');
     if (fab) fab.style.display = document.querySelector('#main footer') && !GM_getValue('hide_fab', false) ? '' : 'none';
+    try { trAplicar(); } catch (_) {}
     decorateAll(); // a lista de mensagens é redesenhada ao rolar; recoloca botões/transcrições
   }, 1200);
 
@@ -1622,6 +1705,7 @@ Regras obrigatórias:
       chk('Recolher espaço vazio que sobrar no topo', () => ui.fixTop, v => { ui.fixTop = v; saveUi(); }),
 
       sec('Privacidade'),
+      chk('Guardar as transcrições de áudio (neste computador e na nuvem, 90 dias) — cada áudio é transcrito uma vez só', () => trLigado(), v => GM_setValue('tr_guardar', !!v)),
       chk('Recuperar mensagens apagadas (só na memória da aba)', () => ui.antiDelete !== false, v => { ui.antiDelete = v; saveUi(); }),
       chk('Desfocar conversas e mensagens (passe o mouse para ver) · Alt+P', () => ui.privacy, v => { ui.privacy = v; saveUi(); renderUiCss(); }),
 
@@ -2421,7 +2505,7 @@ Se a data for relativa (amanhã, sexta), converta. Se não houver data, use a da
         box.append(el('div', { cls: 'gz-row' },
           el('button', { cls: 'gz-b pri', text: '☁️ Sincronizar agora', onclick: async () => { await syncNow(false); draw(); } }),
           el('button', { cls: 'gz-b', text: 'Desconectar', onclick: () => { setSb(null); draw(); } })));
-        box.append(el('div', { cls: 'gz-note', text: 'Sincroniza: chave Gemini, calendários, base de referência, lembretes, fixadas e ajustes. Não sincroniza: mensagens apagadas e transcrições (ficam só na aba).' }));
+        box.append(el('div', { cls: 'gz-note', text: 'Sincroniza: chave Gemini, calendários, base de referência, lembretes, fixadas e ajustes. Transcrições de áudio: ficam salvas neste computador e na nuvem por 90 dias. Não sincroniza: mensagens apagadas (ficam só na aba).' }));
         return;
       }
       const url = el('input', { cls: 'gz-in', placeholder: 'Endereço do projeto (https://xxxx.supabase.co)' });
