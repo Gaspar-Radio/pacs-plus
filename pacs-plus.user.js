@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PACS LADI - Plus (visual, pesquisa e calculadoras)
 // @namespace    http://tampermonkey.net/
-// @version      1.63.4
+// @version      1.63.5
 // @description  Substitui o Stylus, o “AM2 - Otimizar textos e colunas” e o “AM2 - Recolher painel de série única” por ajustes liga/desliga que localizam colunas e campos pelo NOME (não pela posição), + pesquisa rápida (Radiopaedia, e-Anatomy, Radiology Assistant…), links rápidos, calculadoras radiológicas, monitor de TC urgente e aviso de chegada do 1º paciente de US (ntfy).
 // @author       Dr. Gabriel Gaspar
 // @match        *://pacs.ladi.org.br/*
@@ -5250,7 +5250,7 @@ ${(() => { const q = on('selosQuem') ? quemLiberou(x) : null; return q ? `<span 
     // Arrastar: segure o cabeçalho (barra de abas do Plus, título da Revisão/Comunicação/Trecho) e arraste.
     // Duplo clique no cabeçalho = volta à posição padrão. A posição fica guardada neste navegador.
     const ARR_KEY = 'pp_arrastar_v1';
-    const ARR_ALCA = { 'pp-panel': '.pp-tabs', 'pp-rev': '.pr-top', 'pp-com': 'h3', 'pp-sel-pop': '.ps-top', 'pp-hl': '.hl-top' };
+    const ARR_ALCA = { 'pp-panel': '.pp-tabs', 'pp-rev': '.pr-top', 'pp-com': 'h3', 'pp-sel-pop': '.ps-top', 'pp-hl': '.hl-top', 'pp-sel': '.ps-grip' };
     let arrPos = {}; try { arrPos = JSON.parse(localStorage.getItem(ARR_KEY) || '{}') || {}; } catch (e) { arrPos = {}; }
     function arrSalvar() { try { localStorage.setItem(ARR_KEY, JSON.stringify(arrPos)); } catch (e) { /* ok */ } }
     function arrAplicar(el) {
@@ -5280,14 +5280,15 @@ ${(() => { const q = on('selosQuem') ? quemLiberou(x) : null; return q ? `<span 
     document.addEventListener('dblclick', e => {
         for (const [id, sel] of Object.entries(ARR_ALCA)) {
             const win = document.getElementById(id);
-            if (win && win.contains(e.target) && e.target.closest(sel) && !e.target.closest('button, input, select, textarea')) { delete arrPos[id]; arrSalvar(); arrLimpar(win); if (id === 'pp-rev' && revAtual) renderRevisao(); return; }
+            if (win && win.contains(e.target) && e.target.closest(sel) && !e.target.closest('button, input, select, textarea')) { delete arrPos[id]; arrSalvar(); arrLimpar(win); if (id === 'pp-rev' && revAtual) renderRevisao(); if (id === 'pp-sel') selMostrar(); return; }
         }
     }, true);
     setInterval(() => { Object.keys(ARR_ALCA).forEach(id => { const el = document.getElementById(id); if (el && arrPos[id]) arrAplicar(el); }); }, 700);
-    setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top, #pp-hl .hl-top { cursor: move; user-select: none; }');
+    setCss('pp-arr-css', '#pp-panel .pp-tabs, #pp-rev .pr-top, #pp-com h3, #pp-sel-pop .ps-top, #pp-hl .hl-top, #pp-sel .ps-grip { cursor: move; user-select: none; }');
 
     // ---- Trecho selecionado no laudo: mini-barra ✍ Reescrever · 🛡 Revisar · 🧮 Volume · 💬 Pedir ----
-    const SEL_CSS = `#pp-sel .ps-l{display:flex;gap:2px} #pp-sel .ps-mais{display:none;border-top:1px solid #334155;margin-top:3px;padding-top:3px} #pp-sel.mais .ps-mais{display:flex}
+    const SEL_CSS = `#pp-sel .ps-grip{display:inline-flex;align-items:center;padding:0 5px 0 3px;color:#64748b;font-size:14px;line-height:1} #pp-sel .ps-grip:hover{color:#cbd5e1}
+#pp-sel .ps-l{display:flex;gap:2px} #pp-sel .ps-mais{display:none;border-top:1px solid #334155;margin-top:3px;padding-top:3px} #pp-sel.mais .ps-mais{display:flex}
 #pp-sel{position:fixed;z-index:10000004;display:flex;flex-direction:column;gap:0;padding:3px;background:#0f172a;border:1px solid #475569;border-radius:9px;box-shadow:0 8px 22px rgba(0,0,0,.55);font:600 12.5px -apple-system,"Segoe UI",Roboto,sans-serif}
 #pp-sel button{background:transparent;color:#e2e8f0;border:0;border-radius:6px;padding:5px 8px;cursor:pointer;font:inherit;white-space:nowrap}
 #pp-sel button:hover{background:#1e293b}
@@ -5320,6 +5321,7 @@ ${(() => { const q = on('selosQuem') ? quemLiberou(x) : null; return q ? `<span 
         if (!ed || !raiz || !s || s.isCollapsed || !s.rangeCount || !raiz.contains(s.anchorNode) || !raiz.contains(s.focusNode)) return selEsconder();
         const txt = s.toString().replace(/\s+/g, ' ').trim();
         if (txt.length < 2) return selEsconder();
+        if (document.querySelector('.v-dialog__content .ck-dropdown__panel-visible')) return selEsconder(); // v1.63.5: menu do editor aberto (cor, fonte…) — a barrinha não fica por cima
         selAtual = { txt, ed };
         setCss('pp-sel-css', SEL_CSS);
         let b = document.getElementById('pp-sel');
@@ -5331,16 +5333,20 @@ ${(() => { const q = on('selosQuem') ? quemLiberou(x) : null; return q ? `<span 
             document.body.appendChild(b);
         }
         const vol = medidasDe(txt), temNum = /\d/.test(txt) && /\b(mm|cm)\b/i.test(txt);
-        b.innerHTML = `<div class="ps-l"><button data-a="reescrever" title="Opus reescreve só este trecho (mesmo sentido; você confere antes de aplicar)">✍ Reescrever</button><button data-a="revisar" title="Opus revisa só este trecho">🛡 Revisar</button>${vol ? `<button data-a="volume" title="Volume do elipsoide (0,523 × D1 × D2 × D3) — cálculo exato, sem IA">🧮 Volume</button>` : ''}<button data-a="mais" title="Mais ações">⋯ Mais</button></div>` +
+        b.innerHTML = `<div class="ps-l"><span class="ps-grip" title="Arraste para mover a barrinha (ela passa a abrir sempre aí). Duplo clique: volta a acompanhar o trecho selecionado.">⠿</span><button data-a="reescrever" title="Opus reescreve só este trecho (mesmo sentido; você confere antes de aplicar)">✍ Reescrever</button><button data-a="revisar" title="Opus revisa só este trecho">🛡 Revisar</button>${vol ? `<button data-a="volume" title="Volume do elipsoide (0,523 × D1 × D2 × D3) — cálculo exato, sem IA">🧮 Volume</button>` : ''}<button data-a="mais" title="Mais ações">⋯ Mais</button></div>` +
             `<div class="ps-l ps-mais"><button data-a="encurtar" title="Deixa o trecho mais enxuto sem perder informação">✂ Encurtar</button>${temNum ? `<button data-a="medidas" title="Converte mm ↔ cm e padroniza o “x” (sem IA)">📏 mm↔cm</button>` : ''}<button data-a="classificar" title="Sugere TI-RADS, Bosniak, Fleischner, Lung-RADS, BI-RADS, O-RADS, LI-RADS, PI-RADS… com categoria e motivo">🏷 Classificar</button><button data-a="comparar" title="Compara com o laudo anterior do paciente e escreve a evolução">🕘 Comparar</button><button data-a="impressao" title="Escreve a IMPRESSÃO a partir dos achados (selecione a análise)">📝 Impressão</button><button data-a="pedir" title="Escreva o que quer que o Opus faça com este trecho">💬 Pedir…</button></div>`;
         const r = s.getRangeAt(0).getBoundingClientRect();
         const w = b.offsetWidth || 300;
         b.style.left = Math.round(Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8))) + 'px';
         b.style.top = Math.round(r.top > 60 ? r.top - 40 : r.bottom + 8) + 'px';
+        arrAplicar(b); // v1.63.5: se o usuário arrastou a barrinha, ela abre onde ele deixou
     }
-    document.addEventListener('mouseup', e => { if (e.target.closest && e.target.closest('#pp-sel')) return; setTimeout(selMostrar, 20); }, true);
+    // v1.63.5: a barrinha só (re)aparece quando o clique termina DENTRO do texto do laudo. Antes, clicar num botão do editor
+    // (ex.: cor da fonte) com texto selecionado fazia a barrinha voltar por cima do menu que acabava de abrir.
+    document.addEventListener('mouseup', e => { if (!e.target.closest || e.target.closest('#pp-sel')) return; const dentro = selIniDentro || !!e.target.closest('.v-dialog__content .ck-editor__editable'); selIniDentro = false; if (!dentro) return; setTimeout(selMostrar, 20); }, true);
     document.addEventListener('keyup', e => { if (e.shiftKey || e.key === 'Shift') setTimeout(selMostrar, 20); }, true);
-    document.addEventListener('mousedown', e => { if (!e.target.closest || !e.target.closest('#pp-sel')) selEsconder(); }, true);
+    let selIniDentro = false; // a seleção começou dentro do texto (vale mesmo se o mouse soltar fora dele)
+    document.addEventListener('mousedown', e => { if (!e.target.closest) return; if (!e.target.closest('#pp-sel')) { selEsconder(); selIniDentro = !!e.target.closest('.v-dialog__content .ck-editor__editable'); } }, true);
     document.addEventListener('scroll', selEsconder, true);
     function selMarcar(ed) {
         // marca o trecho no editor (acompanha edições) para inserir/substituir depois, mesmo se o cursor sair dali
